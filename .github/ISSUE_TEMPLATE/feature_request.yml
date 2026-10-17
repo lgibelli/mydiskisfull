@@ -1,0 +1,17 @@
+name: Feature request
+description: An idea for MyDiskIsFull
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What happened to your disk, or what you couldn't find out.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd like MyDiskIsFull to do
+    validations:
+      required: true

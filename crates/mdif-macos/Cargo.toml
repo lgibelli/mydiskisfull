@@ -1,0 +1,13 @@
+[package]
+name = "mdif-macos"
+description = "Thin, safe wrappers over the macOS calls MyDiskIsFull needs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

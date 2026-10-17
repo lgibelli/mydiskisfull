@@ -1,0 +1,18 @@
+[package]
+name = "mdif-cli"
+description = "Command-line front end for MyDiskIsFull"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mdif"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+mdif-core.workspace = true
+mdif-macos.workspace = true

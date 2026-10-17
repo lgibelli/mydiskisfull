@@ -1,0 +1,48 @@
+name: Release
+
+# Push a tag like v0.1.0 to publish a universal (Apple silicon + Intel)
+# build of the `mdif` command. Binaries are not notarized yet; see README.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Package universal binary
+        run: |
+          mkdir -p dist/pkg
+          lipo -create -output dist/pkg/mdif \
+            target/aarch64-apple-darwin/release/mdif \
+            target/x86_64-apple-darwin/release/mdif
+          lipo -info dist/pkg/mdif
+          cp README.md LICENSE CHANGELOG.md dist/pkg/
+          name="mdif-${GITHUB_REF_NAME}-macos-universal"
+          tar -C dist/pkg -czf "dist/${name}.tar.gz" .
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "MyDiskIsFull $GITHUB_REF_NAME" \
+            --generate-notes \
+            --prerelease
