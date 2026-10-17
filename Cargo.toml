@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/mdif-macos", "crates/mdif-core", "crates/mdif-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+
+# Versions pinned to what is already in the local cargo cache, so the
+# workspace builds with `cargo --offline` (see PLAN.md).
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.1", features = ["derive"] }
+libc = "0.2.190"
+plist = "1.10.1"
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+
+mdif-core = { path = "crates/mdif-core" }
+mdif-macos = { path = "crates/mdif-macos" }

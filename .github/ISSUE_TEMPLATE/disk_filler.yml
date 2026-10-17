@@ -1,0 +1,28 @@
+name: A disk filler we should catch
+description: Something filled your disk and nothing explained why
+labels: [detector]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These reports are how the detectors get better. Real cases are the most useful thing you
+        can contribute.
+  - type: input
+    id: culprit
+    attributes:
+      label: What was filling the disk
+      placeholder: "e.g. a sync client's logs, an app's cache, Time Machine snapshots"
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it behaved
+      description: Where it lived, how fast it grew, whether it came back after cleaning, how you found it.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: What fixed it (if anything)
+      description: The setting, cleanup or restart that stopped it from coming back.

@@ -1,0 +1,17 @@
+[package]
+name = "mdif-core"
+description = "Honest disk accounting, cleanup rules and trends for macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+plist.workspace = true
+rayon.workspace = true
+serde.workspace = true
+mdif-macos.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
