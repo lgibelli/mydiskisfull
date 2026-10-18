@@ -40,6 +40,8 @@ use mdif_core::watch::Watcher;
 const ROLE: &str = "MDIF_E2E_ROLE";
 const TARGET: &str = "MDIF_E2E_PATH";
 const LIFETIME: &str = "MDIF_E2E_SECS";
+/// Where a role keeps the count of bytes it has written (ground truth).
+const COUNT: &str = "MDIF_E2E_COUNT";
 
 const MB: u64 = 1 << 20;
 /// Seconds of history each real second stands for.
@@ -75,22 +77,30 @@ fn detects_filler_and_churner_and_nothing_else() {
     let _fill = Role::spawn(&bin, "fill", &filled, lifetime);
     let _churn = Role::spawn(&bin, "churn", &churned, lifetime);
     let _read = Role::spawn(&bin, "read", &churned, lifetime);
+    let churn_count = bin.join("mdif-e2e-churn.count");
 
-    // Ground truth for the filler, sampled alongside the watcher.
+    // Ground truth, sampled alongside the watcher: how big the filler's file
+    // is and how much the churner says it has written.
     let mut truth: Vec<(i64, u64)> = Vec::new();
+    let mut churn_truth: Vec<u64> = Vec::new();
     let fake0 = 1_700_000_000;
     let t0 = Instant::now();
     for i in 0..SAMPLES {
         let ts = fake0 + (t0.elapsed().as_secs_f64() * WARP) as i64;
         w.sample(ts).unwrap();
         truth.push((ts, fs::metadata(&filled).map_or(0, |m| m.len())));
+        churn_truth.push(
+            fs::read_to_string(&churn_count)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0),
+        );
         if i == SAMPLES / 2 {
             fs::remove_file(&seed).unwrap();
         }
         let next = t0 + Duration::from_secs(i as u64 + 1);
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
-    let real_secs = t0.elapsed().as_secs_f64();
 
     let pts = w.store().space_since(&key, 0).unwrap();
     let params = Params {
@@ -137,20 +147,22 @@ fn detects_filler_and_churner_and_nothing_else() {
     );
 
     // The churner is detected as the heavy writer, the filler writes about
-    // what it grows, and the reader writes nothing.
-    let churn = writers.get("mdif-e2e-churn").copied().unwrap_or(0);
-    let fill = writers.get("mdif-e2e-fill").copied().unwrap_or(0);
-    let churn_expected = CHURN_SIZE as f64 * real_secs / TICK.as_secs_f64();
-    let fill_expected = FILL_CHUNK as f64 * real_secs / TICK.as_secs_f64();
+    // what it grows, and the reader writes nothing. Compared with what each
+    // actually did between the first and last sample, not with its
+    // schedule, which a slow disk can't always keep.
+    let churn = writers.get("mdif-e2e-churn").copied().unwrap_or(0) as f64;
+    let fill = writers.get("mdif-e2e-fill").copied().unwrap_or(0) as f64;
+    let churn_expected = (churn_truth[churn_truth.len() - 1] - churn_truth[0]) as f64;
+    let fill_expected = (len_last - len_first) as f64;
     assert!(
-        churn as f64 >= 0.7 * churn_expected,
-        "churner wrote {churn} B, expected about {churn_expected:.0}"
+        (0.8 * churn_expected..1.5 * churn_expected).contains(&churn),
+        "churner: watcher measured {churn} B, it wrote {churn_expected}"
     );
     assert!(
-        (0.7 * fill_expected..3.0 * fill_expected).contains(&(fill as f64)),
-        "filler wrote {fill} B, expected about {fill_expected:.0}"
+        (0.8 * fill_expected..3.0 * fill_expected).contains(&fill),
+        "filler: watcher measured {fill} B, its file grew {fill_expected}"
     );
-    assert!(churn > 2 * fill);
+    assert!(churn > 2.0 * fill);
     assert!(
         !writers.contains_key("mdif-e2e-read"),
         "the reader only reads"
@@ -165,6 +177,8 @@ fn role() {
     };
     let path = PathBuf::from(std::env::var(TARGET).unwrap());
     let secs: u64 = std::env::var(LIFETIME).unwrap().parse().unwrap();
+    let count = std::env::var_os(COUNT).map(PathBuf::from);
+    let mut written = 0u64;
     let end = Instant::now() + Duration::from_secs(secs);
     let start = Instant::now();
     let mut tick = 0u32;
@@ -190,11 +204,15 @@ fn role() {
                 f.seek(SeekFrom::Start(0)).unwrap();
                 f.write_all(&chunk[..CHURN_SIZE as usize]).unwrap();
                 f.sync_data().unwrap();
+                written += CHURN_SIZE;
             }
             ("read", _) => {
                 std::hint::black_box(fs::read(&path).unwrap());
             }
             _ => panic!("unknown role {role}"),
+        }
+        if let Some(c) = &count {
+            fs::write(c, written.to_string()).unwrap();
         }
         // Deadline-based, so the rate holds whatever each tick costs.
         tick += 1;
@@ -216,6 +234,7 @@ impl Role {
             .env(ROLE, role)
             .env(TARGET, target)
             .env(LIFETIME, secs.to_string())
+            .env(COUNT, bin.join(format!("mdif-e2e-{role}.count")))
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
