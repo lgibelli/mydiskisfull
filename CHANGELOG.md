@@ -14,3 +14,7 @@ All notable changes to this project are documented here. The format is based on
 - A scanner built on `getattrlistbulk` that never follows symlinks, never leaves the volume, never
   enters cloud-only folders, and disables cloud-placeholder downloads for its process.
 - The plan: [docs/PLAN.md](docs/PLAN.md).
+
+### Security
+- File, folder and process names are printed with control characters and bidi overrides escaped
+  (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
