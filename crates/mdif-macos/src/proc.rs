@@ -95,7 +95,7 @@ pub fn files_open_for_writing(pid: i32) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut info = vec![0u8; VNODE_FDINFO_WITH_PATH];
     // struct proc_fdinfo { int32_t proc_fd; uint32_t proc_fdtype; }
-    for rec in buf[..n].chunks_exact(8) {
+    for rec in buf[..n].as_chunks::<8>().0 {
         let fd = i32::from_ne_bytes(rec[0..4].try_into().unwrap());
         let kind = u32::from_ne_bytes(rec[4..8].try_into().unwrap());
         if kind != libc::PROX_FDTYPE_VNODE as u32 {

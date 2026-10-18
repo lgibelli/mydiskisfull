@@ -173,7 +173,7 @@ impl Incident {
                 "{} wrote {} in {} while the disk kept {}: it is rewriting the same data \
                  ({} a day of SSD wear). A sync or log that is stuck is the usual cause; \
                  restarting it usually stops it.",
-                self.subject,
+                crate::text::printable(&self.subject),
                 bytes(self.amount),
                 span(self.window),
                 if self.fit < 0.005 {
@@ -521,6 +521,18 @@ mod tests {
             s.starts_with("OneDrive wrote 3.0 GB in 60 minutes while the disk kept 1%"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn process_names_cannot_inject_terminal_escapes() {
+        let mut i = churn_case(250_000_000, 0, 60).remove(0);
+        i.subject = "evil\u{1b}]0;pwned\u{7}\u{202e}".into();
+        let s = i.sentence(None);
+        assert!(
+            !s.contains('\u{1b}') && !s.contains('\u{7}') && !s.contains('\u{202e}'),
+            "{s:?}"
+        );
+        assert!(s.starts_with("evil\\u{1b}]0;pwned"), "{s:?}");
     }
 
     #[test]
