@@ -64,13 +64,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
+      # One owners period every 6 samples, the same ratio as the defaults (5 min, 30 min).
       - name: Sample every 5 s for 2 minutes, then check the cost at the default 5 minutes
         run: |
           db="$RUNNER_TEMP/budget.sqlite3"
-          ./target/release/mdif watch --quiet --interval 5 --db "$db" &
+          ./target/release/mdif watch --quiet --interval 5 --owners-every 30 --db "$db" &
           sleep 120
           kill %1
           ./target/release/mdif forecast --db "$db"
+          ./target/release/mdif owners --db "$db" --hours 1
+          ./target/release/mdif incidents --db "$db"
           ./target/release/mdif forecast --db "$db" --json | jq -e '.watcher_cost
             | .samples >= 20
               and .cpu_us_per_sample * 12 < 1000000

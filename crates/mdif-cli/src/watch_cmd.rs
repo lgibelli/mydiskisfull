@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
 use mdif_core::forecast::{self, DAY, Forecast, FullIn, HOUR, Params, Rate};
+use mdif_core::owners::Rules;
 use mdif_core::store::Store;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
@@ -17,13 +18,22 @@ const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
 const BUDGET_WRITES_PER_HOUR: u64 = 1_000_000;
 
 pub fn default_db() -> PathBuf {
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    home.join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
 }
 
-pub fn watch(db: &Path, volume: &Path, interval: Duration, once: bool, quiet: bool) -> Result<()> {
+pub fn watch(
+    db: &Path,
+    volume: &Path,
+    interval: Duration,
+    owners_every: u64,
+    once: bool,
+    quiet: bool,
+) -> Result<()> {
     let store = Store::open(db)?;
     let mut w = Watcher::new(store, volume)?;
+    if owners_every > 0 && !once {
+        w = w.with_owners(Rules::for_home(&home()), owners_every as i64)?;
+    }
     if once {
         print_sample(&w.sample(watch::unix_now())?);
         return Ok(());
@@ -36,13 +46,25 @@ pub fn watch(db: &Path, volume: &Path, interval: Duration, once: bool, quiet: bo
             db.display()
         );
     }
+    let home = home();
     watch::run(
         &mut w,
         interval,
         || false,
         |s| match s {
-            Ok(s) if !quiet => print_sample(s),
-            Ok(_) => {}
+            Ok(s) => {
+                if !quiet {
+                    print_sample(s);
+                }
+                // Logged even when quiet: the agent's log is where they go.
+                for i in &s.opened {
+                    eprintln!(
+                        "{} incident: {}",
+                        local(s.point.ts).format("%F %H:%M"),
+                        i.sentence(Some(&home))
+                    );
+                }
+            }
             Err(e) => eprintln!("{} sample failed: {e:#}", local_now().format("%F %T")),
         },
     );
@@ -61,6 +83,41 @@ fn print_sample(s: &watch::Sample) {
         bytes(s.point.avail),
         top
     );
+    if let Some(p) = s.period {
+        println!(
+            "      folders: {} changes, {} folders re-listed, {} remembered{}",
+            p.events,
+            p.listed,
+            p.tracked,
+            if p.gaps > 0 {
+                ", history incomplete"
+            } else {
+                ""
+            }
+        );
+        for (owner, d) in s.growth.iter().take(5) {
+            let sign = if *d < 0 { "-" } else { "+" };
+            println!(
+                "      {sign}{:>9}  {}",
+                bytes(d.unsigned_abs()),
+                printable(&tilde(owner))
+            );
+        }
+    }
+}
+
+pub(crate) fn home() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+}
+
+/// `/Users/me/x` as `~/x`.
+pub(crate) fn tilde(path: &str) -> String {
+    let home = home();
+    match Path::new(path).strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_string(),
+    }
 }
 
 pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
@@ -87,6 +144,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
             "samples": pts.len(),
             "forecast": f,
             "writes_24h": writers.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
+            "growth_24h": store.growth_since(now - DAY)?.iter().map(|(o, b)| json!({"owner": o, "bytes": b})).collect::<Vec<_>>(),
             "watcher_cost": cost.map(|c| {
                 let (cpu, written) = c.per_sample();
                 let (cpu_h, written_h) = c.per_hour(interval);
@@ -108,7 +166,19 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         println!("No samples for {key} yet. Is the watcher running? (`mdif agent status`)");
         return Ok(());
     };
+    let open: Vec<_> = store
+        .incidents_since(now)?
+        .into_iter()
+        .filter(|e| e.closed.is_none())
+        .collect();
+    for e in &open {
+        println!("Runaway: {}", e.incident.sentence(Some(&home())));
+    }
+    if !open.is_empty() {
+        println!();
+    }
     print_forecast(&key, &f, pts.len(), pts.first().map(|p| p.ts));
+    print_growth(&store.growth_since(now - DAY)?);
     print_writers(&writers);
     if let Some(c) = cost {
         print_cost(&c, interval);
@@ -206,6 +276,18 @@ fn full_sentence(at: i64, full: &FullIn) -> String {
     )
 }
 
+fn print_growth(growth: &[(String, i64)]) {
+    let grew: Vec<_> = growth.iter().filter(|(_, b)| *b > 0).take(6).collect();
+    if grew.is_empty() {
+        return;
+    }
+    println!();
+    println!("Folders that grew the most in the last 24 hours (`mdif owners` for more):");
+    for (owner, b) in grew {
+        println!("  {:>9}  {}", bytes(*b as u64), printable(&tilde(owner)));
+    }
+}
+
 fn print_writers(writers: &[(String, u64)]) {
     if writers.is_empty() {
         return;
@@ -259,12 +341,17 @@ fn window(r: &Rate) -> String {
 }
 
 fn days(d: f64) -> String {
-    if d < 1.0 {
-        format!("{} hours", (d * 24.0).round().max(1.0))
+    let (n, unit) = if d < 1.0 {
+        ((d * 24.0).round().max(1.0), "hour")
     } else if d < 100.0 {
-        format!("{} days", d.round())
+        (d.round(), "day")
     } else {
-        format!("{} months", (d / 30.4).round())
+        ((d / 30.4).round(), "month")
+    };
+    if n == 1.0 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
     }
 }
 
@@ -299,7 +386,7 @@ fn plural(n: usize, what: &str) -> String {
     }
 }
 
-fn local(ts: i64) -> DateTime<Local> {
+pub(crate) fn local(ts: i64) -> DateTime<Local> {
     Local
         .timestamp_opt(ts, 0)
         .single()

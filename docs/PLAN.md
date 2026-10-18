@@ -74,7 +74,7 @@ Two kinds, each with its own clauses.
 |---|---|
 | a fitted line over the sustain window (default 6 h, at least 8 points), positive slope, r² ≥ 0.85 | bursts, staircases (copied a file, stopped), sawtooth caches |
 | grown by at least 1 GB *and* at least 5% of its own size | noise, which is proportional to size |
-| latest sample within 2% of its peak | anything that has plateaued |
+| still growing (the last third of the window grew at least a quarter of the fitted rate) and within 2% of its peak | anything that has plateaued or started shrinking |
 | at the fitted rate, fills the remaining free space within the horizon (default 7 days) | slow, harmless growth on a roomy disk |
 | owner not on the allowlist (path components) | Photos imports, VMs, deliberate downloads |
 
@@ -229,10 +229,20 @@ mydiskisfull/
   per-process write sampling, and `mdif watch` / `mdif forecast`. Plus an e2e test that runs a real
   filler (a file growing at a fixed rate) and a real churner (rewriting a file in place), and
   asserts that both are detected and nothing else is.
-- **M2 – Owners + incidents.** FSEvents incremental owner sizes, growth and churn clauses,
-  one-sentence explanations, regrowth memory. Writes relayed by `diskimages-helper` (it rewrites
-  everything written into a mounted disk image to the image file) are attributed to the image,
-  not counted a second time: the e2e test shows them as the largest writer.
+- **M2 – Owners + incidents (done).** Owner sizes kept incrementally from FSEvents journal
+  replay plus the open files of heavy writers, growth and churn clauses, one-sentence
+  explanations, episodes, regrowth memory, and the e2e test extended to all of it. Learned on
+  the way, and handled:
+  - FSEvents reports a file's folder when the file is created or closed, not while it's
+    written, so the heavy writers are asked which files they have open (`proc_pidfdinfo`).
+  - fseventsd keeps no journal for volumes mounted `-nobrowse`; only live events exist there.
+  - Listing costs about 3.5 µs per entry whatever is asked for (private size doubles it), so
+    folders with thousands of entries are re-listed at most every 2 hours.
+  - A folder seen for the first time has no previous size: only files created since the last
+    period count, so the first period is a lower bound. A folder moved as a whole is not seen.
+  - `diskimages-helper` rewrites everything written into a mounted disk image, so it is
+    allowlisted for churn (its clients are measured); attributing its writes to the image in
+    the writers list is still to do.
 - **M3 – Suggestions + tweaks.** Cause → fix catalogue, apply/verify/revert, profiles.
 - **M4 – Menu bar app.** Gauge, incidents, map and clean screens, notifications, onboarding for
   Full Disk Access.

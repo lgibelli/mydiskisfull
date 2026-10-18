@@ -58,6 +58,78 @@ pub fn own_usage() -> (std::time::Duration, u64) {
     (cpu, written)
 }
 
+// <sys/proc_info.h>: struct vnode_fdinfowithpath, read by offset.
+const PROC_PIDFDVNODEPATHINFO: c_int = 2;
+const VNODE_FDINFO_WITH_PATH: usize = 1200;
+const FI_OPENFLAGS: usize = 0;
+const VI_TYPE: usize = 160;
+const VIP_PATH: usize = 176;
+const FWRITE: u32 = 0x2;
+const VREG: i32 = 1;
+
+/// Regular files `pid` has open for writing (the current user's processes,
+/// no root needed).
+///
+/// FSEvents reports a file's folder when the file is created or closed
+/// after writing, not while it is written: a log kept open and appended to
+/// forever never shows up. Asking the heavy writers what they have open
+/// fills that gap.
+pub fn files_open_for_writing(pid: i32) -> Vec<std::path::PathBuf> {
+    let need =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if need <= 0 {
+        return Vec::new();
+    }
+    // Room for descriptors opened between the two calls.
+    let mut buf = vec![0u8; need as usize + 64 * 8];
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            buf.as_mut_ptr().cast(),
+            buf.len() as c_int,
+        )
+    };
+    let n = (n.max(0) as usize).min(buf.len());
+    let mut out = Vec::new();
+    let mut info = vec![0u8; VNODE_FDINFO_WITH_PATH];
+    // struct proc_fdinfo { int32_t proc_fd; uint32_t proc_fdtype; }
+    for rec in buf[..n].chunks_exact(8) {
+        let fd = i32::from_ne_bytes(rec[0..4].try_into().unwrap());
+        let kind = u32::from_ne_bytes(rec[4..8].try_into().unwrap());
+        if kind != libc::PROX_FDTYPE_VNODE as u32 {
+            continue;
+        }
+        let got = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                fd,
+                PROC_PIDFDVNODEPATHINFO,
+                info.as_mut_ptr().cast(),
+                info.len() as c_int,
+            )
+        };
+        if got as usize != VNODE_FDINFO_WITH_PATH {
+            continue;
+        }
+        let flags = u32::from_ne_bytes(info[FI_OPENFLAGS..FI_OPENFLAGS + 4].try_into().unwrap());
+        let vtype = i32::from_ne_bytes(info[VI_TYPE..VI_TYPE + 4].try_into().unwrap());
+        if flags & FWRITE == 0 || vtype != VREG {
+            continue;
+        }
+        let path = &info[VIP_PATH..];
+        let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+        if len > 0 {
+            use std::os::unix::ffi::OsStrExt;
+            out.push(std::ffi::OsStr::from_bytes(&path[..len]).into());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn rusage(pid: i32) -> Option<libc::rusage_info_v4> {
     let mut ri = MaybeUninit::<libc::rusage_info_v4>::uninit();
     let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, ri.as_mut_ptr().cast()) };
@@ -124,5 +196,23 @@ mod tests {
         let after = own_processes().into_iter().find(|p| p.pid == me).unwrap();
         assert!(after.bytes_written >= before.bytes_written);
         assert!(!after.name.is_empty());
+    }
+
+    #[test]
+    fn lists_files_open_for_writing_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (w, r) = (root.join("written.log"), root.join("read.txt"));
+        std::fs::write(&r, b"x").unwrap();
+        let _w = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&w)
+            .unwrap();
+        let _r = std::fs::File::open(&r).unwrap();
+        let open = files_open_for_writing(std::process::id() as i32);
+        eprintln!("{open:?}");
+        assert!(open.contains(&w), "{open:?}");
+        assert!(!open.contains(&r), "{open:?}");
     }
 }

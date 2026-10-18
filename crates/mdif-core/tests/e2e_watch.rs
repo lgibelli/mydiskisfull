@@ -1,23 +1,27 @@
 //! End to end: real processes doing real I/O on a real APFS volume, watched
 //! by the real watcher.
 //!
-//! A scratch APFS disk image gets three child processes:
+//! A scratch APFS disk image gets three child processes, each in its own
+//! folder:
 //!
 //! - a **filler** that grows a file at a fixed rate,
-//! - a **churner** that rewrites a file in place, writing 4× more than the
+//! - a **churner** that rewrites a file in place, writing 8× more than the
 //!   filler while taking no space,
 //! - a **reader** that only reads, the decoy.
 //!
-//! Halfway through, a 256 MB file is deleted, a one-off cleanup.
+//! Halfway through, a 256 MB file in a third folder is deleted, a one-off
+//! cleanup.
 //!
 //! The watcher samples once a second, and each second stands for five
 //! minutes of history so a forecast window fills in under a minute. Every
-//! measurement (free space, per-process writes) is real. Only the clock is
-//! compressed.
+//! measurement (free space, per-process writes, FSEvents, folder sizes) is
+//! real. Only the clock is compressed, and the incident thresholds are
+//! scaled down to match.
 //!
-//! The forecast must match the filler's rate alone, the deletion must be
-//! taken out as a step, and the churner must show up as the heavy writer
-//! while the reader shows up nowhere.
+//! The forecast must match the filler's rate alone and take the deletion out
+//! as a step; the filler's folder must be the one growth incident and the
+//! churner the one churn incident; the cleanup must be remembered with
+//! nothing grown back; and the reader must show up nowhere.
 //!
 //! Needs `hdiutil` and about 1 GB of free space, and takes a minute:
 //!
@@ -33,9 +37,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mdif_core::forecast::{self, DAY, Params};
+use mdif_core::forecast::{self, DAY, HOUR, Params};
+use mdif_core::incidents::{ChurnParams, GrowthParams, Kind};
+use mdif_core::owners::{self, Rules};
 use mdif_core::store::Store;
-use mdif_core::watch::Watcher;
+use mdif_core::watch::{Detect, Watcher};
 
 const ROLE: &str = "MDIF_E2E_ROLE";
 const TARGET: &str = "MDIF_E2E_PATH";
@@ -47,12 +53,32 @@ const MB: u64 = 1 << 20;
 /// Seconds of history each real second stands for.
 const WARP: f64 = 300.0;
 const SAMPLES: usize = 48;
+/// Seconds of history between owners periods (3 real seconds).
+const PERIOD: i64 = 900;
 /// Both writers act every `TICK`: the filler appends `FILL_CHUNK`, the
 /// churner rewrites its whole `CHURN_SIZE` file.
 const TICK: Duration = Duration::from_millis(250);
-const FILL_CHUNK: u64 = MB;
+const FILL_CHUNK: u64 = MB / 2;
 const CHURN_SIZE: u64 = 4 * MB;
 const SEED: u64 = 256 * MB;
+
+/// The plan's clauses, scaled to a minute of real time.
+fn detect() -> Detect {
+    Detect {
+        growth: GrowthParams {
+            sustain: 2 * HOUR,
+            grid: PERIOD,
+            min_growth: 10 * MB,
+            ..GrowthParams::default()
+        },
+        churn: ChurnParams {
+            min_written: 64 * MB,
+            // The filler's growth counts against what the churner keeps.
+            max_kept: 0.25,
+            ..ChurnParams::default()
+        },
+    }
+}
 
 #[test]
 #[ignore = "creates and mounts an APFS disk image; run with --ignored"]
@@ -60,16 +86,24 @@ fn detects_filler_and_churner_and_nothing_else() {
     let tmp = tempfile::tempdir().unwrap();
     let image = Image::attach(tmp.path());
     let vol = image.mount.clone();
+    for d in ["fill", "churn", "seed"] {
+        fs::create_dir(vol.join(d)).unwrap();
+    }
 
-    let seed = vol.join("seed.bin");
+    let seed = vol.join("seed/seed.bin");
     write_synced(&seed, SEED);
-    let churned = vol.join("churn.bin");
+    let churned = vol.join("churn/churn.bin");
     write_synced(&churned, CHURN_SIZE);
-    let filled = vol.join("fill.bin");
+    let filled = vol.join("fill/fill.bin");
 
     let store = Store::open(&tmp.path().join("history.sqlite3")).unwrap();
-    let mut w = Watcher::new(store, &vol).unwrap();
+    let w = Watcher::new(store, &vol).unwrap();
     let key = w.volume_key().to_string();
+    let mut w = w
+        .with_owners(Rules::default().depth(&key, 1), PERIOD)
+        .unwrap()
+        .with_detect(detect());
+    let owner = |d: &str| format!("{key}/{d}");
 
     let bin = tmp.path().join("bin");
     fs::create_dir(&bin).unwrap();
@@ -83,11 +117,17 @@ fn detects_filler_and_churner_and_nothing_else() {
     // is and how much the churner says it has written.
     let mut truth: Vec<(i64, u64)> = Vec::new();
     let mut churn_truth: Vec<u64> = Vec::new();
-    let fake0 = 1_700_000_000;
+    let fake0 = 1_700_000_100;
     let t0 = Instant::now();
     for i in 0..SAMPLES {
         let ts = fake0 + (t0.elapsed().as_secs_f64() * WARP) as i64;
-        w.sample(ts).unwrap();
+        let s = w.sample(ts).unwrap();
+        if let Some(p) = s.period {
+            eprintln!("period at {i}: {p:?}, growth {:?}", s.growth);
+        }
+        for inc in &s.opened {
+            eprintln!("incident at {i}: {}", inc.sentence(None));
+        }
         truth.push((ts, fs::metadata(&filled).map_or(0, |m| m.len())));
         churn_truth.push(
             fs::read_to_string(&churn_count)
@@ -95,8 +135,13 @@ fn detects_filler_and_churner_and_nothing_else() {
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0),
         );
+        // A change makes the cleanup folder known before the cleanup. Both
+        // are done by other processes: FSEvents leaves out the watcher's own.
+        if i == 2 {
+            run("/usr/bin/touch", &vol.join("seed/marker"));
+        }
         if i == SAMPLES / 2 {
-            fs::remove_file(&seed).unwrap();
+            run("/bin/rm", &seed);
         }
         let next = t0 + Duration::from_secs(i as u64 + 1);
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
@@ -124,7 +169,7 @@ fn detects_filler_and_churner_and_nothing_else() {
     eprintln!("writers {:?}", &top[..top.len().min(10)]);
 
     // The filler is detected: the forecast is its rate, and only its rate
-    // (counting the churner's writes as growth would make it 5× higher).
+    // (counting the churner's writes as growth would make it 9× higher).
     let ratio = rate.per_day / filler_per_day;
     assert!(
         (0.8..1.25).contains(&ratio),
@@ -166,6 +211,56 @@ fn detects_filler_and_churner_and_nothing_else() {
     assert!(
         !writers.contains_key("mdif-e2e-read"),
         "the reader only reads"
+    );
+
+    // Owners: the filler's folder grew by its file, the churner's didn't
+    // grow, and the cleanup folder lost the seed.
+    let growth: HashMap<String, i64> = w.store().growth_since(0).unwrap().into_iter().collect();
+    eprintln!("owner growth {growth:?}");
+    let g = |d: &str| growth.get(&owner(d)).copied().unwrap_or(0);
+    let final_len = fs::metadata(&filled).unwrap().len() as i64;
+    assert!(
+        (final_len * 7 / 10..=final_len + MB as i64).contains(&g("fill")),
+        "fill folder grew {} B, its file is {final_len} B",
+        g("fill")
+    );
+    assert!(
+        g("churn").abs() <= 2 * CHURN_SIZE as i64,
+        "churn folder grew {}",
+        g("churn")
+    );
+    assert!(
+        (g("seed") + SEED as i64).abs() <= MB as i64,
+        "seed folder lost {}",
+        -g("seed")
+    );
+    let cleanups = owners::regrowth(&w.store().growth_series(0).unwrap(), 64 * MB);
+    assert_eq!(cleanups.len(), 1, "{cleanups:?}");
+    assert_eq!(cleanups[0].owner, owner("seed"));
+    assert!(cleanups[0].share() < 0.01, "nothing grew back");
+
+    // Incidents: exactly the filler's folder (growth) and the churner
+    // (churn) among what this test controls. Other processes on the host
+    // are outside its control and ignored.
+    let episodes = w.store().incidents_since(0).unwrap();
+    for e in &episodes {
+        eprintln!("episode: {}", e.incident.sentence(None));
+    }
+    // One episode each: an incident that flickered open and closed would
+    // show up twice.
+    let mut ours: Vec<(&str, String)> = episodes
+        .iter()
+        .map(|e| (e.incident.kind.as_str(), e.incident.subject.clone()))
+        .filter(|(_, s)| s.starts_with("mdif-e2e-") || s.starts_with(&key))
+        .collect();
+    ours.sort();
+    assert_eq!(
+        ours,
+        [
+            (Kind::Churn.as_str(), "mdif-e2e-churn".to_string()),
+            (Kind::Growth.as_str(), owner("fill")),
+        ],
+        "{episodes:?}"
     );
 }
 
@@ -249,8 +344,12 @@ impl Drop for Role {
     }
 }
 
-/// A 1 GB sparse APFS image, mounted without showing up in Finder, detached
-/// on drop.
+/// A 1 GB sparse APFS image, detached on drop.
+///
+/// It is mounted browsable: fseventsd keeps no journal for `-nobrowse`
+/// volumes, and the watcher replays the journal. Spotlight is kept out with
+/// a `.metadata_never_index` marker, written in a first, hidden mount so
+/// indexing never starts.
 struct Image {
     mount: PathBuf,
 }
@@ -272,15 +371,23 @@ impl Image {
             "SPARSE".as_ref(),
             img.as_os_str(),
         ]);
-        hdiutil(&[
-            "attach".as_ref(),
-            "-quiet".as_ref(),
-            "-nobrowse".as_ref(),
-            "-noautoopen".as_ref(),
-            "-mountpoint".as_ref(),
-            mount.as_os_str(),
-            img.as_os_str(),
-        ]);
+        let attach = |browse: bool| {
+            let mut args: Vec<&OsStr> = vec!["attach".as_ref(), "-quiet".as_ref()];
+            if !browse {
+                args.push("-nobrowse".as_ref());
+            }
+            args.extend::<[&OsStr; 4]>([
+                "-noautoopen".as_ref(),
+                "-mountpoint".as_ref(),
+                mount.as_os_str(),
+                img.as_os_str(),
+            ]);
+            hdiutil(&args);
+        };
+        attach(false);
+        fs::write(mount.join(".metadata_never_index"), b"").unwrap();
+        hdiutil(&["detach".as_ref(), "-quiet".as_ref(), mount.as_os_str()]);
+        attach(true);
         Image { mount }
     }
 }
@@ -305,6 +412,11 @@ impl Drop for Image {
 fn hdiutil(args: &[&OsStr]) {
     let status = Command::new("hdiutil").args(args).status().unwrap();
     assert!(status.success(), "hdiutil {args:?} failed");
+}
+
+fn run(cmd: &str, arg: &Path) {
+    let ok = Command::new(cmd).arg(arg).status().unwrap().success();
+    assert!(ok, "{cmd} {}", arg.display());
 }
 
 fn write_synced(path: &Path, len: u64) {

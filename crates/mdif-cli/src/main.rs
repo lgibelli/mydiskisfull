@@ -2,6 +2,7 @@
 
 mod agent_cmd;
 mod map_cmd;
+mod owners_cmd;
 mod watch_cmd;
 mod writers_cmd;
 
@@ -45,6 +46,34 @@ enum Cmd {
         /// Print errors only
         #[arg(long)]
         quiet: bool,
+        /// Seconds between updates of the growth per folder (0: off)
+        #[arg(long, default_value_t = 1800)]
+        owners_every: u64,
+        #[command(flatten)]
+        history: History,
+    },
+    /// Which folders grew or shrank, and what came back after cleanups
+    Owners {
+        /// Window, in hours
+        #[arg(long, default_value_t = 24)]
+        hours: i64,
+        /// How many folders to show
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        history: History,
+    },
+    /// Runaway disk fillers: folders that keep growing, processes that churn
+    Incidents {
+        /// How far back to look, in days
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         history: History,
     },
@@ -110,14 +139,27 @@ fn main() -> Result<()> {
             interval,
             once,
             quiet,
+            owners_every,
             history,
         } => watch_cmd::watch(
             &history.db,
             &history.volume,
             Duration::from_secs(interval),
+            owners_every,
             once,
             quiet,
         )?,
+        Cmd::Owners {
+            hours,
+            top,
+            json,
+            history,
+        } => owners_cmd::owners(&history.db, hours.max(1), top, json)?,
+        Cmd::Incidents {
+            days,
+            json,
+            history,
+        } => owners_cmd::incidents(&history.db, days.max(1), json)?,
         Cmd::Agent { action } => match action {
             AgentAction::Install { interval } => agent_cmd::install(interval)?,
             AgentAction::Uninstall => agent_cmd::uninstall()?,

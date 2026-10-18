@@ -25,6 +25,18 @@ All notable changes to this project are documented here. The format is based on
   and 110 KB per hour at the default interval, against a budget of 1 s and 1 MB.
 - An end-to-end test with real processes on a scratch APFS image (a filler, a churner, a
   read-only decoy and a one-off cleanup), and a CI job that checks the watcher's budget.
+- Growth per folder (`mdif owners`). Every 30 minutes the watcher replays the FSEvents journal
+  from where it left off (so time it wasn't running is covered too), re-lists only the folders
+  that changed, and adds the folders of files that heavy writers keep open (FSEvents doesn't
+  report a file while it is written, only when it's closed). Folders are grouped into owners:
+  app containers, caches and support folders, projects with their build output and worktrees
+  separate, top-level home folders. Busy folders with thousands of entries are re-listed less
+  often so the watcher stays in budget. Cleanups are remembered with what came back since.
+- Incidents (`mdif incidents`): a folder that keeps growing (steady fit, ≥ 1 GB and ≥ 5% of
+  its size, still growing, would fill the disk within 7 days, not allowlisted) or a process
+  that keeps rewriting data (≥ 1 GB in an hour, steadily, while the disk kept < 10%), each in
+  one sentence. Episodes open once and close when the clauses stop holding; the agent logs new
+  ones and `mdif forecast` shows open ones first, with the folders that grew most.
 
 ### Fixed
 - Modified clones were counted twice: once one copy changes it gets its own clone ID while still
