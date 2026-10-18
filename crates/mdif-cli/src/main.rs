@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mdif_core::map::{self, DiskMap};
 use mdif_core::scan::{Node, Options};
+use mdif_core::text::printable;
 use mdif_core::units::{bytes, signed};
 use mdif_macos::proc;
 
@@ -140,7 +141,7 @@ fn print_map(m: &DiskMap, depth: usize) {
             m.scan
                 .unreadable
                 .first()
-                .map(|p| m.display_path(p))
+                .map(|p| printable(&m.display_path(p)).into_owned())
                 .unwrap_or_default()
         );
     }
@@ -176,7 +177,7 @@ fn print_node(m: &DiskMap, n: &Node, level: usize, depth: usize, root: bool) {
         bytes(t.private),
         cloud,
         "  ".repeat(level),
-        name
+        printable(&name)
     );
     if level >= depth {
         return;
@@ -219,7 +220,7 @@ fn writers(secs: u64, top: usize) {
             "  {:>9}/s  {:>7}  {}",
             bytes(d / secs.max(1)),
             p.pid,
-            p.name
+            printable(&p.name)
         );
     }
 
@@ -227,6 +228,11 @@ fn writers(secs: u64, top: usize) {
     total.sort_by_key(|p| Reverse(p.bytes_written));
     println!("\nMost written since they started:");
     for p in total.iter().take(top) {
-        println!("  {:>9}  {:>7}  {}", bytes(p.bytes_written), p.pid, p.name);
+        println!(
+            "  {:>9}  {:>7}  {}",
+            bytes(p.bytes_written),
+            p.pid,
+            printable(&p.name)
+        );
     }
 }
