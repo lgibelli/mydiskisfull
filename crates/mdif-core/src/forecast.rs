@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 
-use crate::store::SpacePoint;
+use crate::store::{SpacePoint, TIERS};
 
 pub const HOUR: i64 = 3_600;
 pub const DAY: i64 = 86_400;
@@ -150,6 +150,10 @@ fn window_rate(
     if (span as f64) < p.min_coverage * window as f64 {
         return None;
     }
+    let pts = resample(&pts, resolution_at(window));
+    if pts.len() < p.min_points {
+        return None;
+    }
 
     // Changes between consecutive samples; positive = space came back.
     let deltas: Vec<f64> = pts
@@ -199,6 +203,34 @@ fn window_rate(
         },
         steps,
     ))
+}
+
+/// The coarsest resolution the store keeps for data up to `age` old.
+fn resolution_at(age: i64) -> i64 {
+    TIERS
+        .iter()
+        .find(|t| age <= t.keep)
+        .unwrap_or(&TIERS[TIERS.len() - 1])
+        .res
+}
+
+/// One point per `bin` seconds, holding the last level of the bucket, at
+/// the bucket's start: exactly what compaction stores.
+///
+/// Every slope then weighs time evenly. Without this, a 3-day window would
+/// hold the most recent day as 5-minute rows and the two before as hourly
+/// rows, so the last day would outweigh them 12 to 1, and compaction would
+/// change the forecast just by running.
+fn resample(pts: &[&SpacePoint], bin: i64) -> Vec<SpacePoint> {
+    let mut out: Vec<SpacePoint> = Vec::new();
+    for pt in pts {
+        let ts = pt.ts.div_euclid(bin) * bin;
+        match out.last_mut() {
+            Some(last) if last.ts == ts => *last = SpacePoint { ts, ..**pt },
+            _ => out.push(SpacePoint { ts, ..**pt }),
+        }
+    }
+    out
 }
 
 /// Median, 10th and 90th percentile of the pairwise slopes. Long series are
@@ -347,6 +379,37 @@ mod tests {
         assert!(recent.per_day > 20.0 * GB, "{recent:?}");
         let soon = f.recent_full_in.unwrap();
         assert!(soon.days < f.full_in.unwrap().days / 2.0);
+    }
+
+    #[test]
+    fn compaction_does_not_change_the_forecast() {
+        // Two flat days, then a day consuming 10 GB, sampled every 5 minutes.
+        let pts = series_every(3, 300, |h| {
+            if h < 48.0 {
+                100.0 * GB
+            } else {
+                100.0 * GB - 10.0 * GB * (h - 48.0) / 24.0
+            }
+        });
+        let raw = forecast(&pts, &Params::default()).unwrap();
+
+        let store = crate::store::Store::open_in_memory().unwrap();
+        for pt in &pts {
+            store.add_space("/", *pt).unwrap();
+        }
+        store.compact(pts.last().unwrap().ts).unwrap();
+        let compacted = store.space_since("/", 0).unwrap();
+        assert!(compacted.len() < pts.len() / 2, "compaction ran");
+        let after = forecast(&compacted, &Params::default()).unwrap();
+
+        let (a, b) = (raw.rate.unwrap(), after.rate.unwrap());
+        assert_eq!((a.window, b.window), (3 * DAY, 3 * DAY));
+        assert!((a.per_day - b.per_day).abs() < 1e-6 * GB, "{a:?} vs {b:?}");
+        assert_eq!(a.points, b.points);
+        // The speed-up of the last day is the recent rate's job.
+        let recent = after.recent.unwrap();
+        assert!((recent.per_day / GB - 10.0).abs() < 0.5, "{recent:?}");
+        assert!(after.recent_full_in.is_some());
     }
 
     #[test]

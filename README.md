@@ -42,8 +42,9 @@ was invisible to snapshot tools:
   (r² ≥ 0.85 over hours), it has grown by gigabytes, and it would fill the disk within the
   horizon. Builds, imports and backups that stop don't count.
 - **Honest numbers.** It measures APFS *private size* (what deleting would actually free), counts
-  each clone family once, and keeps cloud-only placeholders separate. The total reconciles with
-  what APFS reports in use.
+  every block shared by clones (modified ones too, by their physical extents) and every hard link
+  once, and keeps cloud-only placeholders separate. The total reconciles with what APFS reports
+  in use, and what it can't pin down is shown as uncertainty.
 - **Never costs you network traffic.** Scanning turns off cloud-placeholder downloads for the
   process, so looking at an iCloud or OneDrive folder never downloads it.
 - **Prove it before deleting.** Only regenerable data, or data with a verified copy, is offered
@@ -109,7 +110,7 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 
 | Crate | What it does |
 |---|---|
-| `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, dataless/sparse/purgeable flags), `proc_pid_rusage`, `statfs`, `setiopolicy_np` |
+| `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np` |
 | `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store and the forecast |
 | `crates/mdif-cli` | The `mdif` command |
 

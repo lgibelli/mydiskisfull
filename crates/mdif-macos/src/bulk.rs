@@ -9,7 +9,7 @@
 //! when invalid) in the order getattrlist(2) documents: common, file, then
 //! common-extended attributes, each 4-byte aligned, then the name. One
 //! exception, observed on macOS 27: directories carry no file-attribute
-//! group at all (96-byte records instead of 112), so the layout depends on
+//! group at all (their records are 16 bytes shorter), so the layout depends on
 //! the object type.
 
 use std::ffi::{CString, OsString};
@@ -25,10 +25,13 @@ const ATTR_BIT_MAP_COUNT: u16 = 5;
 const ATTR_CMN_NAME: u32 = 0x0000_0001;
 const ATTR_CMN_DEVID: u32 = 0x0000_0002;
 const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
+const ATTR_CMN_CRTIME: u32 = 0x0000_0200;
 const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
 const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
+const ATTR_CMN_FILEID: u32 = 0x0200_0000;
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
 const ATTR_FILE_TOTALSIZE: u32 = 0x0000_0002;
 const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
 const ATTR_CMNEXT_PRIVATESIZE: u32 = 0x0000_0008;
@@ -86,10 +89,15 @@ pub struct Entry {
     pub kind: Kind,
     /// Device the entry lives on; differs from its parent at a mount point.
     pub dev: i32,
-    /// Modification time, seconds since the epoch.
+    /// Creation and modification time, seconds since the epoch.
+    pub crtime: i64,
     pub mtime: i64,
     /// BSD `st_flags`.
     pub flags: u32,
+    /// Inode number: the same for every hard link to a file.
+    pub inode: u64,
+    /// Hard links to this file on the volume (1 for directories).
+    pub nlink: u32,
     pub logical: u64,
     pub allocated: u64,
     /// Bytes freed immediately if this file were deleted.
@@ -152,11 +160,13 @@ pub fn read_dir_fd(fd: &OwnedFd) -> io::Result<Vec<Entry>> {
             | ATTR_CMN_NAME
             | ATTR_CMN_DEVID
             | ATTR_CMN_OBJTYPE
+            | ATTR_CMN_CRTIME
             | ATTR_CMN_MODTIME
-            | ATTR_CMN_FLAGS,
+            | ATTR_CMN_FLAGS
+            | ATTR_CMN_FILEID,
         volattr: 0,
         dirattr: 0,
-        fileattr: ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
+        fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
         forkattr: ATTR_CMNEXT_PRIVATESIZE
             | ATTR_CMNEXT_CLONEID
             | ATTR_CMNEXT_EXT_FLAGS
@@ -206,13 +216,16 @@ fn parse(rec: &[u8]) -> io::Result<Entry> {
     let name_len = c.u32()? as usize;
     let dev = c.i32()?;
     let objtype = c.u32()?;
+    let crtime = c.i64()?;
+    c.skip(8); // tv_nsec
     let mtime = c.i64()?;
     c.skip(8); // tv_nsec
     let flags = c.u32()?;
-    let (logical, allocated) = if objtype == VDIR {
-        (0, 0)
+    let inode = c.u64()?;
+    let (nlink, logical, allocated) = if objtype == VDIR {
+        (1, 0, 0)
     } else {
-        (c.u64()?, c.u64()?)
+        (c.u32()?, c.u64()?, c.u64()?)
     };
     let private = c.u64()?;
     let clone_id = c.u64()?;
@@ -242,8 +255,11 @@ fn parse(rec: &[u8]) -> io::Result<Entry> {
         name: OsString::from_vec(name.to_vec()),
         kind,
         dev,
+        crtime,
         mtime,
         flags,
+        inode,
+        nlink,
         logical,
         allocated,
         private,
@@ -342,14 +358,23 @@ mod tests {
             .unwrap();
         fs::create_dir(p.join("sub")).unwrap();
         std::os::unix::fs::symlink("orig.bin", p.join("link")).unwrap();
+        fs::hard_link(p.join("copy.bin"), p.join("hardlink.bin")).unwrap();
 
         let entries = read_dir(p).unwrap();
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 7);
+        let (copy, hard) = (entry(&entries, "copy.bin"), entry(&entries, "hardlink.bin"));
+        assert_eq!((copy.inode, copy.nlink), (hard.inode, 2));
 
         for e in &entries {
             let md = fs::symlink_metadata(p.join(&e.name)).unwrap();
             assert_eq!(e.dev as i64, md.dev() as i64, "{:?}", e.name);
             assert_eq!(e.mtime, md.mtime(), "{:?}", e.name);
+            assert_eq!(e.inode, md.ino(), "{:?}", e.name);
+            if e.kind != Kind::Dir {
+                assert_eq!(e.nlink as u64, md.nlink(), "{:?}", e.name);
+            }
+            let created = md.created().unwrap().duration_since(std::time::UNIX_EPOCH);
+            assert_eq!(e.crtime, created.unwrap().as_secs() as i64, "{:?}", e.name);
             if e.kind == Kind::File {
                 assert_eq!(e.logical, md.size(), "{:?}", e.name);
                 assert_eq!(e.allocated, md.blocks() * 512, "{:?}", e.name);
