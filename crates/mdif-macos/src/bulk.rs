@@ -146,12 +146,32 @@ pub fn open_dir(dir: &Path) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// How much to ask the file system for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// Everything, including private size and clone ID.
+    Full,
+    /// No private size or clone ID (left as `allocated` and 0). APFS
+    /// computes private size per file, which makes up most of the cost of a
+    /// listing: for re-listing busy folders often.
+    Sizes,
+}
+
 /// List `dir` with full attributes. Symlinks are reported, never followed.
 pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
     read_dir_fd(&open_dir(dir)?)
 }
 
+pub fn read_dir_with(dir: &Path, detail: Detail) -> io::Result<Vec<Entry>> {
+    read_dir_fd_with(&open_dir(dir)?, detail)
+}
+
 pub fn read_dir_fd(fd: &OwnedFd) -> io::Result<Vec<Entry>> {
+    read_dir_fd_with(fd, Detail::Full)
+}
+
+pub fn read_dir_fd_with(fd: &OwnedFd, detail: Detail) -> io::Result<Vec<Entry>> {
+    let full = detail == Detail::Full;
     let mut alist = AttrList {
         bitmapcount: ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -167,9 +187,11 @@ pub fn read_dir_fd(fd: &OwnedFd) -> io::Result<Vec<Entry>> {
         volattr: 0,
         dirattr: 0,
         fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
-        forkattr: ATTR_CMNEXT_PRIVATESIZE
-            | ATTR_CMNEXT_CLONEID
-            | ATTR_CMNEXT_EXT_FLAGS
+        forkattr: if full {
+            ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID
+        } else {
+            0
+        } | ATTR_CMNEXT_EXT_FLAGS
             | ATTR_CMNEXT_CLONE_REFCNT,
     };
     let options = FSOPT_NOFOLLOW | FSOPT_PACK_INVAL_ATTRS | FSOPT_ATTR_CMN_EXTENDED;
@@ -199,13 +221,13 @@ pub fn read_dir_fd(fd: &OwnedFd) -> io::Result<Vec<Entry>> {
         for _ in 0..n {
             let len = Cursor::new(&buf[off..]).u32()? as usize;
             let rec = buf.get(off..off + len).ok_or_else(bad_record)?;
-            out.push(parse(rec)?);
+            out.push(parse(rec, full)?);
             off += len;
         }
     }
 }
 
-fn parse(rec: &[u8]) -> io::Result<Entry> {
+fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
     let mut c = Cursor::new(rec);
     c.skip(4); // record length
     // attribute_set_t of what is actually valid for this entry.
@@ -227,8 +249,11 @@ fn parse(rec: &[u8]) -> io::Result<Entry> {
     } else {
         (c.u32()?, c.u64()?, c.u64()?)
     };
-    let private = c.u64()?;
-    let clone_id = c.u64()?;
+    let (private, clone_id) = if full {
+        (c.u64()?, c.u64()?)
+    } else {
+        (allocated, 0)
+    };
     let ext_flags = c.u64()?;
     let clone_refcnt = c.u32()?;
 
@@ -246,7 +271,7 @@ fn parse(rec: &[u8]) -> io::Result<Entry> {
         _ => Kind::Other,
     };
     // Volumes without private-size support (non-APFS): nothing is shared.
-    let private = if ret_ext & ATTR_CMNEXT_PRIVATESIZE != 0 {
+    let private = if !full || ret_ext & ATTR_CMNEXT_PRIVATESIZE != 0 {
         private.min(allocated)
     } else {
         allocated

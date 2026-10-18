@@ -425,11 +425,13 @@ name = "mdif-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "mdif-macos",
  "plist",
  "rayon",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 
