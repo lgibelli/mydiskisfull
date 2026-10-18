@@ -27,9 +27,10 @@ pub struct DiskMap {
 }
 
 impl DiskMap {
-    /// Space the scanned tree really uses (clones counted once).
+    /// Space the scanned tree really uses (clones and hard links counted
+    /// once).
     pub fn measured(&self) -> u64 {
-        self.scan.real()
+        self.scan.real
     }
 
     /// In use on the volume but not found by the scan: files only root can

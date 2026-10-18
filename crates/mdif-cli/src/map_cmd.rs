@@ -46,6 +46,20 @@ pub fn print_map(m: &DiskMap, depth: usize) {
         bytes(t.private),
         bytes(m.scan.shared_once)
     );
+    if m.scan.shared_uncertain > 0 {
+        println!(
+            "  uncertain   up to {:>6}   possibly cloned files whose layout couldn't be read: their \
+             shared blocks may be counted twice",
+            bytes(m.scan.shared_uncertain)
+        );
+    }
+    if t.linked_elsewhere > 0 {
+        println!(
+            "  linked out     {:>9}   hard-linked files also linked from outside: not freed by \
+             deleting this folder",
+            bytes(t.linked_elsewhere)
+        );
+    }
     if whole_volume {
         println!(
             "  not measured   {:>9}   root-only files, file-system metadata, snapshot-only blocks",
@@ -82,9 +96,21 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     print_node(m, &m.scan.root, 0, depth, true);
     println!();
     println!(
-        "ON DISK = allocated blocks, what du and Finder add up (a clone is counted once per copy)."
+        "ON DISK = allocated blocks, what du and Finder add up (a clone is counted once per copy, a \
+         hard link once)."
     );
-    println!("PRIVATE = freed immediately if deleted (not shared with a clone or a snapshot).");
+    println!(
+        "PRIVATE = freed immediately if deleted (not shared with a clone, a hard link elsewhere \
+         or a snapshot)."
+    );
+    // A local snapshot shares every block that existed when it was taken.
+    if !m.snapshots.is_empty() && t.private < m.measured() / 10 {
+        println!(
+            "          Almost nothing is private now because a local Time Machine snapshot holds \
+             the same blocks: deleting files frees their space only once the snapshot is \
+             released (`tmutil deletelocalsnapshots`, or automatically within a day)."
+        );
+    }
 }
 
 fn print_node(m: &DiskMap, n: &Node, level: usize, depth: usize, root: bool) {
