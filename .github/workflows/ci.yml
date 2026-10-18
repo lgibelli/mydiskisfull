@@ -44,6 +44,37 @@ jobs:
           ./target/release/mdif --version
           ./target/release/mdif map --root "$HOME" --depth 1 --min-mb 100
           ./target/release/mdif writers --secs 2 --top 5
+          ./target/release/mdif watch --once --db "$RUNNER_TEMP/smoke.sqlite3"
+          ./target/release/mdif forecast --db "$RUNNER_TEMP/smoke.sqlite3"
+
+  e2e:
+    name: e2e (real filler, churner, cleanup)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p mdif-core --test e2e_watch -- --ignored --nocapture
+
+  budget:
+    name: watcher budget (measured)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Sample every 5 s for 2 minutes, then check the cost at the default 5 minutes
+        run: |
+          db="$RUNNER_TEMP/budget.sqlite3"
+          ./target/release/mdif watch --quiet --interval 5 --db "$db" &
+          sleep 120
+          kill %1
+          ./target/release/mdif forecast --db "$db"
+          ./target/release/mdif forecast --db "$db" --json | jq -e '.watcher_cost
+            | .samples >= 20
+              and .cpu_us_per_sample * 12 < 1000000
+              and .written_per_sample * 12 < 1000000'
 
   intel:
     name: build (Intel)
