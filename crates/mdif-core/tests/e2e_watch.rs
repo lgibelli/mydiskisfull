@@ -229,8 +229,10 @@ fn detects_filler_and_churner_and_nothing_else() {
         "churn folder grew {}",
         g("churn")
     );
+    // Allocated, not length: APFS can hold a few MB more for a fresh large
+    // file for a while (5 MB on a CI runner).
     assert!(
-        (g("seed") + SEED as i64).abs() <= MB as i64,
+        (g("seed") + SEED as i64).abs() <= SEED as i64 / 20,
         "seed folder lost {}",
         -g("seed")
     );
