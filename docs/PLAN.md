@@ -225,12 +225,14 @@ mydiskisfull/
 
 ## Milestones
 - **M0 – Core + map (done).** macOS FFI, honest map reconciled with APFS, `mdif writers`, CI.
-- **M1 – Watch engine.** History store, free-space sampling, forecast with step-change rejection,
+- **M1 – Watch engine (done).** History store, free-space sampling, forecast with step-change rejection,
   per-process write sampling, and `mdif watch` / `mdif forecast`. Plus an e2e test that runs a real
   filler (a file growing at a fixed rate) and a real churner (rewriting a file in place), and
   asserts that both are detected and nothing else is.
 - **M2 – Owners + incidents.** FSEvents incremental owner sizes, growth and churn clauses,
-  one-sentence explanations, regrowth memory.
+  one-sentence explanations, regrowth memory. Writes relayed by `diskimages-helper` (it rewrites
+  everything written into a mounted disk image to the image file) are attributed to the image,
+  not counted a second time: the e2e test shows them as the largest writer.
 - **M3 – Suggestions + tweaks.** Cause → fix catalogue, apply/verify/revert, profiles.
 - **M4 – Menu bar app.** Gauge, incidents, map and clean screens, notifications, onboarding for
   Full Disk Access.
@@ -245,8 +247,8 @@ mydiskisfull/
 - Forecast tests on recorded and synthetic series: steady growth, sawtooth, cleanup steps,
   plateau.
 - e2e: a real filler and churner, as Idlewild does with a real CPU burner and leak.
-- The budget is measured, not estimated: self CPU and self writes per hour, checked in CI on a
-  10-minute run.
+- The budget is measured, not estimated: self CPU and self writes per sample, checked in CI on
+  a 2-minute run and scaled to the default 5-minute interval.
 
 ## Open questions
 - UI shell: Tauri, or a native Swift menu bar like Idlewild driving the Rust core?

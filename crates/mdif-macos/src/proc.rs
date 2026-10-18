@@ -37,6 +37,33 @@ pub fn own_processes() -> Vec<ProcIo> {
         .collect()
 }
 
+/// CPU time (user + system) and bytes written by this process so far: what
+/// the watcher reports as its own cost.
+///
+/// Writes are *logical* (`ri_logical_writes`): every byte the process asked
+/// to write, including what still sits in the page cache. The disk-I/O
+/// counter misses those (SQLite's WAL commits, for one) and would flatter
+/// the watcher.
+pub fn own_usage() -> (std::time::Duration, u64) {
+    let mut ru = MaybeUninit::<libc::rusage>::uninit();
+    let cpu = if unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) } == 0 {
+        let ru = unsafe { ru.assume_init() };
+        let tv =
+            |t: libc::timeval| std::time::Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1_000);
+        tv(ru.ru_utime) + tv(ru.ru_stime)
+    } else {
+        std::time::Duration::ZERO
+    };
+    let written = rusage(std::process::id() as i32).map_or(0, |ri| ri.ri_logical_writes);
+    (cpu, written)
+}
+
+fn rusage(pid: i32) -> Option<libc::rusage_info_v4> {
+    let mut ri = MaybeUninit::<libc::rusage_info_v4>::uninit();
+    let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, ri.as_mut_ptr().cast()) };
+    (rc == 0).then(|| unsafe { ri.assume_init() })
+}
+
 fn all_pids() -> Vec<i32> {
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if n <= 0 {
@@ -67,13 +94,7 @@ fn owner(pid: i32) -> Option<u32> {
 }
 
 fn disk_io(pid: i32) -> Option<(u64, u64)> {
-    let mut ri = MaybeUninit::<libc::rusage_info_v4>::uninit();
-    let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, ri.as_mut_ptr().cast()) };
-    if rc != 0 {
-        return None;
-    }
-    let ri = unsafe { ri.assume_init() };
-    Some((ri.ri_diskio_bytesread, ri.ri_diskio_byteswritten))
+    rusage(pid).map(|ri| (ri.ri_diskio_bytesread, ri.ri_diskio_byteswritten))
 }
 
 fn name(pid: i32) -> String {

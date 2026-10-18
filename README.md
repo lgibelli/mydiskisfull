@@ -18,9 +18,10 @@ time and speaks up when something is filling the disk fast enough to matter:
 
 Free and open source, with no telemetry and no account.
 
-> **Status: early development.** The honest disk map (`mdif map`) and the disk-writer monitor
-> (`mdif writers`) work today. The watcher, forecasting, incidents and the menu bar app are next;
-> see the [plan](docs/PLAN.md).
+> **Status: early development.** The watcher and its forecast (`mdif watch`, `mdif forecast`),
+> the honest disk map (`mdif map`) and the disk-writer monitor (`mdif writers`) work today.
+> Incidents that name the filler, suggestions and the menu bar app are next; see the
+> [plan](docs/PLAN.md).
 
 ## Why another disk tool
 
@@ -59,7 +60,33 @@ cargo build --release
 ./target/release/mdif map              # where the space is, reconciled with APFS
 ./target/release/mdif map --root ~     # just your home folder
 ./target/release/mdif writers          # which processes are writing to disk right now
+
+./target/release/mdif agent install    # start the watcher in the background (one sample / 5 min)
+./target/release/mdif forecast         # when the disk will be full, once there's some history
+./target/release/mdif agent status
 ```
+
+The forecast needs a few hours of history to say anything, and gets better over days. Illustrative
+output after a few days:
+
+```
+Free now: 38.2 GB on /System/Volumes/Data  (Oct 18 16:05)
+
+Filling at 3.1 GB a day (3-day trend from 790 samples, plausibly 2.4–3.9 GB a day).
+Full in about 12 days, around Oct 30 (between Oct 28 and Nov 3).
+Space that came back in one go, taken out of the trend (one-off): +21.4 GB on Oct 16 11:20.
+
+Most written to disk in the last 24 hours:
+     41 GB  OneDrive
+    6.2 GB  rustc
+    1.1 GB  Google Chrome Helper
+
+Watcher cost: 4.1 ms CPU and 9 KB written per sample. At one sample every 5 min, that is 49 ms
+and 108 KB per hour (within budget: 1 s and 1 MB).
+```
+
+The history lives in `~/Library/Application Support/MyDiskIsFull/history.sqlite3` and never
+leaves the Mac.
 
 Example output from `mdif map` (abridged):
 
@@ -83,7 +110,7 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | Crate | What it does |
 |---|---|
 | `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, dataless/sparse/purgeable flags), `proc_pid_rusage`, `statfs`, `setiopolicy_np` |
-| `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map |
+| `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store and the forecast |
 | `crates/mdif-cli` | The `mdif` command |
 
 ## Not on the Mac App Store
