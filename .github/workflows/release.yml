@@ -1,48 +1,105 @@
-name: Release
+name: Release (signed DMG, draft)
 
-# Push a tag like v0.1.0 to publish a universal (Apple silicon + Intel)
-# build of the `mdif` command. Binaries are not notarized yet; see README.
+# Builds, signs, notarizes and packages the full edition (app/release.sh),
+# attests its provenance, and puts it on a *draft* GitHub release for a person
+# to publish. Anyone can then check that a download came from this repository
+# and commit:
+#
+#   gh attestation verify MyDiskIsFull-0.1.0.dmg --repo lgibelli/mydiskisfull
+#
+# It holds the signing keys, so it runs only on a push to a release/** branch
+# (which a fork can't create) or by hand, never on pull requests.
+#
+# Release flow: bump the version in Cargo.toml, turn CHANGELOG's Unreleased
+# into "## [x.y.z] - date", push, then push a release/x.y.z branch.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD   the Developer ID Application
+#                                                certificate, exported as .p12
+#   APPLE_API_KEY_B64, APPLE_API_KEY_ID,         an App Store Connect API key
+#   APPLE_API_ISSUER                             for notarytool
+#   SPARKLE_ED_PRIVATE_KEY                       generate_keys --account
+#                                                io.github.lgibelli.mydiskisfull -x
+# Variables: APPLE_TEAM_ID.
 
 on:
   push:
-    tags: ["v*"]
+    branches: ["release/**"]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  id-token: write # Sigstore, for the provenance attestation
+  attestations: write
 
-env:
-  CARGO_TERM_COLOR: always
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: macos-15
+    environment: release # add required reviewers in Settings → Environments
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
-      - name: Build both architectures
-        run: |
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
-      - name: Package universal binary
-        run: |
-          mkdir -p dist/pkg
-          lipo -create -output dist/pkg/mdif \
-            target/aarch64-apple-darwin/release/mdif \
-            target/x86_64-apple-darwin/release/mdif
-          lipo -info dist/pkg/mdif
-          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md dist/pkg/
-          name="mdif-${GITHUB_REF_NAME}-macos-universal"
-          tar -C dist/pkg -czf "dist/${name}.tar.gz" .
-          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
-      - name: Publish GitHub release
+
+      - name: Import the signing identity into a throwaway keychain
         env:
-          GH_TOKEN: ${{ github.token }}
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
-            --title "MyDiskIsFull $GITHUB_REF_NAME" \
-            --generate-notes \
-            --prerelease
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KCPW="$(openssl rand -base64 24)"
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          security default-keychain -s "$KEYCHAIN"
+          rm "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Write the notary and Sparkle keys
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || { echo "::error::SPARKLE_ED_PRIVATE_KEY is not set"; exit 1; }
+          umask 077
+          printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle-key"
+
+      - name: Build, sign, notarize and package
+        env:
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/notary-key.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SPARKLE_PRIVATE_KEY_FILE: ${{ runner.temp }}/sparkle-key
+        run: app/release.sh
+
+      # A signed statement in Sigstore's public log binding these bytes to
+      # this workflow, repository and commit.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            build/release/MyDiskIsFull-*.dmg
+            build/release/MyDiskIsFull.dmg
+            build/release/mdif-*.tar.gz
+
+      - name: Put it on a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: app/release.sh --upload
+
+      - name: Remove the keys
+        if: always()
+        run: rm -f "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/sparkle-key"

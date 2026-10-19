@@ -35,8 +35,12 @@ struct OverviewView: View {
                             TopList(title: "Grew the most, last 24 hours",
                                     rows: d.growth24h.filter { $0.bytes > 0 }.prefix(8)
                                         .map { (Format.path($0.owner), $0.bytes) })
+                            #if APP_STORE
+                            FullVersionNote(missing: .writers, title: "Wrote the most, last 24 hours")
+                            #else
                             TopList(title: "Wrote the most, last 24 hours",
                                     rows: d.writes24h.prefix(8).map { ($0.name, $0.bytes) })
+                            #endif
                         }
                     }
                 } else if let e = monitor.statusError ?? error {
@@ -214,12 +218,14 @@ private struct Attention: View {
                     FixButton(fix: e.fix, line: e.fixLine, monitor: monitor)
                 }
             }
+            #if !APP_STORE
             ForEach(monitor.undone) { t in
                 Card(icon: "arrow.uturn.backward", title: "Undone since: \(t.title)",
                      text: "Something changed its setting back, probably an update.") {
                     Button("Apply Again…") { monitor.apply(t.id) }
                 }
             }
+            #endif
         }
     }
 }
@@ -233,7 +239,11 @@ private struct FixButton: View {
         VStack(alignment: .leading, spacing: 4) {
             switch fix {
             case .tweak(let id):
+                #if APP_STORE
+                FullVersionNote(missing: .tweaks, title: "Fix: \(monitor.tweak(id)?.title ?? id)")
+                #else
                 Button("Fix: \(monitor.tweak(id)?.title ?? id)…") { monitor.apply(id) }
+                #endif
             case .run(let command, let note):
                 Text(note).font(.caption).foregroundStyle(.secondary)
                 HStack {

@@ -1,5 +1,5 @@
-// Settings: the watcher, opening at login, notifications, and Full Disk
-// Access. Laid out with GroupBox, not Form: settings this small shouldn't
+// Settings: the watcher, opening at login, notifications, updates and Full
+// Disk Access. Laid out with GroupBox, not Form: settings this small shouldn't
 // scroll.
 
 import ServiceManagement
@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var watching = false
     @State private var atLogin = false
     @State private var notify = true
+    @State private var checkUpdates = true
     @State private var loginError: String?
 
     init(monitor: Monitor) {
@@ -47,12 +48,24 @@ struct SettingsView: View {
                         }
                     Divider()
                     SwitchRow(title: "Notifications",
-                              caption: "A runaway filler, the disk filling within two weeks, a tweak something undid. Each once.",
+                              caption: Edition.appStore
+                                  ? "A runaway filler, the disk filling within two weeks. Each once."
+                                  : "A runaway filler, the disk filling within two weeks, a tweak something undid. Each once.",
                               isOn: $notify)
                         .onChange(of: notify) { _, on in
                             monitor.settings.notificationsEnabled = on
                             if on { Notifier.requestAuthorization() }
                         }
+                    #if !APP_STORE
+                    Divider()
+                    SwitchRow(title: "Check for updates automatically",
+                              caption: "Once a day, from GitHub. Updates are signed, and nothing else is sent.",
+                              isOn: $checkUpdates)
+                        .onChange(of: checkUpdates) { _, on in
+                            // Sparkle owns and keeps this one.
+                            monitor.updates.automaticallyChecksForUpdates = on
+                        }
+                    #endif
                 }
                 .padding(.vertical, 4)
             }
@@ -92,6 +105,9 @@ struct SettingsView: View {
             watching = watcher.isOn
             atLogin = SMAppService.mainApp.status == .enabled
             notify = monitor.settings.notificationsEnabled
+            #if !APP_STORE
+            checkUpdates = monitor.updates.automaticallyChecksForUpdates
+            #endif
         }
     }
 

@@ -116,8 +116,26 @@ jobs:
           "$app/MacOS/mdif" --version
           plutil -lint "$app/Info.plist" "$app/Library/LaunchAgents/io.github.lgibelli.mydiskisfull.watcher.plist"
           test "$(plutil -extract BundleProgram raw "$app/Library/LaunchAgents/io.github.lgibelli.mydiskisfull.watcher.plist")" = Contents/MacOS/mdif
+          # Sparkle: embedded, linked, and a feed and key to check against.
+          test -d "$app/Frameworks/Sparkle.framework"
+          otool -L "$app/MacOS/MyDiskIsFull" | grep -q "@rpath/Sparkle.framework"
+          plutil -extract SUFeedURL raw "$app/Info.plist" | grep -q "^https://github.com/lgibelli/mydiskisfull/releases/latest/download/appcast.xml$"
+          test -n "$(plutil -extract SUPublicEDKey raw "$app/Info.plist")"
           codesign --verify --deep --strict build/MyDiskIsFull.app
       - run: app/check-contract.sh
+      - name: The App Store edition leaves the tweaks out and links the full version
+        run: |
+          app/build.sh --app-store
+          codesign --verify --deep --strict build/AppStore/MyDiskIsFull.app
+          full=build/MyDiskIsFull.app/Contents/MacOS/MyDiskIsFull
+          store=build/AppStore/MyDiskIsFull.app/Contents/MacOS/MyDiskIsFull
+          # Text only the tweak flow has: in the full edition, not compiled into the other.
+          strings "$full" | grep -q "so Undo puts it back"
+          if strings "$store" | grep -q "so Undo puts it back"; then exit 1; fi
+          strings "$store" | grep -q "Get the Full Version"
+          # The App Store updates it: no Sparkle, no feed.
+          test ! -e build/AppStore/MyDiskIsFull.app/Contents/Frameworks/Sparkle.framework
+          if plutil -extract SUFeedURL raw build/AppStore/MyDiskIsFull.app/Contents/Info.plist 2>/dev/null; then exit 1; fi
 
   intel:
     name: build (Intel)

@@ -21,6 +21,9 @@ struct AboutView: View {
             }
             Text("MyDiskIsFull").font(.title2.bold())
             Text(version).font(.caption).foregroundStyle(.secondary)
+            #if !APP_STORE
+            UpdateLine(updates: monitor.updates)
+            #endif
             Text("Watches your disk, predicts when it will be full, finds what fills it and helps it stay fixed.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -56,8 +59,18 @@ struct AboutView: View {
 
             Text("Free and open source, under the MIT or Apache 2.0 licence. No telemetry, no account.")
                 .font(.caption2).foregroundStyle(.secondary)
+            #if APP_STORE
+            Text("This is the App Store version. The full version also applies tweaks for you and shows which apps write the most.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 30)
+            Link("Get the Full Version", destination: Edition.fullVersion)
+                .font(.caption)
+            #else
             Link("Source", destination: URL(string: "https://github.com/lgibelli/mydiskisfull")!)
                 .font(.caption)
+            #endif
         }
         .padding(24)
         .frame(width: 520)
@@ -74,6 +87,23 @@ struct AboutView: View {
         return s
     }
 }
+
+#if !APP_STORE
+/// Sparkle draws its own alert: this only says whether the daily check is on.
+private struct UpdateLine: View {
+    @ObservedObject var updates: Updater
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(updates.automaticallyChecksForUpdates ? "Checks for updates once a day" : "Update checks are off")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Check Now") { updates.checkForUpdates() }
+                .controlSize(.small)
+                .disabled(!updates.canCheckForUpdates)
+        }
+    }
+}
+#endif
 
 private struct Stat: View {
     let value: String

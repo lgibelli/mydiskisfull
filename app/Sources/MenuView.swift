@@ -46,6 +46,7 @@ struct MenuView: View {
                 }
             }
         }
+        #if !APP_STORE
         if !monitor.undone.isEmpty {
             Divider()
             ForEach(monitor.undone) { t in
@@ -55,6 +56,7 @@ struct MenuView: View {
                 }
             }
         }
+        #endif
 
         Divider()
         SuggestionsMenu(monitor: monitor)
@@ -68,6 +70,9 @@ struct MenuView: View {
         Button("Settings…") { showSettings() }
             .keyboardShortcut(",", modifiers: .command)
         Button("About MyDiskIsFull") { show("about") }
+        #if !APP_STORE
+        UpdateItem(updates: monitor.updates)
+        #endif
         Divider()
         Button("Quit MyDiskIsFull") { NSApp.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
@@ -112,6 +117,17 @@ struct MenuView: View {
     }
 }
 
+#if !APP_STORE
+struct UpdateItem: View {
+    @ObservedObject var updates: Updater
+
+    var body: some View {
+        Button("Check for Updates…") { updates.checkForUpdates() }
+            .disabled(!updates.canCheckForUpdates)
+    }
+}
+#endif
+
 /// A sentence as menu lines.
 struct Lines: View {
     let text: String
@@ -134,11 +150,16 @@ struct FixItems: View {
         switch fix {
         case .tweak(let id):
             let t = monitor.tweak(id)
+            #if APP_STORE
+            Text("Fix: \(t?.title ?? id)")
+            FullVersionItems(missing: .tweaks)
+            #else
             if t?.isApplied == true {
                 Text("Fix: \(t?.title ?? id) (applied)")
             } else {
                 Button("Fix: \(t?.title ?? id)…") { monitor.apply(id) }
             }
+            #endif
         case .run(let command, let note):
             Lines(note)
             Button("Copy the Command") { monitor.copy(command) }
@@ -187,6 +208,9 @@ struct TweaksMenu: View {
 
     var body: some View {
         Menu("Tweaks") {
+            #if APP_STORE
+            FullVersionItems(missing: .tweaks)
+            #else
             if let list = monitor.tweaks {
                 ForEach(list.filter { !$0.isAbsent }) { t in
                     let byUs = t.applied != nil
@@ -205,6 +229,7 @@ struct TweaksMenu: View {
             } else {
                 Text("Measuring…")
             }
+            #endif
         }
     }
 

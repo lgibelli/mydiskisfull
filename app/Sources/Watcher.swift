@@ -37,7 +37,7 @@ final class WatcherService: ObservableObject {
 
     var caption: String {
         switch status {
-        case .enabled: "Running. It samples free space and disk writes every 5 minutes."
+        case .enabled: "Running. It samples free space \(Edition.appStore ? "" : "and disk writes ")every 5 minutes."
         case .requiresApproval: "Waiting for you to allow it in System Settings → General → Login Items."
         case .notFound: "This copy of the app can't register it. Move the app to Applications."
         default:
@@ -81,6 +81,28 @@ final class WatcherService: ObservableObject {
 
     func openLoginItems() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+
+    /// After an update (or a rebuild) the agent still runs the `mdif` it
+    /// started with, which is no longer in the bundle: restart it once for
+    /// each new one.
+    func restartIfUpdated() {
+        let mdif = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/mdif")
+        let built = (try? FileManager.default.attributesOfItem(atPath: mdif.path)[.modificationDate]) as? Date
+        let stamp = "\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "")-\(built?.timeIntervalSince1970 ?? 0)"
+        let key = "watcherStartedFrom"
+        guard isOn, UserDefaults.standard.string(forKey: key) != stamp else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["kickstart", "-k", "gui/\(getuid())/\(Self.label)"]
+        do {
+            try p.run()
+            p.waitUntilExit()
+            log.notice("restarted the watcher for \(stamp, privacy: .public): \(p.terminationStatus)")
+            if p.terminationStatus == 0 { UserDefaults.standard.set(stamp, forKey: key) }
+        } catch {
+            log.error("restarting the watcher: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 

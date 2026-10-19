@@ -1,6 +1,7 @@
 // MyDiskIsFull: the menu bar app. The watching is done by `mdif watch`, a
 // LaunchAgent the app registers; the app reads its history, shows the
-// forecast and what fills the disk, and applies and undoes the fixes.
+// forecast and what fills the disk, and applies and undoes the fixes (not
+// in the App Store edition: see Edition.swift).
 
 import SwiftUI
 import UserNotifications
@@ -105,15 +106,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse,
                                 withCompletionHandler done: @escaping () -> Void) {
+        #if !APP_STORE
+        // Sparkle's reminder: clicking it is "show me", so run the check that
+        // brings the update alert forward.
+        if r.notification.request.identifier == Notifier.updateID {
+            Task { @MainActor in
+                defer { done() }
+                AppDelegate.monitor?.updates.checkForUpdates()
+            }
+            return
+        }
+        #endif
         let info = r.notification.request.content.userInfo
         let action = r.actionIdentifier
+        #if !APP_STORE
         let tweak = info["tweak"] as? String
+        #endif
         let command = info["command"] as? String
         Task { @MainActor in
             defer { done() }
             switch action {
+            #if !APP_STORE
             case Notifier.Action.applyTweak.rawValue:
                 if let tweak { AppDelegate.monitor?.apply(tweak) }
+            #endif
             case Notifier.Action.copyCommand.rawValue:
                 if let command { AppDelegate.monitor?.copy(command) }
             default:
