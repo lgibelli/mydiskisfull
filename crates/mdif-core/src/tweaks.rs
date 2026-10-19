@@ -23,7 +23,7 @@ use crate::owners::Rules;
 use crate::profile::Profile;
 use crate::scan;
 use crate::settings::{self, Setting};
-use crate::store::Store;
+use crate::store::{Store, TweakRecord};
 
 pub struct Tweak {
     pub id: &'static str,
@@ -324,6 +324,33 @@ impl Tweak {
             }
         }
         Ok(if held == changes.len() {
+            Status::Applied
+        } else if pending {
+            Status::Pending
+        } else if held == 0 {
+            Status::NotApplied
+        } else {
+            Status::Partial
+        })
+    }
+
+    /// Whether what `record` set still holds, judged by the settings it
+    /// recorded rather than by where they would be looked for now: the app
+    /// runs without the shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME`, so
+    /// [`Tweak::status`] could look in the wrong place and see it undone.
+    pub fn record_status(&self, record: &TweakRecord) -> Result<Status> {
+        let steps: Vec<Step> = serde_json::from_str(&record.steps)
+            .with_context(|| format!("reading the record of {}", self.id))?;
+        let mut held = 0;
+        let mut pending = false;
+        for s in &steps {
+            if s.setting.read()? == s.to {
+                held += 1;
+            } else if let Setting::Profile { profile, dir } = &s.setting {
+                pending |= profile.downloaded(dir);
+            }
+        }
+        Ok(if held == steps.len() {
             Status::Applied
         } else if pending {
             Status::Pending
@@ -683,6 +710,27 @@ mod tests {
         assert_eq!(t.status(h).unwrap(), Status::NotApplied);
         assert!(t.check(h, &store, 3000).unwrap().is_none());
         assert!(t.revert(&store, 3100).is_err(), "nothing left to revert");
+    }
+
+    #[test]
+    fn a_record_is_judged_by_the_settings_it_names() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let store = Store::open_in_memory().unwrap();
+        let t = files_tweak();
+        t.apply(h, &store, 1000).unwrap();
+        let record = store.open_tweaks(t.id).unwrap().remove(0);
+        // Looked for somewhere else (another GRADLE_USER_HOME, say), it
+        // reads as not applied; its record knows where it went.
+        assert_eq!(t.status(elsewhere.path()).unwrap(), Status::NotApplied);
+        assert_eq!(t.record_status(&record).unwrap(), Status::Applied);
+        Setting::File {
+            path: h.join("init.d/x"),
+        }
+        .write(None)
+        .unwrap();
+        assert_eq!(t.record_status(&record).unwrap(), Status::Partial);
     }
 
     #[test]

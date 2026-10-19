@@ -7,6 +7,8 @@
 //! - [`watch`]: the sampler; [`store`]: its decimated history; [`forecast`]:
 //!   when the disk will be full.
 //! - [`owners`]: which folder space belongs to, and how fast each grows.
+//! - [`privacy`]: the folders a background process mustn't open without Full
+//!   Disk Access, because macOS would wait on a prompt.
 //! - [`incidents`]: runaway fillers (growth, churn), in one sentence.
 //! - [`tweaks`]: reversible settings that stop something from coming back,
 //!   built on [`settings`] and [`profile`]; [`suggest`]: what to do about
@@ -17,6 +19,7 @@ pub mod forecast;
 pub mod incidents;
 pub mod map;
 pub mod owners;
+pub mod privacy;
 pub mod profile;
 pub mod scan;
 pub mod settings;

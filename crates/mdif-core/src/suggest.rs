@@ -229,6 +229,7 @@ fn prefs_churn(home: &Path, now: std::time::SystemTime) -> Fix {
     let recent = std::time::Duration::from_secs(120);
     let busiest = dirs
         .iter()
+        .filter(|d| crate::privacy::may_open(d))
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flat_map(|rd| rd.flatten())
         .filter(|e| e.path().extension().is_some_and(|x| x == "plist"))
@@ -589,7 +590,7 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
 }
 
 fn artifact(name: &str, project: &Path) -> Fix {
-    let has = |f: &str| project.join(f).exists();
+    let has = |f: &str| crate::privacy::may_open(project) && project.join(f).exists();
     let q = shell_quote(project);
     match name {
         "target" if has("Cargo.toml") => Fix::Run {

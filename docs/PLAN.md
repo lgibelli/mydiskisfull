@@ -221,12 +221,20 @@ mydiskisfull/
                   detection; rules, suggestions, tweaks; providers; TM monitor
     mdif-cli/     `mdif map | watch | forecast | owners | incidents | suggest | tweaks | writers`
                   (later `clean | tm`)
-    mdif-agent/   the watcher: tiny headless LaunchAgent, within the budget above
-  app/            menu bar app (Tauri 2, opens a window only on demand); notifications
+  app/            menu bar app: native Swift (SwiftUI MenuBarExtra), built by app/build.sh;
+                  bundles mdif, and registers `mdif watch` as its LaunchAgent (SMAppService)
 ```
 
-- **The agent owns all the watching**, so the UI costs nothing while closed. The menu bar shows a
-  small gauge with "days to full".
+- **The agent owns all the watching**, so the UI costs nothing while closed. The menu bar shows
+  "days to full" next to its icon once the forecast is within two weeks.
+- **The app never measures anything itself.** It runs the `mdif` inside its bundle with `--json`
+  (`status` every 10 minutes and when the menu opens; `suggest`, `tweaks` and `map` on demand),
+  so the command line and the app can't disagree. `app/check-contract.sh` decodes the real output
+  with the app's models in CI, and fixtures cover what a fresh history can't show.
+- **Native Swift, not Tauri.** The menu, notifications with actions, login items and a
+  future widget are native APIs either way, a web view would render untrusted file and process
+  names next to commands that change settings, and the Idlewild build and release pipeline
+  (swiftc without an Xcode project, Developer ID, notarization, Sparkle) is reused as is.
 - **History:** SQLite, decimated, size-capped.
 - **Distribution:** Developer ID signed, notarized, stapled, with signed updates. Not the Mac App
   Store: its sandbox blocks `proc_pid_rusage` on other processes and reading other apps'
@@ -286,9 +294,70 @@ mydiskisfull/
     folder updates apart and shows the catch-up on its own. Replaying FSEvents costs almost nothing
     (2 ms for 1,000 events); listing is the cost, and six folders of 6k–40k entries (a browser
     cache, Rust `deps`) were 80% of one listing.
-- **M4 – Menu bar app.** Gauge, incidents with their fixes, tweaks with one-click apply and undo,
-  map and clean screens, notifications (including a tweak that was undone), onboarding for Full
-  Disk Access.
+- **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
+  - The menu: free space and the forecast, open incidents with their fix, tweaks something
+    undid, the watcher's state, "Fix It for Good" (`mdif suggest`) and the tweaks, each a
+    checkmark that applies or undoes it after showing what it changes and what you give up.
+  - Windows: an overview (gauge, free-space chart with the forecast and cleanups, what grew and
+    wrote most), the disk map (sunburst, treemap or list, click to zoom; the treemap is coloured
+    like a market heatmap by each folder's growth in the last 24 hours from the watcher's
+    history), settings, a welcome for the first launch, and About with the watcher's measured
+    cost.
+  - Notifications: a new incident (with "Apply Fix…" or "Copy Command"), the forecast crossing
+    14 days, 3 days and 1 day or free space under 10 GB (2% on big disks), and a tweak that was
+    undone; each once per episode, withdrawn when it's over. The forecast levels need the 3-day
+    trend, so an afternoon of builds can't raise one.
+  - The watcher runs from the bundle as an SMAppService LaunchAgent and takes over from
+    `mdif agent install` (same history); `mdif agent install` won't start a second one.
+  - `mdif status --json` (everything the menu needs, read from the history only), `mdif forecast
+    --series`, `--json` for `tweaks apply` and `revert`, `mdif watch --log`.
+  - Learned on the way, and handled:
+    - **A background process must never touch a folder that shows a privacy prompt.** Without
+      Full Disk Access, opening Desktop, Documents, Downloads, iCloud Drive, cloud storage or
+      another app's container shows a dialog and `open` waits for the answer: the agent stopped
+      sampling for 18 minutes on the development Mac. The watcher checks for Full Disk Access at
+      every sample, and until it has it leaves those folders (and other volumes) alone
+      (`privacy`), and records the check for the app to show. The same goes for `mdif status`,
+      which the app runs unattended. The map and suggestions run when asked, so they may prompt.
+    - From the command line the watcher's TCC identity is its own binary (`~/.cargo/bin/mdif`),
+      and an adhoc signature changes with every build, so grants don't survive rebuilds. Run by
+      the app, its checks are made as the app: one grant covers both. The app is signed with a
+      Developer ID from `release.env` (gitignored) when there is one.
+    - The disk map is kept (`~/Library/Caches/<bundle id>/disk-map.json`) with when it was
+      taken, and measuring again is suggested once it's over 30 minutes old.
+    - The app's watcher needs a label of its own. Background Task Management keeps a record of
+      a command-line LaunchAgent under its label, disabled once it's removed, and an
+      SMAppService agent with the same label inherits it: "Job is not allowed to bootstrap",
+      reported to the app as "Operation not permitted".
+    - macOS 27 has no per-user privacy database (`~/Library/Application Support/com.apple.TCC`
+      is gone), so Full Disk Access is checked by opening the system's, which also needs it.
+    - Notifications turned off for the app in System Settings can't be asked for again
+      (`requestAuthorization` fails with "not allowed"); the app says so and opens the pane.
+    - Foundation's `.convertFromSnakeCase` turns `writes_24h` into `writes24H`; the app converts
+      keys itself.
+    - The app doesn't have the shell's environment, so where a tweak lives
+      (`GRADLE_USER_HOME`, `XDG_CONFIG_HOME`) can differ from where the command line put it.
+      Applied tweaks are judged by the settings their record names. Applying from the app still
+      uses the app's environment; to do: read the login shell's.
+    - **The watcher was over budget on a busy Mac.** On the development Mac (several agents
+      building) the 30-minute folder updates cost 1.5–1.7 s of CPU each, about 3.5 s an hour
+      with the samples, against 1 s. A profile puts nearly all of it in `getattrlistbulk`, at
+      10–15 µs an entry from a background process rather than the 3.5 µs measured in the
+      foreground. Replaying 55 minutes of the journal: 2,400 folders changed, 228,000
+      entries, 64% of them in five folders of 8,000+ entries (two builds' `deps`, Chrome's and
+      Slack's disk caches, `~/.wrangler/logs`), 5% in the 2,300 folders under 64 entries.
+      Tuned (owners.rs): a folder whose size changed under a fifth of the slowest growth an
+      incident can have (16 MB a period at the defaults) since its last listing is steady and
+      waits 2×, then 4× its size-based wait (8 hours at most): caches and logs churn but keep
+      their size, while a filler keeps growing. (A fixed 16 MB made the e2e test's scaled-down
+      filler look steady; listed in lumps, its incident flickered closed and open again.)
+      and an update lists at most 20,000 entries of folders it has seen before, the most
+      overdue first. On that journal the updates go from about 2 s an hour to 0.5 s (all
+      steady) or 0.8 s (the builds growing), and the cap holds them under 0.4 s whatever the
+      Mac does. Growth still counts in full, later; a restart loses what a waiting folder grew
+      since its last listing (little, by definition).
+  - Still to do: the clean screen (with M5's rules), notifications delivered on a signed build,
+    and confirming the tuned watcher's cost over a day on a busy Mac.
 - **M5 – Cold data + offload, Clean, TM, cloud health.** Cold-folder detection, offload
   strategies over the verified Move flow, rules ported from the original shell script, TM
   monitor, OneDrive database.
@@ -305,5 +374,6 @@ mydiskisfull/
   the defaults (12 samples and 2 updates an hour).
 
 ## Open questions
-- UI shell: Tauri, or a native Swift menu bar like Idlewild driving the Rust core?
-- Notifications from the agent need an app bundle; ship the agent as a helper inside the app?
+- None open for M4's design. (Answered: the SMAppService watcher's privacy checks are made as the
+  app, `subject=io.github.lgibelli.mydiskisfull` in tccd's log, so one Full Disk Access grant
+  covers both.)

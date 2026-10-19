@@ -18,11 +18,12 @@ time and speaks up when something is filling the disk fast enough to matter:
 
 Free and open source, with no telemetry and no account.
 
-> **Status: early development, command line only.** The watcher and its forecast (`mdif watch`,
+> **Status: early development.** The watcher and its forecast (`mdif watch`,
 > `mdif forecast`), growth per folder and runaway-filler incidents (`mdif owners`,
 > `mdif incidents`), what to do about each cause (`mdif suggest`) and reversible tweaks that stop
 > things coming back (`mdif tweaks`), the honest disk map (`mdif map`) and the disk-writer monitor
-> (`mdif writers`) work today. The menu bar app is next; see the [plan](docs/PLAN.md).
+> (`mdif writers`) work today, on the command line and in a menu bar app you build yourself.
+> There is no release yet; see the [plan](docs/PLAN.md).
 
 ## Why another disk tool
 
@@ -53,12 +54,42 @@ was invisible to snapshot tools:
 
 ## Try it
 
-Requires macOS and Rust 1.88+.
+Requires macOS and Rust 1.88+; the menu bar app needs macOS 14 and Xcode's command line tools.
+
+### The menu bar app
 
 ```sh
 git clone https://github.com/lgibelli/mydiskisfull.git
 cd mydiskisfull
+app/build.sh                  # build/MyDiskIsFull.app: the app, with mdif inside
+open build/MyDiskIsFull.app
+```
+
+The first launch starts the watcher (a LaunchAgent inside the app running the same `mdif watch`
+as below; one started with `mdif agent install` is stopped, and the history carries on), asks for
+Full Disk Access and for notifications. The menu shows free space and when the
+disk will be full, what is filling it with the fix for each, suggestions, and the tweaks, which
+apply and undo with a click after saying what they change and what you give up. The overview
+window charts free space with the forecast. The disk map runs when you ask for it and shows the
+space as a sunburst, as a treemap like a stock-market heatmap (tile size is space, colour is how
+much the folder grew or shrank in the last day) or as a list; click a folder to zoom in.
+Notifications come once per episode: a runaway filler, the disk full within two weeks, three days
+or a day, and a tweak something undid.
+
+Without Full Disk Access macOS keeps the watcher out of other apps' folders and your Desktop,
+Documents and Downloads. It leaves them alone rather than ask, since a background process asking
+would wait on a dialog nobody may be there to answer; they are simply not watched until you grant
+it.
+
+To keep that permission across rebuilds, sign the app with your own certificate: copy
+`release.env.example` to `release.env` and set your team ID. Unsigned (adhoc) builds work, but
+macOS forgets their permissions every time you rebuild.
+
+### The command line
+
+```sh
 cargo build --release
+./target/release/mdif status           # free space, the forecast and what needs attention
 ./target/release/mdif map              # where the space is, reconciled with APFS
 ./target/release/mdif map --root ~     # just your home folder
 ./target/release/mdif writers          # which processes are writing to disk right now
@@ -172,6 +203,7 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np`, `sysctl` (boot time, swap) |
 | `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder, incidents, suggestions and tweaks (reversible settings and configuration profiles) |
 | `crates/mdif-cli` | The `mdif` command |
+| `app/` | The menu bar app (SwiftUI). It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
 
 ## Not on the Mac App Store
 

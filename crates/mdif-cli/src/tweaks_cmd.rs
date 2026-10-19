@@ -112,7 +112,7 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn status_word(s: Status) -> &'static str {
+pub(crate) fn status_word(s: Status) -> &'static str {
     match s {
         Status::Absent(_) => "absent",
         Status::NotApplied => "not applied",
@@ -187,88 +187,133 @@ fn signed_bytes(per_day: f64) -> String {
     }
 }
 
-pub fn apply(db: &Path, id: &str, dry_run: bool) -> Result<()> {
+pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
     let t = find(id)?;
     let home = home();
     if let Status::Absent(why) = t.status(&home)? {
         bail!("{id} doesn't apply to this Mac: {why}.");
     }
-    println!("{}", t.title);
-    println!("  Why: {}", t.why);
-    println!("  You give up: {}", t.cost);
     let steps = if dry_run {
         t.plan(&home)?
     } else {
         let store = Store::open(db)?;
         t.apply(&home, &store, unix_now())?
     };
-    if steps.is_empty() {
+    let changes: Vec<String> = steps.iter().map(step_line).collect();
+    let next = (!dry_run && !steps.is_empty()).then(|| next_line(t.after));
+    if json_out {
+        let out = json!({
+            "id": t.id,
+            "title": t.title,
+            "why": t.why,
+            "cost": t.cost,
+            "dry_run": dry_run,
+            "changes": changes,
+            "next": next,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    println!("{}", t.title);
+    println!("  Why: {}", t.why);
+    println!("  You give up: {}", t.cost);
+    if changes.is_empty() {
         println!("Already applied: nothing to change.");
         return Ok(());
     }
     println!("  {}:", if dry_run { "Would change" } else { "Changed" });
-    print_steps(&steps);
-    if dry_run {
-        println!("Nothing changed (dry run).");
-        return Ok(());
+    for c in &changes {
+        println!("    {c}");
     }
-    match t.after {
-        After::Nothing => println!("Done; it takes effect from now on."),
-        After::Relaunch(app) => println!("Done; it takes effect once {app} restarts."),
-        After::Restart => println!("Done; restart the Mac when it suits you to finish."),
-        After::Approve(app) => println!(
+    match next {
+        None => println!("Nothing changed (dry run)."),
+        Some(next) => {
+            println!("{next}");
+            println!(
+                "Undo it with `mdif tweaks revert {id}`; `mdif tweaks` shows whether it worked."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What to expect once a tweak is applied.
+fn next_line(after: After) -> String {
+    match after {
+        After::Nothing => "Done; it takes effect from now on.".into(),
+        After::Relaunch(app) => format!("Done; it takes effect once {app} restarts."),
+        After::Restart => "Done; restart the Mac when it suits you to finish.".into(),
+        After::Approve(app) => format!(
             "Next: System Settings is open at Privacy & Security → Profiles. Install the \
              MyDiskIsFull profile there, then quit and reopen {app}."
         ),
     }
-    println!("Undo it with `mdif tweaks revert {id}`; `mdif tweaks` shows whether it worked.");
-    Ok(())
 }
 
-pub fn revert(db: &Path, id: &str) -> Result<()> {
+pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
     let t = find(id)?;
     if !db.exists() {
         bail!("MyDiskIsFull has no record of applying {id}, so it doesn't know what to put back.");
     }
     let store = Store::open(db)?;
     let r = t.revert(&store, unix_now())?;
-    if r.restored.is_empty() && r.kept.is_empty() {
-        println!("Nothing to undo: {id}'s settings are already as they were.");
-    }
-    if !r.restored.is_empty() {
-        println!("Put back:");
-        let back: Vec<Step> = r
-            .restored
-            .iter()
-            .map(|s| Step {
+    let restored: Vec<String> = r
+        .restored
+        .iter()
+        .map(|s| {
+            step_line(&Step {
                 setting: s.setting.clone(),
                 from: s.to.clone(),
                 to: s.from.clone(),
             })
-            .collect();
-        print_steps(&back);
+        })
+        .collect();
+    let kept: Vec<String> = r
+        .kept
+        .iter()
+        .map(|(s, v)| format!("{}: {}", setting_name(s), value_text(s, v.as_ref())))
+        .collect();
+    let restart = t.after == After::Restart && !restored.is_empty();
+    if json_out {
+        let out = json!({
+            "id": t.id,
+            "title": t.title,
+            "restored": restored,
+            "kept": kept,
+            "restart": restart,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
     }
-    if !r.kept.is_empty() {
-        println!("Left as they are (changed since the tweak):");
-        for (s, v) in &r.kept {
-            println!("    {}: {}", setting_name(s), value_text(s, v.as_ref()));
+    if restored.is_empty() && kept.is_empty() {
+        println!("Nothing to undo: {id}'s settings are already as they were.");
+    }
+    if !restored.is_empty() {
+        println!("Put back:");
+        for line in &restored {
+            println!("    {line}");
         }
     }
-    if t.after == After::Restart && !r.restored.is_empty() {
+    if !kept.is_empty() {
+        println!("Left as they are (changed since the tweak):");
+        for line in &kept {
+            println!("    {line}");
+        }
+    }
+    if restart {
         println!("It takes effect after a restart.");
     }
     Ok(())
 }
 
-fn print_steps(steps: &[Step]) {
-    for s in steps {
-        println!(
-            "    {}: {} → {}",
-            setting_name(&s.setting),
-            value_text(&s.setting, s.from.as_ref()),
-            value_text(&s.setting, s.to.as_ref())
-        );
-    }
+/// `setting: before → after`.
+fn step_line(s: &Step) -> String {
+    format!(
+        "{}: {} → {}",
+        setting_name(&s.setting),
+        value_text(&s.setting, s.from.as_ref()),
+        value_text(&s.setting, s.to.as_ref())
+    )
 }
 
 fn setting_name(s: &Setting) -> String {

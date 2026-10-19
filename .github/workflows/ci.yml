@@ -100,6 +100,25 @@ jobs:
               and .cpu_us_per_sample * 12 + .cpu_us_per_period * 2 < 1000000
               and .written_per_sample * 12 < 1000000'
 
+  app:
+    name: app (bundle + JSON contract)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # No release.env here, so the bundle is signed adhoc.
+      - run: app/build.sh
+      - name: The bundle is complete and signed
+        run: |
+          app=build/MyDiskIsFull.app/Contents
+          test -x "$app/MacOS/MyDiskIsFull"
+          "$app/MacOS/mdif" --version
+          plutil -lint "$app/Info.plist" "$app/Library/LaunchAgents/io.github.lgibelli.mydiskisfull.watcher.plist"
+          test "$(plutil -extract BundleProgram raw "$app/Library/LaunchAgents/io.github.lgibelli.mydiskisfull.watcher.plist")" = Contents/MacOS/mdif
+          codesign --verify --deep --strict build/MyDiskIsFull.app
+      - run: app/check-contract.sh
+
   intel:
     name: build (Intel)
     runs-on: macos-latest

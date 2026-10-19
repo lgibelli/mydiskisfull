@@ -12,7 +12,7 @@ use mdif_core::suggest;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
 use mdif_core::watch::{self, Cost, Watcher};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// The watcher's own budget, from the plan.
 const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
@@ -22,16 +22,62 @@ pub fn default_db() -> PathBuf {
     home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
 }
 
-pub fn watch(
-    db: &Path,
-    volume: &Path,
-    interval: Duration,
-    owners_every: u64,
-    once: bool,
-    quiet: bool,
-) -> Result<()> {
+/// Where the agent's errors go.
+pub fn log_path() -> PathBuf {
+    home().join("Library/Logs/MyDiskIsFull/watch.log")
+}
+
+/// The log is started afresh, keeping one old copy, once it passes this.
+const LOG_MAX: u64 = 1_000_000;
+
+/// Send standard error to the log: the LaunchAgent inside the app can't name
+/// a path in the user's home folder in its plist.
+fn open_log() -> Result<()> {
+    let path = log_path();
+    std::fs::create_dir_all(path.parent().expect("has a parent"))?;
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX) {
+        std::fs::rename(&path, path.with_extension("log.old"))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    mdif_macos::sys::redirect_stderr(&file).context("redirecting errors to the log")?;
+    Ok(())
+}
+
+/// History database, WAL and shared memory together.
+pub(crate) fn history_bytes(db: &Path) -> u64 {
+    ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|s| std::fs::metadata(format!("{}{s}", db.display())).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+pub struct WatchOptions {
+    pub interval: Duration,
+    pub owners_every: u64,
+    pub once: bool,
+    pub quiet: bool,
+    pub log: bool,
+}
+
+pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
+    let WatchOptions {
+        interval,
+        owners_every,
+        once,
+        quiet,
+        log,
+    } = o;
+    if log {
+        open_log()?;
+    }
     let store = Store::open(db)?;
-    let mut w = Watcher::new(store, volume)?;
+    let mut w =
+        Watcher::new(store, volume)?.with_access_check(mdif_macos::sys::access_probes(&home()));
     if owners_every > 0 && !once {
         w = w.with_owners(Rules::for_home(&home()), owners_every as i64)?;
     }
@@ -87,16 +133,25 @@ fn print_sample(s: &watch::Sample) {
     );
     if let Some(p) = s.period {
         println!(
-            "      folders: {} changes, {} folders re-listed, {} remembered{}",
+            "      folders: {} changes, {} folders re-listed ({} entries), {} remembered{}{}",
             p.events,
             p.listed,
+            p.entries,
             p.tracked,
+            if p.skipped > 0 {
+                format!(", {} left alone (they need Full Disk Access)", p.skipped)
+            } else {
+                String::new()
+            },
             if p.gaps > 0 {
                 ", history incomplete"
             } else {
                 ""
             }
         );
+        for (dir, n) in &s.biggest {
+            println!("      {n:>9} entries  {}", printable(&tilde(dir)));
+        }
         for (owner, d) in s.growth.iter().take(5) {
             let sign = if *d < 0 { "-" } else { "+" };
             println!(
@@ -122,7 +177,22 @@ pub(crate) fn tilde(path: &str) -> String {
     }
 }
 
-pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
+pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Result<()> {
+    if !db.exists() && json_out {
+        // Nothing yet, but still JSON for whoever reads it.
+        let out = json!({
+            "volume": volume,
+            "samples": 0,
+            "forecast": null,
+            "writes_24h": [],
+            "growth_24h": [],
+            "watcher_cost": null,
+            "last_period": null,
+            "series": [],
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     if !db.exists() {
         println!(
             "No history yet. Start the watcher with `mdif agent install` (or run `mdif watch`)."
@@ -138,32 +208,23 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     let f = forecast::forecast(&pts, &Params::default());
     let writers = store.writes_since(now - DAY)?;
     let cost = watch::recorded_cost(&store)?;
+    let last_period = watch::recorded_period(&store)?;
     let interval = sampling_interval(&pts);
 
     if json_out {
-        let out = json!({
+        let mut out = json!({
             "volume": key,
             "samples": pts.len(),
             "forecast": f,
             "writes_24h": writers.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
             "growth_24h": store.growth_since(now - DAY)?.iter().map(|(o, b)| json!({"owner": o, "bytes": b})).collect::<Vec<_>>(),
-            "watcher_cost": cost.map(|c| {
-                let (cpu, written) = c.per_sample();
-                let (cpu_h, written_h) = c.per_hour(interval);
-                json!({
-                    "samples": c.samples,
-                    "interval_secs": interval,
-                    "cpu_us_per_sample": cpu.as_micros() as u64,
-                    "written_per_sample": written,
-                    "cpu_us_per_hour": cpu_h.as_micros() as u64,
-                    "written_per_hour": written_h,
-                    "owners_every_secs": c.every,
-                    "periods": c.periods,
-                    "cpu_us_per_period": c.per_period().map(|p| p.as_micros() as u64),
-                    "catch_up_cpu_us": c.catch_up.as_micros() as u64,
-                })
-            }),
+            "watcher_cost": cost.map(|c| cost_json(&c, interval)),
+            "last_period": last_period,
         });
+        if series {
+            // [unix seconds, bytes free], at the resolution the store keeps.
+            out["series"] = pts.iter().map(|p| json!([p.ts, p.avail])).collect();
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -190,6 +251,9 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     print_writers(&writers);
     if let Some(c) = cost {
         print_cost(&c, interval);
+    }
+    if let Some(p) = last_period {
+        print_last_period(&p);
     }
     Ok(())
 }
@@ -307,6 +371,23 @@ fn print_writers(writers: &[(String, u64)]) {
     }
 }
 
+pub(crate) fn cost_json(c: &Cost, interval: i64) -> Value {
+    let (cpu, written) = c.per_sample();
+    let (cpu_h, written_h) = c.per_hour(interval);
+    json!({
+        "samples": c.samples,
+        "interval_secs": interval,
+        "cpu_us_per_sample": cpu.as_micros() as u64,
+        "written_per_sample": written,
+        "cpu_us_per_hour": cpu_h.as_micros() as u64,
+        "written_per_hour": written_h,
+        "owners_every_secs": c.every,
+        "periods": c.periods,
+        "cpu_us_per_period": c.per_period().map(|p| p.as_micros() as u64),
+        "catch_up_cpu_us": c.catch_up.as_micros() as u64,
+    })
+}
+
 fn print_cost(c: &Cost, interval: i64) {
     let (cpu, written) = c.per_sample();
     let (cpu_h, written_h) = c.per_hour(interval);
@@ -346,9 +427,36 @@ fn print_cost(c: &Cost, interval: i64) {
     }
 }
 
+fn print_last_period(p: &watch::LastPeriod) {
+    let biggest: Vec<String> = p
+        .biggest
+        .iter()
+        .map(|(d, n)| format!("{} ({n})", printable(&tilde(d))))
+        .collect();
+    println!(
+        "The last update of the folders ({}) listed {} folders, {} entries in all, in {} ms{}.",
+        local(p.at).format("%H:%M"),
+        p.listed,
+        p.entries,
+        p.cpu_us / 1000,
+        if biggest.is_empty() {
+            String::new()
+        } else {
+            format!("; the biggest: {}", biggest.join(", "))
+        }
+    );
+    if p.skipped > 0 {
+        println!(
+            "It left {} folders alone: they need Full Disk Access, and asking for it in the \
+             background would wait on a dialog.",
+            p.skipped
+        );
+    }
+}
+
 /// Median gap between the most recent samples; the agent's default if
 /// there aren't enough.
-fn sampling_interval(pts: &[mdif_core::store::SpacePoint]) -> i64 {
+pub(crate) fn sampling_interval(pts: &[mdif_core::store::SpacePoint]) -> i64 {
     let recent = &pts[pts.len().saturating_sub(50)..];
     let mut gaps: Vec<i64> = recent
         .windows(2)
@@ -362,7 +470,7 @@ fn sampling_interval(pts: &[mdif_core::store::SpacePoint]) -> i64 {
     gaps[gaps.len() / 2]
 }
 
-fn window(r: &Rate) -> String {
+pub(crate) fn window(r: &Rate) -> String {
     if r.window >= DAY {
         format!("{}-day", r.window / DAY)
     } else {
@@ -370,7 +478,7 @@ fn window(r: &Rate) -> String {
     }
 }
 
-fn days(d: f64) -> String {
+pub(crate) fn days(d: f64) -> String {
     let (n, unit) = if d < 1.0 {
         ((d * 24.0).round().max(1.0), "hour")
     } else if d < 100.0 {
@@ -385,7 +493,7 @@ fn days(d: f64) -> String {
     }
 }
 
-fn date(at: i64, in_days: f64) -> String {
+pub(crate) fn date(at: i64, in_days: f64) -> String {
     let when = local(at + (in_days * DAY as f64) as i64);
     if in_days < 2.0 {
         when.format("%a %H:%M").to_string()
@@ -396,7 +504,7 @@ fn date(at: i64, in_days: f64) -> String {
     }
 }
 
-fn duration(secs: i64) -> String {
+pub(crate) fn duration(secs: i64) -> String {
     if secs >= 2 * DAY {
         format!("{} days", secs / DAY)
     } else if secs >= 2 * HOUR {
