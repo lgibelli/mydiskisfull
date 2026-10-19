@@ -22,8 +22,8 @@ Free and open source, with no telemetry and no account.
 > `mdif forecast`), growth per folder and runaway-filler incidents (`mdif owners`,
 > `mdif incidents`), what to do about each cause (`mdif suggest`) and reversible tweaks that stop
 > things coming back (`mdif tweaks`), the honest disk map (`mdif map`) and the disk-writer monitor
-> (`mdif writers`) work today, on the command line and in a menu bar app you build yourself.
-> There is no release yet; see the [plan](docs/PLAN.md).
+> (`mdif writers`) work today, in a menu bar app and on the command line. 0.1.0 is the first
+> release; what's next is in the [plan](docs/PLAN.md).
 
 ## Why another disk tool
 
@@ -52,7 +52,25 @@ was invisible to snapshot tools:
 - **Prove it before deleting.** Only regenerable data, or data with a verified copy, is offered
   for deletion. Personal files only ever go through a verified move to your cloud or an archive.
 
-## Try it
+## Install
+
+Download **MyDiskIsFull.dmg** from the
+[latest release](https://github.com/lgibelli/mydiskisfull/releases/latest), open it and drag
+MyDiskIsFull into Applications. It needs macOS 14 or later, on Apple silicon or Intel, and it's
+signed and notarized. It updates itself with [Sparkle](https://sparkle-project.org): once a day
+it reads the latest release's feed from GitHub (nothing is sent), and an update installs only if
+it carries the project's signature. Settings turns the check off.
+
+The command line is inside the app; to use it from a terminal:
+
+```sh
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/MyDiskIsFull.app/Contents/MacOS/mdif /usr/local/bin/mdif
+```
+
+or download `mdif-…-macos-universal.tar.gz` from the same release on its own.
+
+## Build it
 
 Requires macOS and Rust 1.88+; the menu bar app needs macOS 14 and Xcode's command line tools.
 
@@ -63,6 +81,7 @@ git clone https://github.com/lgibelli/mydiskisfull.git
 cd mydiskisfull
 app/build.sh                  # build/MyDiskIsFull.app: the app, with mdif inside
 open build/MyDiskIsFull.app
+app/build.sh --app-store      # the App Store edition, in build/AppStore (see below)
 ```
 
 The first launch starts the watcher (a LaunchAgent inside the app running the same `mdif watch`
@@ -83,7 +102,8 @@ it.
 
 To keep that permission across rebuilds, sign the app with your own certificate: copy
 `release.env.example` to `release.env` and set your team ID. Unsigned (adhoc) builds work, but
-macOS forgets their permissions every time you rebuild.
+macOS forgets their permissions every time you rebuild. Making a release is in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ### The command line
 
@@ -205,11 +225,16 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | `crates/mdif-cli` | The `mdif` command |
 | `app/` | The menu bar app (SwiftUI). It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
 
-## Not on the Mac App Store
+## The Mac App Store
 
-It can't be. The App Sandbox blocks reading other processes' I/O counters and other apps'
-containers, which is most of what this tool needs. Releases will be Developer ID signed and
-notarized.
+The full version can't be there. App Store apps run in the App Sandbox, which blocks reading
+other processes' I/O counters (which apps write the most, write churn) and changing other apps'
+settings (the tweaks). Releases are Developer ID signed and notarized, and update themselves.
+
+`app/build.sh --app-store` builds an App Store edition into `build/AppStore`: the same app
+without the tweaks and the per-app writes, whose code isn't compiled in, and with a note where
+they would be that links the full version. It isn't sandboxed or submitted yet; what's left is
+in [docs/PLAN.md](docs/PLAN.md) (M7).
 
 ## Contributing
 

@@ -6,7 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+Nothing yet.
+
+## [0.1.0] - 2026-10-19
+
+The first release.
+
 ### Added
+- Releases: a universal (Apple silicon and Intel) disk image, signed with a Developer ID,
+  notarized and stapled, and the command line on its own. `app/release.sh` makes them and
+  checks each step (hardened runtime, the tickets, Gatekeeper on the image as downloaded);
+  `app/release.sh --upload` puts them on a draft GitHub release. The release workflow does the
+  same from a `release/x.y.z` branch and attests the provenance of what it built.
+- Updates with Sparkle: once a day the app reads the appcast attached to the latest GitHub
+  release, and installs an update only if it carries the project's Ed25519 signature and is
+  signed by the same team. "Check for Updates…" in the menu, a switch in Settings, a line in
+  About. A reminder notification when an update waits behind other windows. After an update
+  the app restarts the watcher, which would otherwise keep running the old `mdif`. The App
+  Store edition has none of it: the App Store updates its own apps.
 - `mdif map`: whole-disk map reconciled with what APFS reports in use. Uses APFS private size,
   counts clone families once, keeps cloud-only placeholders separate, and reports purgeable space,
   local Time Machine snapshots and unreadable folders.
@@ -68,6 +85,9 @@ All notable changes to this project are documented here. The format is based on
   incident, the forecast crossing 14, 3 and 1 days or free space under 10 GB, and a tweak
   something undid, once per episode. The watcher runs from the bundle as an SMAppService
   LaunchAgent (its own label, `…mydiskisfull.watcher`) and takes over from `mdif agent install`.
+- `app/build.sh --app-store`: an App Store edition of the app, without the tweaks and the
+  per-app writes (the App Sandbox rules them out; their code isn't compiled in). Where they
+  would be, it says why and links the free, open-source full version. Not sandboxed yet.
 - `mdif status`: free space, the forecast, an alert level, open incidents, tweaks something undid
   and whether the watcher has Full Disk Access. With `--json` it is what the app reads; it only
   reads the history, so it takes milliseconds.
@@ -113,3 +133,5 @@ All notable changes to this project are documented here. The format is based on
 ### Security
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
+
+[0.1.0]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.0

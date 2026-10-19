@@ -236,9 +236,12 @@ mydiskisfull/
   names next to commands that change settings, and the Idlewild build and release pipeline
   (swiftc without an Xcode project, Developer ID, notarization, Sparkle) is reused as is.
 - **History:** SQLite, decimated, size-capped.
-- **Distribution:** Developer ID signed, notarized, stapled, with signed updates. Not the Mac App
+- **Distribution:** Developer ID signed, notarized, stapled, with signed updates (Sparkle; see
+  M6 and `docs/RELEASING.md`). Not the Mac App
   Store: its sandbox blocks `proc_pid_rusage` on other processes and reading other apps'
-  containers.
+  containers. A reduced App Store edition is possible (M7): `app/build.sh --app-store` compiles
+  the app with `APP_STORE`, which leaves out the tweaks and the per-app writes and shows a note
+  linking the full version where they would be (`app/Sources/Edition.swift`).
 - **Builds offline** from the local cargo cache. Everything the macOS layer needs is in
   `libc` 0.2.190.
 
@@ -349,10 +352,10 @@ mydiskisfull/
       Tuned (owners.rs): a folder whose size changed under a fifth of the slowest growth an
       incident can have (16 MB a period at the defaults) since its last listing is steady and
       waits 2×, then 4× its size-based wait (8 hours at most): caches and logs churn but keep
-      their size, while a filler keeps growing. (A fixed 16 MB made the e2e test's scaled-down
-      filler look steady; listed in lumps, its incident flickered closed and open again.)
-      and an update lists at most 20,000 entries of folders it has seen before, the most
-      overdue first. On that journal the updates go from about 2 s an hour to 0.5 s (all
+      their size, while a filler keeps growing; and an update lists at most 20,000 entries of
+      folders it has seen before, the most overdue first. (A fixed 16 MB made the e2e test's
+      scaled-down filler look steady; listed in lumps, its incident flickered closed and open
+      again.) On that journal the updates go from about 2 s an hour to 0.5 s (all
       steady) or 0.8 s (the builds growing), and the cap holds them under 0.4 s whatever the
       Mac does. Growth still counts in full, later; a restart loses what a waiting folder grew
       since its last listing (little, by definition).
@@ -360,8 +363,46 @@ mydiskisfull/
     and confirming the tuned watcher's cost over a day on a busy Mac.
 - **M5 – Cold data + offload, Clean, TM, cloud health.** Cold-folder detection, offload
   strategies over the verified Move flow, rules ported from the original shell script, TM
-  monitor, OneDrive database.
-- **M6 – Release.** Privileged helper, notarization, signed updates, website.
+  monitor, OneDrive database. The privileged helper (SMAppService daemon) for the clean-ups
+  that need admin rights (Spotlight, root-owned apps, `/Library` caches) comes with the clean
+  screen, its only user: moved here from M6, since a root daemon with nothing to do would add
+  an approval prompt and attack surface to every install.
+- **M6 – Release (done, 0.1.0).** Notarization, signed updates, the download page.
+  - `app/release.sh`: a universal build (`ARCH=universal app/build.sh`), the app notarized and
+    stapled, then a disk image signed, notarized and stapled in its own right (Gatekeeper
+    assesses the image too), checked by mounting it and assessing the app inside as a download
+    is; the command line alone as a tarball (the binary from the bundle, so the same
+    notarization ticket); the Sparkle feed, signed. Every step checks its result rather than
+    trusting an exit status (Idlewild's lesson: `codesign | grep -q` under pipefail fails when
+    it matches). `--upload` makes a *draft* release; a person publishes it.
+  - Signed updates with Sparkle 2.10, vendored from the pinned release tarball and re-signed
+    with the team's identity, as in Idlewild. The feed is the appcast on the latest GitHub
+    release (`releases/latest/download/appcast.xml`), so there's no server: publishing the
+    release ships the update. Trust is the Ed25519 key (its own keychain account, not shared
+    with other apps) plus the team signature. A menu bar app can't take the focus, so Sparkle's
+    gentle reminders put it in the Dock and post a notification while an update waits. After
+    an update the app restarts the watcher (`launchctl kickstart -k`), which would otherwise
+    keep running the replaced `mdif` until the next login.
+  - `.github/workflows/release.yml`: the same from a `release/x.y.z` branch, with a provenance
+    attestation; needs the secrets listed in `docs/RELEASING.md`. It replaces the tag-triggered
+    workflow that published only the command line.
+  - The download page is the GitHub release and the README's Install section; a site of its
+    own isn't needed while the feed lives on the release.
+- **M7 – App Store edition.** Done: the build flag, the tweaks and per-app writes compiled
+  out, the notes, a CI check that the tweak flow isn't in that binary. To do:
+  - The App Sandbox (entitlements for the app and for `mdif`, which inherits it), and
+    checking on a scratch Mac or CI runner what really works inside it.
+  - The watcher: a sandboxed SMAppService agent gets a container of its own, apart from the
+    app's, so the two need an app group for the history; or the app watches while it runs
+    and starts at login. Either way nothing may run after the app quits without consent
+    (App Review 2.4.5).
+  - Access: the user picks the disk in an Open dialog, kept as a security-scoped bookmark, in
+    place of Full Disk Access; the welcome and the access cards change with it.
+  - `mdif` without per-process write sampling and the tweak commands (a cargo feature).
+  - Packaging: Apple Distribution certificate, an App Store provisioning profile, an
+    installer package uploaded with Transporter.
+  - Review risk: a link to download a version from outside the store can be rejected. If
+    it is, the note can say what's missing without the link.
 
 ## Verification
 - Unit tests on synthetic fixtures: clones, sparse files, unreadable folders, symlinks, worktrees

@@ -34,7 +34,7 @@ struct WelcomeView: View {
             }
 
             StepRow(number: 1, done: watcher.isOn, title: "Start the watcher",
-                    text: "A small background process that samples free space and disk writes every 5 minutes, and which folders grew every 30. About shows what it costs, measured.") {
+                    text: "A small background process that samples free space \(Edition.appStore ? "" : "and disk writes ")every 5 minutes, and which folders grew every 30. About shows what it costs, measured.") {
                 if watcher.status == .requiresApproval {
                     Button("Open Login Items…") { watcher.openLoginItems() }
                 } else {

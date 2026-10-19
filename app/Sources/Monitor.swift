@@ -21,6 +21,9 @@ final class Monitor: ObservableObject {
 
     let watcher = WatcherService()
     let settings = AppSettings()
+    #if !APP_STORE
+    lazy var updates = Updater(settings: settings)
+    #endif
 
     private var timer: Timer?
     private var measuredAt: Date?
@@ -60,6 +63,11 @@ final class Monitor: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.wokeAt = Date() }
         }
+        watcher.restartIfUpdated()
+        #if !APP_STORE
+        // Sparkle's daily schedule starts with it, not when a window asks.
+        _ = updates
+        #endif
         Task { await refresh() }
     }
 
@@ -116,7 +124,9 @@ final class Monitor: ObservableObject {
 
     // MARK: - What the menu bar shows
 
-    var undone: [AppliedTweak] { status?.tweaks.filter(\.undone) ?? [] }
+    /// Tweaks this app applied that something undid (none in the App Store
+    /// edition, which can't apply them).
+    var undone: [AppliedTweak] { Edition.appStore ? [] : status?.tweaks.filter(\.undone) ?? [] }
 
     var watcherProblem: String? {
         if !watcher.isOn && !watcher.hasCommandLineAgent { return "The watcher is off" }
@@ -209,6 +219,7 @@ final class Monitor: ObservableObject {
         NSPasteboard.general.setString(command, forType: .string)
     }
 
+    #if !APP_STORE
     func apply(_ id: String) {
         Task {
             if await TweakFlow.apply(id) { await afterTweak() }
@@ -226,6 +237,7 @@ final class Monitor: ObservableObject {
         await refresh()
         await measure()
     }
+    #endif
 
     // MARK: - Its own cost
 

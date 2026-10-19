@@ -1,7 +1,9 @@
 // Applying and undoing a tweak: what it changes and what you give up first,
 // from a dry run, then what happened. The Rust core records every value it
 // replaces before changing anything, so Undo puts back exactly what was there.
+// Not in the App Store edition (see Edition.swift).
 
+#if !APP_STORE
 import AppKit
 
 @MainActor
@@ -82,3 +84,4 @@ enum TweakFlow {
         a.runModal()
     }
 }
+#endif

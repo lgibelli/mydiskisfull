@@ -26,5 +26,27 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 The MyDiskIsFull contributors</string>
+	<!-- Updates, via Sparkle (the full edition only: app/build.sh removes these
+	     from the App Store one). See app/Sources/Updater.swift.
+
+	     SUPublicEDKey is the trust anchor. The feed is only a hint: an update
+	     installs only if its archive carries an Ed25519 signature made with the
+	     matching private key (in the maintainer's keychain and the release
+	     job's secrets) and the app inside is signed by the same team. The feed
+	     is the appcast attached to the latest GitHub release.
+
+	     Checks once a day without asking first; Settings turns it off. A check
+	     sends nothing but the request (no system profile).
+	     SUVerifyUpdateBeforeExtraction checks the signature before unpacking. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/lgibelli/mydiskisfull/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>Ke1DpxYBAViRiRdrOAbohaCV85YCaf9HMbW7wAPR4no=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

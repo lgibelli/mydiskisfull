@@ -74,10 +74,16 @@ enum Notifier {
         n.body = e.sentence
         n.userInfo = ["episode": e.id]
         switch e.fix {
+        #if APP_STORE
+        case .tweak:
+            n.subtitle = "Fix: \(tweakTitle ?? e.fixLine) (in the full version)"
+            n.categoryIdentifier = Category.incident.rawValue
+        #else
         case .tweak(let id):
             n.subtitle = "Fix: \(tweakTitle ?? e.fixLine)"
             n.categoryIdentifier = Category.incidentTweak.rawValue
             n.userInfo["tweak"] = id
+        #endif
         case .run(let command, _):
             n.subtitle = "Fix: run a command once"
             n.categoryIdentifier = Category.incidentCommand.rawValue
@@ -114,6 +120,17 @@ enum Notifier {
         n.categoryIdentifier = Category.undone.rawValue
         n.userInfo = ["tweak": t.id]
         post(id: "undone-\(t.id)", n)
+    }
+
+    static let updateID = "update"
+
+    /// Sparkle's gentle reminder: an update is waiting behind other windows.
+    static func update(version: String) {
+        let n = UNMutableNotificationContent()
+        n.title = "MyDiskIsFull \(version) is available"
+        n.body = "Click to see what's new and install it."
+        n.sound = .default
+        post(id: updateID, n)
     }
 
     static func withdraw(_ ids: [String]) {
