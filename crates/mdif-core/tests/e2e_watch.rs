@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -92,6 +93,7 @@ fn detects_filler_and_churner_and_nothing_else() {
 
     let seed = vol.join("seed/seed.bin");
     write_synced(&seed, SEED);
+    let mut seed_alloc = fs::metadata(&seed).unwrap().blocks() * 512;
     let churned = vol.join("churn/churn.bin");
     write_synced(&churned, CHURN_SIZE);
     let filled = vol.join("fill/fill.bin");
@@ -141,6 +143,7 @@ fn detects_filler_and_churner_and_nothing_else() {
             run("/usr/bin/touch", &vol.join("seed/marker"));
         }
         if i == SAMPLES / 2 {
+            seed_alloc = seed_alloc.max(fs::metadata(&seed).unwrap().blocks() * 512);
             run("/bin/rm", &seed);
         }
         let next = t0 + Duration::from_secs(i as u64 + 1);
@@ -229,12 +232,13 @@ fn detects_filler_and_churner_and_nothing_else() {
         "churn folder grew {}",
         g("churn")
     );
-    // Allocated, not length: APFS can hold a few MB more for a fresh large
-    // file for a while (5 MB on a CI runner).
+    // Allocated, not length: APFS can hold more for a fresh large file for a
+    // while (5 to 14 MB on CI runners), so the loss may be up to the most the
+    // seed was seen to take.
+    let lost = -g("seed");
     assert!(
-        (g("seed") + SEED as i64).abs() <= SEED as i64 / 20,
-        "seed folder lost {}",
-        -g("seed")
+        (SEED as i64 * 19 / 20..=seed_alloc.max(SEED) as i64 * 21 / 20).contains(&lost),
+        "seed folder lost {lost} B; the seed is {SEED} B long and took up to {seed_alloc} B"
     );
     let cleanups = owners::regrowth(&w.store().growth_series(0).unwrap(), 64 * MB);
     assert_eq!(cleanups.len(), 1, "{cleanups:?}");
