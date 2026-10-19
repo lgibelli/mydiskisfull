@@ -18,10 +18,11 @@ time and speaks up when something is filling the disk fast enough to matter:
 
 Free and open source, with no telemetry and no account.
 
-> **Status: early development.** The watcher and its forecast (`mdif watch`, `mdif forecast`),
-> growth per folder and runaway-filler incidents (`mdif owners`, `mdif incidents`), the honest
-> disk map (`mdif map`) and the disk-writer monitor (`mdif writers`) work today. Suggestions
-> that stop the regrowth, and the menu bar app, are next; see the [plan](docs/PLAN.md).
+> **Status: early development, command line only.** The watcher and its forecast (`mdif watch`,
+> `mdif forecast`), growth per folder and runaway-filler incidents (`mdif owners`,
+> `mdif incidents`), what to do about each cause (`mdif suggest`) and reversible tweaks that stop
+> things coming back (`mdif tweaks`), the honest disk map (`mdif map`) and the disk-writer monitor
+> (`mdif writers`) work today. The menu bar app is next; see the [plan](docs/PLAN.md).
 
 ## Why another disk tool
 
@@ -66,6 +67,8 @@ cargo build --release
 ./target/release/mdif forecast         # when the disk will be full, once there's some history
 ./target/release/mdif owners           # which folders grew, and what came back after cleanups
 ./target/release/mdif incidents        # runaway fillers: folders that keep growing, churning writers
+./target/release/mdif suggest          # what to do about each cause, so it stays fixed
+./target/release/mdif tweaks           # settings that stop things coming back, applied and undone
 ./target/release/mdif agent status
 ```
 
@@ -84,9 +87,15 @@ Most written to disk in the last 24 hours:
     6.2 GB  rustc
     1.1 GB  Google Chrome Helper
 
-Watcher cost: 4.1 ms CPU and 9 KB written per sample. At one sample every 5 min, that is 49 ms
-and 108 KB per hour (within budget: 1 s and 1 MB).
+Watcher cost: 5.0 ms CPU and 33 KB written per sample, and 300 ms for each update of the folders
+(one every 30 min). At one sample every 5 min, that is 660 ms and 396 KB per hour (within budget:
+1 s and 1 MB).
+The first update after it started took 1900 ms: it caught up on what changed while the watcher
+wasn't running.
 ```
+
+Those numbers are from a busy development Mac with several builds running at once; a quiet Mac
+costs a fraction of that.
 
 Every half hour the watcher also works out which folders grew. It replays the FSEvents journal
 since its last look, re-lists only the folders that changed (one level each, never the whole
@@ -109,6 +118,36 @@ the [plan](docs/PLAN.md#2-runaway-fillers) holds, it becomes an incident:
 The history lives in `~/Library/Application Support/MyDiskIsFull/history.sqlite3` and never
 leaves the Mac.
 
+### Fixes that last
+
+Deleting something once is rarely the answer: caches refill, models download again, builds come
+back. `mdif suggest` lists what is worth doing, from the watcher's history (incidents, folders
+that grew, cleanups that refilled) and from a look at the disk, each with the fix that keeps it
+from coming back (illustrative):
+
+```
+ 1. Gradle's caches take 8.8 GB. Gradle keeps downloaded dependencies and Gradle distributions
+    for 30 days after their last use, and every Gradle version has a cache of its own.
+    Fix: Let Gradle clear caches unused for 14 days (`mdif tweaks apply gradle-caches`).
+ 2. Chrome's on-device AI model takes 4.3 GB. Chrome downloads it (about 4 GB) for its built-in
+    AI features, and fetches it again if the folder is deleted.
+    Fix: Stop Chrome downloading its on-device AI model (`mdif tweaks apply chrome-ai-model`).
+ 3. ~/Library/Caches/com.example.app was cleared of 6.1 GB 3 days ago and 4.2 GB came back
+    since: clearing it by hand doesn't last.
+    Leave it: A cache: the app or macOS rebuilds it after it's cleared, so clearing it doesn't
+    last. Leave it, unless the app offers a size limit.
+```
+
+A tweak is a setting that stops something from filling the disk again: Apple Intelligence off,
+Chrome's on-device AI model and its cache size (as a configuration profile you approve in System
+Settings), how long Gradle, Homebrew and Claude Code keep what they no longer use, and emptying
+the Trash after 30 days. `mdif tweaks apply <id> --dry-run` shows exactly what one changes and
+what you give up. Applying one records every value it replaces, so `mdif tweaks revert <id>` puts
+them back exactly, except a setting you changed since, which it leaves alone. `mdif tweaks` then
+shows whether it worked: the setting still holds, the restart it needed happened, and its folders
+shrank or grew slower than before. Commands such as `tmutil deletelocalsnapshots` are only ever
+printed for you to run.
+
 Example output from `mdif map` (abridged):
 
 ```
@@ -130,8 +169,8 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 
 | Crate | What it does |
 |---|---|
-| `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np` |
-| `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder and incidents |
+| `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np`, `sysctl` (boot time, swap) |
+| `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder, incidents, suggestions and tweaks (reversible settings and configuration profiles) |
 | `crates/mdif-cli` | The `mdif` command |
 
 ## Not on the Mac App Store

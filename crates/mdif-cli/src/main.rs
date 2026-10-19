@@ -3,6 +3,7 @@
 mod agent_cmd;
 mod map_cmd;
 mod owners_cmd;
+mod tweaks_cmd;
 mod watch_cmd;
 mod writers_cmd;
 
@@ -77,6 +78,25 @@ enum Cmd {
         #[command(flatten)]
         history: History,
     },
+    /// What to do about what fills the disk, so it stays fixed
+    Suggest {
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        history: History,
+    },
+    /// Settings that stop something from filling the disk again
+    Tweaks {
+        #[command(subcommand)]
+        action: Option<TweakAction>,
+        /// Print the list as JSON
+        #[arg(long)]
+        json: bool,
+        /// History database (where applied tweaks are recorded)
+        #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
+        db: PathBuf,
+    },
     /// Run the watcher in the background (a LaunchAgent)
     Agent {
         #[command(subcommand)]
@@ -116,6 +136,19 @@ struct History {
     /// Volume to watch
     #[arg(long, default_value = map::DATA_ROOT)]
     volume: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum TweakAction {
+    /// Apply a tweak, recording what it replaces
+    Apply {
+        id: String,
+        /// Show what it would change, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Undo a tweak applied with MyDiskIsFull
+    Revert { id: String },
 }
 
 #[derive(Subcommand)]
@@ -160,6 +193,12 @@ fn main() -> Result<()> {
             json,
             history,
         } => owners_cmd::incidents(&history.db, days.max(1), json)?,
+        Cmd::Suggest { json, history } => tweaks_cmd::suggest(&history.db, &history.volume, json)?,
+        Cmd::Tweaks { action, json, db } => match action {
+            None => tweaks_cmd::list(&db, json)?,
+            Some(TweakAction::Apply { id, dry_run }) => tweaks_cmd::apply(&db, &id, dry_run)?,
+            Some(TweakAction::Revert { id }) => tweaks_cmd::revert(&db, &id)?,
+        },
         Cmd::Agent { action } => match action {
             AgentAction::Install { interval } => agent_cmd::install(interval)?,
             AgentAction::Uninstall => agent_cmd::uninstall()?,

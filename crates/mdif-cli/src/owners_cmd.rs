@@ -7,11 +7,13 @@ use anyhow::Result;
 use mdif_core::forecast::{DAY, HOUR};
 use mdif_core::owners;
 use mdif_core::store::Store;
+use mdif_core::suggest;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
 use mdif_core::watch::unix_now;
 use serde_json::json;
 
+use crate::tweaks_cmd;
 use crate::watch_cmd::{home, local, tilde};
 
 /// A cleanup is a drop of at least this much in one period.
@@ -127,6 +129,7 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
                     "closed": e.closed,
                     "incident": e.incident,
                     "sentence": e.incident.sentence(Some(&home)),
+                    "fix": suggest::for_incident(&e.incident, &home),
                 })
             })
             .collect();
@@ -151,6 +154,8 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
         };
         println!("[{}] {when}", e.incident.kind.as_str());
         println!("  {}", e.incident.sentence(Some(&home)));
+        let fix = suggest::for_incident(&e.incident, &home);
+        println!("  Fix: {}", tweaks_cmd::fix_line(&fix));
     }
     Ok(())
 }

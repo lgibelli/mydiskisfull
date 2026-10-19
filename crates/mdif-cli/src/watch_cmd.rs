@@ -8,6 +8,7 @@ use chrono::{DateTime, Local, TimeZone};
 use mdif_core::forecast::{self, DAY, Forecast, FullIn, HOUR, Params, Rate};
 use mdif_core::owners::Rules;
 use mdif_core::store::Store;
+use mdif_core::suggest;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
 use mdif_core::watch::{self, Cost, Watcher};
@@ -59,9 +60,10 @@ pub fn watch(
                 // Logged even when quiet: the agent's log is where they go.
                 for i in &s.opened {
                     eprintln!(
-                        "{} incident: {}",
+                        "{} incident: {} Fix: {}",
                         local(s.point.ts).format("%F %H:%M"),
-                        i.sentence(Some(&home))
+                        i.sentence(Some(&home)),
+                        crate::tweaks_cmd::fix_line(&suggest::for_incident(i, &home))
                     );
                 }
             }
@@ -155,6 +157,10 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
                     "written_per_sample": written,
                     "cpu_us_per_hour": cpu_h.as_micros() as u64,
                     "written_per_hour": written_h,
+                    "owners_every_secs": c.every,
+                    "periods": c.periods,
+                    "cpu_us_per_period": c.per_period().map(|p| p.as_micros() as u64),
+                    "catch_up_cpu_us": c.catch_up.as_micros() as u64,
                 })
             }),
         });
@@ -173,6 +179,8 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         .collect();
     for e in &open {
         println!("Runaway: {}", e.incident.sentence(Some(&home())));
+        let fix = suggest::for_incident(&e.incident, &home());
+        println!("  Fix: {}", crate::tweaks_cmd::fix_line(&fix));
     }
     if !open.is_empty() {
         println!();
@@ -303,17 +311,39 @@ fn print_cost(c: &Cost, interval: i64) {
     let (cpu, written) = c.per_sample();
     let (cpu_h, written_h) = c.per_hour(interval);
     let ok = cpu_h <= BUDGET_CPU_PER_HOUR && written_h <= BUDGET_WRITES_PER_HOUR;
+    let ms = |d: Duration| d.as_millis();
+    let updates = match (c.every, c.per_period()) {
+        (0, _) | (_, None) => String::new(),
+        (every, Some(p)) if c.periods == 0 => format!(
+            ", and {} ms for the first update of the folders (one every {}; the next ones \
+             cost less, but none has run yet)",
+            ms(p),
+            duration(every)
+        ),
+        (every, Some(p)) => format!(
+            ", and {} ms for each update of the folders (one every {})",
+            ms(p),
+            duration(every)
+        ),
+    };
     println!();
     println!(
-        "Watcher cost: {:.1} ms CPU and {} written per sample. At one sample every {}, that is \
-         {} ms and {} per hour ({}: 1 s and 1 MB).",
+        "Watcher cost: {:.1} ms CPU and {} written per sample{updates}. At one sample every {}, \
+         that is {} ms and {} per hour ({}: 1 s and 1 MB).",
         cpu.as_secs_f64() * 1000.0,
         bytes(written),
         duration(interval),
-        cpu_h.as_millis(),
+        ms(cpu_h),
         bytes(written_h),
         if ok { "within budget" } else { "OVER BUDGET" }
     );
+    if c.periods > 0 && !c.catch_up.is_zero() {
+        println!(
+            "The first update after it started took {} ms: it caught up on what changed while \
+             the watcher wasn't running.",
+            ms(c.catch_up)
+        );
+    }
 }
 
 /// Median gap between the most recent samples; the agent's default if

@@ -8,14 +8,21 @@
 //!   when the disk will be full.
 //! - [`owners`]: which folder space belongs to, and how fast each grows.
 //! - [`incidents`]: runaway fillers (growth, churn), in one sentence.
+//! - [`tweaks`]: reversible settings that stop something from coming back,
+//!   built on [`settings`] and [`profile`]; [`suggest`]: what to do about
+//!   each cause.
 
 pub mod apfs;
 pub mod forecast;
 pub mod incidents;
 pub mod map;
 pub mod owners;
+pub mod profile;
 pub mod scan;
+pub mod settings;
 pub mod store;
+pub mod suggest;
 pub mod text;
+pub mod tweaks;
 pub mod units;
 pub mod watch;

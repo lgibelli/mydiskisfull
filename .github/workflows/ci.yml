@@ -46,6 +46,25 @@ jobs:
           ./target/release/mdif writers --secs 2 --top 5
           ./target/release/mdif watch --once --db "$RUNNER_TEMP/smoke.sqlite3"
           ./target/release/mdif forecast --db "$RUNNER_TEMP/smoke.sqlite3"
+          ./target/release/mdif suggest --db "$RUNNER_TEMP/smoke.sqlite3"
+          ./target/release/mdif tweaks --db "$RUNNER_TEMP/smoke.sqlite3"
+      # The runner is thrown away afterwards, so a real tweak can be applied to it.
+      - name: Apply and revert a tweak on the runner
+        run: |
+          db="$RUNNER_TEMP/tweaks.sqlite3"
+          mdif=./target/release/mdif
+          read_it() { defaults read com.apple.finder FXRemoveOldTrashItems 2>/dev/null || echo unset; }
+          before=$(read_it)
+          $mdif tweaks apply trash-auto-empty --dry-run --db "$db"
+          test "$(read_it)" = "$before"
+          $mdif tweaks apply trash-auto-empty --db "$db"
+          test "$(read_it)" = 1
+          $mdif tweaks --json --db "$db" | jq -e '.[] | select(.id == "trash-auto-empty")
+            | .status == "applied" and .applied != null'
+          $mdif tweaks revert trash-auto-empty --db "$db"
+          test "$(read_it)" = "$before"
+          # Nothing left to revert: refused.
+          if $mdif tweaks revert trash-auto-empty --db "$db"; then exit 1; fi
 
   e2e:
     name: e2e (real filler, churner, cleanup)
@@ -74,9 +93,11 @@ jobs:
           ./target/release/mdif forecast --db "$db"
           ./target/release/mdif owners --db "$db" --hours 1
           ./target/release/mdif incidents --db "$db"
+          # At the defaults an hour is 12 samples and 2 folder updates.
           ./target/release/mdif forecast --db "$db" --json | jq -e '.watcher_cost
             | .samples >= 20
-              and .cpu_us_per_sample * 12 < 1000000
+              and .periods >= 1
+              and .cpu_us_per_sample * 12 + .cpu_us_per_period * 2 < 1000000
               and .written_per_sample * 12 < 1000000'
 
   intel:

@@ -2,6 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use mdif_core::text::printable;
@@ -30,7 +31,7 @@ pub fn writers(secs: u64, top: usize) {
             "  {:>9}/s  {:>7}  {}",
             bytes(d / secs.max(1)),
             p.pid,
-            printable(&p.name)
+            label(p)
         );
     }
 
@@ -42,7 +43,53 @@ pub fn writers(secs: u64, top: usize) {
             "  {:>9}  {:>7}  {}",
             bytes(p.bytes_written),
             p.pid,
-            printable(&p.name)
+            label(p)
+        );
+    }
+}
+
+/// The process name, and for `diskimages-helper` the disk images it is
+/// writing: it writes whatever its clients write into a mounted image, so
+/// its bytes belong to them (and the image), not to it.
+fn label(p: &proc::ProcIo) -> String {
+    let name = printable(&p.name).into_owned();
+    if p.name != "diskimages-helper" {
+        return name;
+    }
+    let mut images: Vec<String> = proc::files_open_for_writing(p.pid)
+        .iter()
+        .filter_map(|f| image_of(f))
+        .collect();
+    images.dedup();
+    if images.is_empty() {
+        name
+    } else {
+        format!("{name} (writing {})", printable(&images.join(", ")))
+    }
+}
+
+/// A sparse bundle is written band by band: name the bundle, not the band.
+fn image_of(file: &Path) -> Option<String> {
+    let image = file
+        .ancestors()
+        .find(|a| a.extension().is_some_and(|e| e == "sparsebundle"))
+        .unwrap_or(file);
+    Some(image.file_name()?.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_are_named_by_their_file_or_bundle() {
+        assert_eq!(
+            image_of(Path::new("/x/Backup.sparsebundle/bands/1a")).as_deref(),
+            Some("Backup.sparsebundle")
+        );
+        assert_eq!(
+            image_of(Path::new("/x/scratch.sparseimage")).as_deref(),
+            Some("scratch.sparseimage")
         );
     }
 }
