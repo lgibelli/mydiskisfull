@@ -327,7 +327,11 @@ mydiskisfull/
       the app, its checks are made as the app: one grant covers both. The app is signed with a
       Developer ID from `release.env` (gitignored) when there is one.
     - The disk map is kept (`~/Library/Caches/<bundle id>/disk-map.json`) with when it was
-      taken, and measuring again is suggested once it's over 30 minutes old.
+      taken. It's measured again while someone looks: when the window opens and the kept one is
+      over 30 minutes old, and every hour while it stays open, at background priority, the old
+      one showing meanwhile. Never in the background: one whole-volume map measured about 200 s
+      of CPU (191 s of it in the kernel) over 104 s at background priority on the development
+      Mac, 200 times the watcher's budget for an hour.
     - The app's watcher needs a label of its own. Background Task Management keeps a record of
       a command-line LaunchAgent under its label, disabled once it's removed, and an
       SMAppService agent with the same label inherits it: "Job is not allowed to bootstrap",

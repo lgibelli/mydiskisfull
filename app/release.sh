@@ -101,8 +101,13 @@ upload() {
         || git branch -r --contains "$head" | grep -q . \
         || die "push $head first: the release's tag points at it"
     if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-        say "Replacing the files of the existing release $TAG"
+        # A published release's files are what people downloaded and what
+        # the feed signed: a new build is a new version.
+        [ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = true ] \
+            || die "$TAG is published: bump the version for a new build"
+        say "Replacing the draft $TAG: files, notes and commit"
         gh release upload "$TAG" --repo "$REPO" --clobber "${files[@]}"
+        gh release edit "$TAG" --repo "$REPO" --target "$head" --notes-file "$OUT/notes.md" >/dev/null
     else
         say "Creating the draft release $TAG"
         gh release create "$TAG" --repo "$REPO" --draft --target "$head" \

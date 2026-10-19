@@ -89,7 +89,8 @@ as below; one started with `mdif agent install` is stopped, and the history carr
 Full Disk Access and for notifications. The menu shows free space and when the
 disk will be full, what is filling it with the fix for each, suggestions, and the tweaks, which
 apply and undo with a click after saying what they change and what you give up. The overview
-window charts free space with the forecast. The disk map runs when you ask for it and shows the
+window charts free space with the forecast. The disk map measures while you look at it (when it
+opens, if the last one is over 30 minutes old, and every hour while it stays open) and shows the
 space as a sunburst, as a treemap like a stock-market heatmap (tile size is space, colour is how
 much the folder grew or shrank in the last day) or as a list; click a folder to zoom in.
 Notifications come once per episode: a runaway filler, the disk full within two weeks, three days
