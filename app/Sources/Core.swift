@@ -30,14 +30,17 @@ enum Core {
     /// Runs `mdif args…` off the main thread and returns what it printed.
     /// Fails with its error message when it exits non-zero, and stops it
     /// after `timeout` seconds, so a stuck command can't leave the menu
-    /// "Measuring…" for good.
-    static func run(_ args: [String], timeout: TimeInterval = 120) async throws -> Data {
+    /// "Measuring…" for good. `qos` is the child's priority: `.background`
+    /// for work nobody is waiting on, which macOS runs on efficiency cores
+    /// with throttled I/O.
+    static func run(_ args: [String], timeout: TimeInterval = 120,
+                    qos: QualityOfService = .utility) async throws -> Data {
         let exe = executable
         return try await Task.detached(priority: .utility) {
             let p = Process()
             p.executableURL = exe
             p.arguments = args
-            p.qualityOfService = .utility
+            p.qualityOfService = qos
             let out = Pipe(), err = Pipe()
             p.standardOutput = out
             p.standardError = err

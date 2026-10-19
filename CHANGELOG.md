@@ -79,8 +79,11 @@ The first release.
   the menu, open incidents with their fix, suggestions, and the tweaks as checkmarks that apply or
   undo after showing what they change. An overview window with a gauge and a free-space chart
   with the forecast, the disk map (a sunburst, a treemap coloured by each folder's growth in the
-  last day like a market heatmap, or a list; click to zoom in; the last map is kept with when it
-  was taken, and measuring again is suggested after 30 minutes), settings, a first-launch
+  last day like a market heatmap, or a list; click to zoom in), which keeps itself current
+  while it's open: measured again on opening if the last map is over 30 minutes old and every
+  hour while it stays open, at background priority, the previous map showing meanwhile. Never
+  in the background, though: one whole-disk map takes about 200 s of CPU, 200 times the
+  watcher's budget for an hour. Settings, a first-launch
   welcome and an About panel with the watcher's measured cost. Notifications for a new
   incident, the forecast crossing 14, 3 and 1 days or free space under 10 GB, and a tweak
   something undid, once per episode. The watcher runs from the bundle as an SMAppService

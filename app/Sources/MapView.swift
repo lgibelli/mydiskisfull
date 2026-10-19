@@ -1,87 +1,43 @@
 // The disk map: where the space is now, measured with APFS private size and
-// reconciled with what APFS says is in use. A whole-volume scan takes about a
-// minute and reads metadata only, so it runs when asked, never by itself. The
-// last one is kept, with when it was taken, and offered again until it's old.
+// reconciled with what APFS says is in use. A whole-volume scan reads
+// metadata only, but every directory on the disk: about 200 s of CPU (most
+// of it in the kernel) over a minute or two at background priority, on the
+// development Mac. That is 200 times the watcher's budget for an hour, so it
+// never runs in the background. It runs while someone is looking: when the
+// map opens and the kept one is over 30 minutes old, every hour while it
+// stays open, and when asked. The kept map shows meanwhile.
 
 import SwiftUI
 
-struct MapView: View {
-    @State private var map: DiskMap?
-    @State private var measuredAt: Date?
-    @State private var context = MapContext(growth24h: [])
-    @State private var running = false
-    @State private var started = Date()
-    @State private var error: String?
+/// The map, kept across windows: closing the window doesn't stop a scan or
+/// start a second one when it's opened again.
+@MainActor
+final class MapModel: ObservableObject {
+    static let shared = MapModel()
 
-    /// After this a map is said to be old, and measuring again is suggested.
-    static let stale: TimeInterval = 30 * 60
+    @Published private(set) var map: DiskMap?
+    @Published private(set) var measuredAt: Date?
+    @Published private(set) var context = MapContext(growth24h: [])
+    @Published private(set) var running = false
+    @Published private(set) var started = Date()
+    @Published private(set) var error: String?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Where the space is").font(.title2.bold())
-                    Text("Sizes are what deleting a folder would free: files shared with clones or held by a snapshot are counted once, apart. Nothing is opened, and cloud files are never downloaded.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                TimelineView(.periodic(from: .now, by: 60)) { ctx in
-                    measureButton(old: isOld(at: ctx.date))
-                }
-            }
-            if running {
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    ProgressView("Measuring the whole disk… \(Int(ctx.date.timeIntervalSince(started))) s (about a minute)")
-                        .progressViewStyle(.linear)
-                }
-            } else if let at = measuredAt {
-                TimelineView(.periodic(from: .now, by: 60)) { ctx in
-                    age(at, now: ctx.date)
-                }
-            }
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-            }
-            if let m = map {
-                Summary(map: m)
-                MapExplorer(map: m, context: context)
-            } else if !running {
-                Spacer()
-            }
-        }
-        .padding(20)
-        .frame(minWidth: 720, minHeight: 640)
-        .task { await loadKept() }
+    /// A map older than this is measured again when the window opens.
+    static let staleOnOpen: TimeInterval = 30 * 60
+    /// And this often while it stays open.
+    static let refreshEvery: TimeInterval = 60 * 60
+
+    private var loaded = false
+
+    func age(at now: Date = Date()) -> TimeInterval? {
+        measuredAt.map { now.timeIntervalSince($0) }
     }
 
-    @ViewBuilder
-    private func measureButton(old: Bool) -> some View {
-        let b = Button(map == nil ? "Measure" : "Measure Again") { Task { await measure() } }
-            .disabled(running)
-            .keyboardShortcut(.defaultAction)
-        if old || map == nil { b.buttonStyle(.borderedProminent) } else { b }
-    }
-
-    private func isOld(at now: Date) -> Bool {
-        guard let at = measuredAt else { return false }
-        return now.timeIntervalSince(at) > Self.stale
-    }
-
-    /// When the map was taken; past 30 minutes, a suggestion to measure again.
-    @ViewBuilder
-    private func age(_ at: Date, now: Date) -> some View {
-        let ago = Format.duration(Int64(now.timeIntervalSince(at)))
-        if now.timeIntervalSince(at) > Self.stale {
-            Label("Measured \(Format.when(Int64(at.timeIntervalSince1970))), \(ago) ago. Files have come and gone since: measure again for the current picture.",
-                  systemImage: "clock.arrow.circlepath")
-                .font(.callout)
-                .foregroundStyle(.orange)
-        } else {
-            Text("Measured \(Format.when(Int64(at.timeIntervalSince1970))), \(ago) ago.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
+    /// Measures in the background if there's no map or it's older than `limit`.
+    func refreshIfOld(_ limit: TimeInterval) {
+        guard !running else { return }
+        if let age = age(), age < limit { return }
+        Task { await measure(automatic: true) }
     }
 
     /// ~/Library/Caches/<bundle id>/disk-map.json: regenerable, and never
@@ -92,8 +48,10 @@ struct MapView: View {
             .appendingPathComponent("disk-map.json")
     }
 
-    private func loadKept() async {
+    func loadKept() async {
         await loadGrowth()
+        guard !loaded else { return }
+        loaded = true
         guard map == nil, let url = Self.keptURL, let data = try? Data(contentsOf: url) else { return }
         do {
             map = try Wire.decode(DiskMap.self, from: data)
@@ -111,13 +69,17 @@ struct MapView: View {
         }
     }
 
-    private func measure() async {
+    /// `automatic`: nobody pressed a button, so it runs at background
+    /// priority, out of the way of whatever the Mac is doing.
+    func measure(automatic: Bool = false) async {
+        guard !running else { return }
         running = true
         started = Date()
         defer { running = false }
         await loadGrowth()
         do {
-            let data = try await Core.run(["map", "--depth", "6", "--min-mb", "200", "--json"], timeout: 900)
+            let data = try await Core.run(["map", "--depth", "6", "--min-mb", "200", "--json"], timeout: 900,
+                                          qos: automatic ? .background : .userInitiated)
             let fresh = try Wire.decode(DiskMap.self, from: data)
             map = fresh
             measuredAt = Date()
@@ -131,6 +93,70 @@ struct MapView: View {
             self.error = "The bundled mdif printed something this version of the app can't read."
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+}
+
+struct MapView: View {
+    @ObservedObject private var model = MapModel.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Where the space is").font(.title2.bold())
+                    Text("Sizes are what deleting a folder would free: files shared with clones or held by a snapshot are counted once, apart. Nothing is opened, and cloud files are never downloaded.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button(model.map == nil ? "Measure" : "Measure Again") { Task { await model.measure() } }
+                    .disabled(model.running)
+            }
+            TimelineView(.periodic(from: .now, by: model.running ? 1 : 60)) { ctx in
+                status(now: ctx.date)
+            }
+            if let error = model.error {
+                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+            if let m = model.map {
+                Summary(map: m)
+                MapExplorer(map: m, context: model.context)
+            } else {
+                Spacer()
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 720, minHeight: 640)
+        .task {
+            await model.loadKept()
+            model.refreshIfOld(MapModel.staleOnOpen)
+            // While the window is open (the task ends when it closes).
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                model.refreshIfOld(MapModel.refreshEvery)
+            }
+        }
+    }
+
+    /// When the map was taken, and whether a newer one is on its way.
+    @ViewBuilder
+    private func status(now: Date) -> some View {
+        let taken = model.measuredAt.map { "Measured \(Format.when(Int64($0.timeIntervalSince1970))), \(Format.duration(Int64(now.timeIntervalSince($0)))) ago." }
+        if model.running {
+            let secs = Int(now.timeIntervalSince(model.started))
+            if let taken {
+                Label("\(taken) Measuring again, \(secs) s so far (a minute or two); this one shows meanwhile.",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ProgressView("Measuring the whole disk… \(secs) s (a minute or two)")
+                    .progressViewStyle(.linear)
+            }
+        } else if let taken {
+            Text("\(taken) It's measured again when you open the map after 30 minutes, and every hour while it's open.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
