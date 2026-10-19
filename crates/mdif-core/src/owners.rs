@@ -17,12 +17,20 @@
 //! Sizes are allocated bytes, which snapshots don't change, divided among
 //! hard links and among pure clones so neither is counted twice.
 //!
-//! Listing costs about 3.5 µs per entry whatever is asked for, so a busy
-//! folder with tens of thousands of entries (a browser cache) would eat most
-//! of the watcher's budget if it were re-listed every period. Folders are
-//! re-listed at most once per [`DEFER_UNIT`] entries' worth of periods (up
-//! to [`MAX_DEFER`] periods): their growth still counts in full, a little
-//! later.
+//! Listing costs about 3.5 µs per entry whatever is asked for (10–15 µs at
+//! background priority), so the few busy folders with tens of thousands of
+//! entries (a browser cache, a build's `deps`) would eat the watcher's
+//! budget if they were re-listed every period. So a changed folder waits:
+//! - one period per [`DEFER_UNIT`] entries (up to [`MAX_DEFER`]);
+//! - twice as long once it is found [`STEADY`] (changed little since it was
+//!   last listed), four times as long if it stays so: caches and logs churn
+//!   but keep their size, while a filler keeps growing and is listed often;
+//! - longer still when the period has listed [`PERIOD_ENTRIES`] already,
+//!   the most overdue folders going first.
+//!
+//! Whatever a folder grew while it waited counts in full when it is listed,
+//! a little later. (Unless the watcher restarts meanwhile: then only files
+//! created since the previous period count, as for any folder seen first.)
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -32,6 +40,8 @@ use std::path::{Path, PathBuf};
 
 use mdif_macos::bulk::{self, Detail, EF_MAY_SHARE_BLOCKS, Entry, Kind};
 use mdif_macos::fsevents::{Event, flag};
+
+use crate::privacy;
 
 /// Folder names that hold regenerable build output inside a project.
 pub const ARTIFACTS: &[&str] = &[
@@ -71,8 +81,21 @@ pub const MIN_GROWTH: i64 = 1_000_000;
 /// A folder with this many entries is re-listed at most every other
 /// period, twice as many every third, and so on.
 pub const DEFER_UNIT: u32 = 1024;
-/// The longest a changed folder waits to be re-listed, in periods.
+/// The longest a changed folder that keeps growing waits to be re-listed,
+/// in periods.
 pub const MAX_DEFER: u32 = 4;
+/// A folder whose size changed by less than this per period since it was
+/// last listed is steady, and waits twice as long; then four times
+/// ([`MAX_STEADY`]). The default: a filler worth an incident grows at least
+/// five times faster (1 GB in 6 hours is 83 MB per 30-minute period). The
+/// watcher derives it from its incident rules ([`Tracker::steady_below`]).
+pub const STEADY: u64 = 16_000_000;
+/// Doublings of the wait for a steady folder: 16 periods (8 hours) at most.
+pub const MAX_STEADY: u32 = 2;
+/// Entries listed per period, beyond which folders that have been listed
+/// before wait for the next one (about 0.3 s at background priority).
+/// Folders seen for the first time are listed regardless.
+pub const PERIOD_ENTRIES: usize = 20_000;
 
 /// Directories re-listed per period at most when FSEvents asks for a whole
 /// subtree to be rescanned (it does after dropping events).
@@ -217,12 +240,14 @@ struct Dir {
     entries: u32,
     /// When it was last listed (Unix seconds, wall clock).
     seen: i64,
+    /// Listings in a row that found it [`STEADY`], up to [`MAX_STEADY`].
+    steady: u32,
 }
 
 impl Dir {
     /// Periods to wait between listings.
     fn defer(&self) -> u32 {
-        (self.entries / DEFER_UNIT).clamp(1, MAX_DEFER)
+        (self.entries / DEFER_UNIT).clamp(1, MAX_DEFER) << self.steady
     }
 }
 
@@ -234,9 +259,18 @@ pub struct Update {
     pub growth: Vec<(PathBuf, i64)>,
     /// Directories re-listed.
     pub listed: usize,
-    /// Changed directories left for a later period (too big to list often).
+    /// Entries in them: listing costs about 3.5 µs each, so this is the
+    /// period's cost.
+    pub entries: usize,
+    /// The directories with the most entries, most first (at most 5).
+    pub biggest: Vec<(PathBuf, usize)>,
+    /// Changed directories left for a later period: too big or too steady
+    /// to list often, or the period's [`PERIOD_ENTRIES`] were spent.
     pub deferred: usize,
     pub unreadable: usize,
+    /// Directories left alone because opening them would show a privacy
+    /// prompt (see [`crate::privacy`]).
+    pub skipped: usize,
     /// Whole-volume rescans FSEvents asked for (history lost, e.g. after
     /// its journal was reset), which are skipped.
     pub gaps: usize,
@@ -253,6 +287,10 @@ pub struct Tracker {
     pending: BTreeSet<PathBuf>,
     /// Seconds per period, the unit of deferral.
     period: i64,
+    /// Entries a period lists before folders seen before wait.
+    budget: usize,
+    /// Bytes per period a steady folder changes by less than.
+    steady: u64,
 }
 
 impl Tracker {
@@ -265,7 +303,15 @@ impl Tracker {
             carry: HashMap::new(),
             pending: BTreeSet::new(),
             period,
+            budget: PERIOD_ENTRIES,
+            steady: STEADY,
         }
+    }
+
+    /// Folders whose size changes by less than `bytes` per period are
+    /// steady ([`STEADY`] by default).
+    pub fn steady_below(&mut self, bytes: u64) {
+        self.steady = bytes;
     }
 
     pub fn rules(&self) -> &Rules {
@@ -304,20 +350,44 @@ impl Tracker {
         }
         let mut deltas: HashMap<PathBuf, i64> = HashMap::new();
         let mut budget = MAX_RESCAN;
+        // Folders listed before that are due, and how overdue (1: just due).
+        let mut due: Vec<(f64, PathBuf)> = Vec::new();
         for (dir, recursive) in dirty {
-            // Big and listed recently: later. (The slack absorbs periods
-            // that run a little early.)
-            if !recursive
-                && let Some(d) = self.dirs.get(&dir)
-                && now - d.seen < d.defer() as i64 * self.period - self.period / 10
-            {
+            let (wait, seen) = match self.dirs.get(&dir) {
+                Some(d) if !recursive => (d.defer() as i64 * self.period, d.seen),
+                _ => {
+                    self.measure(
+                        dir,
+                        recursive,
+                        created_after,
+                        now,
+                        &mut budget,
+                        &mut deltas,
+                        &mut up,
+                    );
+                    continue;
+                }
+            };
+            let waited = now - seen;
+            // Listed recently: later. (The slack absorbs periods that run a
+            // little early.)
+            if waited < wait - self.period / 10 {
+                up.deferred += 1;
+                self.pending.insert(dir);
+            } else {
+                due.push((waited as f64 / wait as f64, dir));
+            }
+        }
+        due.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, dir) in due {
+            if up.entries >= self.budget {
                 up.deferred += 1;
                 self.pending.insert(dir);
                 continue;
             }
             self.measure(
                 dir,
-                recursive,
+                false,
                 created_after,
                 now,
                 &mut budget,
@@ -338,6 +408,8 @@ impl Tracker {
         });
         up.growth
             .sort_by_key(|(o, d)| (Reverse(d.abs()), o.clone()));
+        up.biggest.sort_by_key(|(d, n)| (Reverse(*n), d.clone()));
+        up.biggest.truncate(5);
         up
     }
 
@@ -354,6 +426,10 @@ impl Tracker {
     ) {
         let mut stack = vec![dir];
         while let Some(dir) = stack.pop() {
+            if !privacy::may_open(&dir) {
+                up.skipped += 1;
+                continue;
+            }
             match bulk::read_dir_with(&dir, Detail::Sizes) {
                 Ok(entries) => {
                     // A mount point lists the other volume.
@@ -363,6 +439,10 @@ impl Tracker {
                         continue;
                     }
                     up.listed += 1;
+                    up.entries += entries.len();
+                    if entries.len() >= DEFER_UNIT as usize {
+                        up.biggest.push((dir.clone(), entries.len()));
+                    }
                     let (mut own, mut created) = (0u64, 0u64);
                     for e in &entries {
                         if e.kind == Kind::Dir {
@@ -378,13 +458,22 @@ impl Tracker {
                             created += size;
                         }
                     }
-                    let state = Dir {
+                    let mut state = Dir {
                         own,
                         entries: entries.len().min(u32::MAX as usize) as u32,
                         seen: now,
+                        steady: 0,
                     };
-                    let delta = match self.dirs.insert(dir.clone(), state) {
-                        Some(before) => own as i64 - before.own as i64,
+                    let before = self.dirs.get(&dir).copied();
+                    if let Some(b) = before {
+                        let periods = ((now - b.seen + self.period / 2) / self.period).max(1);
+                        if own.abs_diff(b.own) < self.steady * periods as u64 {
+                            state.steady = (b.steady + 1).min(MAX_STEADY);
+                        }
+                    }
+                    self.dirs.insert(dir.clone(), state);
+                    let delta = match before {
+                        Some(b) => own as i64 - b.own as i64,
                         None => created as i64,
                     };
                     if delta != 0 {
@@ -621,6 +710,8 @@ mod tests {
             let up = tr.apply(&[event(&dir)], i64::MAX, i + 1);
             reported += growth(&up, &dir);
         }
+        // It is steady, so it may still be waiting.
+        reported += growth(&tr.apply(&[], i64::MAX, 100), &dir);
         assert!(reported >= MIN_GROWTH, "1.5 MB in 300 KB steps: {reported}");
     }
 
@@ -665,6 +756,65 @@ mod tests {
         let up = tr.apply(&[], i64::MAX, 2 * period);
         assert_eq!((up.listed, up.deferred), (1, 0));
         assert!(growth(&up, &dir) >= 3 * MB as i64, "{up:?}");
+    }
+
+    #[test]
+    fn steady_folders_wait_longer_and_growing_ones_dont() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (cache, logs) = (root.join("cache"), root.join("logs"));
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(&logs).unwrap();
+        let period = 1800;
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, period);
+        let both = [event(&cache), event(&logs)];
+        let mut listed = Vec::new();
+        for p in 0..12 {
+            // The logs grow faster than steady; the cache churns a little.
+            write(&logs.join(p.to_string()), STEADY as usize + MB as usize);
+            write(&cache.join("entry"), (p % 2 + 1) as usize * MB as usize);
+            let up = tr.apply(&both, i64::MAX, p * period);
+            listed.push(up.listed);
+            if p > 0 {
+                assert!(growth(&up, &logs) > STEADY as i64, "period {p}: {up:?}");
+            }
+        }
+        // The logs every period; the cache after 1, 2, then 4 periods.
+        assert_eq!(listed, [2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2]);
+        // What the cache changed while it waited still counts.
+        write(&cache.join("more"), 3 * MB as usize);
+        let up = tr.apply(&[event(&cache)], i64::MAX, 12 * period);
+        assert_eq!((up.listed, up.deferred), (0, 1));
+        let up = tr.apply(&[], i64::MAX, 15 * period);
+        assert!(growth(&up, &cache) >= 3 * MB as i64, "{up:?}");
+    }
+
+    #[test]
+    fn a_period_lists_its_budget_most_overdue_first() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        for dir in [&a, &b] {
+            fs::create_dir(dir).unwrap();
+            for i in 0..DEFER_UNIT {
+                fs::write(dir.join(i.to_string()), b"").unwrap();
+            }
+        }
+        let period = 1800;
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, period);
+        tr.budget = DEFER_UNIT as usize;
+        // Seen for the first time: listed whatever the budget.
+        let up = tr.apply(&[event(&a), event(&b)], i64::MAX, 0);
+        assert_eq!((up.listed, up.deferred), (2, 0));
+        // Both due, room for one: the other waits.
+        write(&b.join("big.bin"), 3 * MB as usize);
+        let up = tr.apply(&[event(&a), event(&b)], i64::MAX, period);
+        assert_eq!((up.listed, up.deferred), (1, 1));
+        assert_eq!(growth(&up, &b), 0);
+        // Next period it is the most overdue, and goes first.
+        let up = tr.apply(&[event(&a)], i64::MAX, 2 * period);
+        assert_eq!((up.listed, up.deferred), (1, 1));
+        assert!(growth(&up, &b) >= 3 * MB as i64, "{up:?}");
     }
 
     #[test]

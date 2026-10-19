@@ -25,6 +25,7 @@ use crate::forecast::{DAY, HOUR};
 use crate::incidents::{self, ChurnParams, GrowthParams, Incident};
 use crate::map::DATA_ROOT;
 use crate::owners::{Rules, Tracker};
+use crate::privacy;
 use crate::scan;
 use crate::store::{SpacePoint, Store};
 
@@ -46,6 +47,10 @@ pub struct Watcher {
     sizes: HashMap<String, (i64, Option<u64>)>,
     /// Bytes each process wrote since the last owners period.
     period_writes: HashMap<i32, u64>,
+    /// Files that tell whether the watcher has Full Disk Access
+    /// (`sys::access_probes`); checked at every sample (one `open`), so a
+    /// grant is noticed within minutes.
+    access_probes: Vec<PathBuf>,
 }
 
 /// What counts as an incident. The defaults are the plan's clauses.
@@ -67,6 +72,8 @@ pub struct Sample {
     /// Growth per owner folder, when an owners period ended with this sample.
     pub growth: Vec<(String, i64)>,
     pub period: Option<Period>,
+    /// With a period: the directories with the most entries it listed.
+    pub biggest: Vec<(String, usize)>,
     /// Incidents that hold, evaluated at the end of each owners period.
     pub incidents: Vec<Incident>,
     /// Those of them that started an episode now (announce these once).
@@ -80,8 +87,12 @@ pub struct Period {
     /// Folders added because a heavy writer has a file open in them.
     pub open_files: usize,
     pub listed: usize,
+    /// Entries in the folders listed: about 3.5 µs of CPU each.
+    pub entries: usize,
     pub deferred: usize,
     pub unreadable: usize,
+    /// Left alone: opening them would show a privacy prompt.
+    pub skipped: usize,
     /// Directories whose size is remembered.
     pub tracked: usize,
     /// FSEvents history was incomplete (journal reset, or the replay timed
@@ -112,6 +123,8 @@ struct Owners {
     every: i64,
     /// Periods this process has run.
     periods: u64,
+    /// The biggest directories the last period listed, with their entries.
+    biggest: Vec<(String, usize)>,
 }
 
 /// What the watcher itself has cost, measured inside its samples only.
@@ -215,12 +228,32 @@ impl Watcher {
             detect: Detect::default(),
             sizes: HashMap::new(),
             period_writes: HashMap::new(),
+            access_probes: Vec::new(),
         })
+    }
+
+    /// Record whether the watcher has Full Disk Access (see
+    /// [`recorded_access`]): without it, macOS keeps it out of other apps'
+    /// folders and the growth there goes unseen.
+    pub fn with_access_check(mut self, probes: Vec<PathBuf>) -> Self {
+        self.access_probes = probes;
+        self
     }
 
     pub fn with_detect(mut self, detect: Detect) -> Self {
         self.detect = detect;
+        self.set_steady();
         self
+    }
+
+    /// A folder that changes by less than a fifth of the slowest growth an
+    /// incident can have is steady, and is listed less often.
+    fn set_steady(&mut self) {
+        let g = &self.detect.growth;
+        if let Some(o) = &mut self.owners {
+            let per_period = g.min_growth as i128 * o.every as i128 / g.sustain.max(1) as i128;
+            o.tracker.steady_below((per_period / 5) as u64);
+        }
     }
 
     /// Also track growth per owner folder, replaying FSEvents every `every`
@@ -252,8 +285,10 @@ impl Watcher {
             last_wall,
             every: every.max(1),
             periods: 0,
+            biggest: Vec::new(),
         });
         self.cost.every = every.max(1);
+        self.set_steady();
         Ok(self)
     }
 
@@ -279,6 +314,21 @@ impl Watcher {
             // The first sample starts the first period.
             o.last_period.get_or_insert(now);
         }
+        // Checked before a period lists anything: without Full Disk Access
+        // the folders that would show a privacy prompt are left alone, since
+        // nobody may be there to answer it and the open would wait.
+        let access = match self.access_probes.as_slice() {
+            [] => None,
+            probes => {
+                let fda = mdif_macos::sys::full_disk_access(probes);
+                privacy::avoid_prompts(fda != Some(true));
+                Some(match fda {
+                    Some(true) => "1",
+                    Some(false) => "0",
+                    None => "?",
+                })
+            }
+        };
         let (growth, period) = match self.owners.as_mut() {
             Some(o) if o.due(now) => {
                 let heavy: Vec<i32> = self
@@ -298,9 +348,24 @@ impl Watcher {
         let spent = period.map(|(_, spent, first)| (spent, first));
         let period = period.map(|(p, _, _)| p);
         let mut meta = Vec::new();
+        if let (Some(o), Some(p), Some((cpu, _))) = (&self.owners, period, spent) {
+            let last = LastPeriod {
+                at: now,
+                listed: p.listed,
+                entries: p.entries,
+                deferred: p.deferred,
+                skipped: p.skipped,
+                cpu_us: cpu.as_micros() as u64,
+                biggest: o.biggest.clone(),
+            };
+            meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
+        }
         if let (Some(o), Some(_)) = (&self.owners, period) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
             meta.push((format!("owners.{}.wall", self.key), o.last_wall.to_string()));
+        }
+        if let Some(granted) = access {
+            meta.push((ACCESS_KEY.to_string(), format!("{now} {granted}")));
         }
 
         // The cost stored with this sample includes it, except for the
@@ -335,11 +400,16 @@ impl Watcher {
             written2.saturating_sub(written0),
             spent.map(|(s, first)| (s + detect, first)),
         );
+        let biggest = match (&self.owners, period) {
+            (Some(o), Some(_)) => o.biggest.clone(),
+            _ => Vec::new(),
+        };
         Ok(Sample {
             point,
             writes,
             growth,
             period,
+            biggest,
             incidents,
             opened,
         })
@@ -489,11 +559,18 @@ impl Owners {
             events: replayed,
             open_files,
             listed: up.listed,
+            entries: up.entries,
             deferred: up.deferred,
             unreadable: up.unreadable,
+            skipped: up.skipped,
             tracked: self.tracker.dirs_tracked(),
             gaps: up.gaps + usize::from(!done),
         };
+        self.biggest = up
+            .biggest
+            .iter()
+            .map(|(d, n)| (d.display().to_string(), *n))
+            .collect();
         let growth = up
             .growth
             .into_iter()
@@ -501,6 +578,45 @@ impl Owners {
             .collect();
         Ok((growth, period))
     }
+}
+
+const ACCESS_KEY: &str = "watch.full_disk_access";
+const PERIOD_KEY: &str = "watch.last_period";
+
+/// The last owners period, as recorded: what it listed and what it cost.
+/// Listing is nearly all of a period's cost, so this says where it went.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LastPeriod {
+    pub at: i64,
+    pub listed: usize,
+    pub entries: usize,
+    pub deferred: usize,
+    pub skipped: usize,
+    pub cpu_us: u64,
+    /// The directories with the most entries, most first.
+    pub biggest: Vec<(String, usize)>,
+}
+
+pub fn recorded_period(store: &Store) -> Result<Option<LastPeriod>> {
+    Ok(store
+        .meta(PERIOD_KEY)?
+        .and_then(|v| serde_json::from_str(&v).ok()))
+}
+
+/// When the watcher last checked for Full Disk Access, and whether it had it
+/// (`None`: it couldn't tell).
+pub fn recorded_access(store: &Store) -> Result<Option<(i64, Option<bool>)>> {
+    let Some(v) = store.meta(ACCESS_KEY)? else {
+        return Ok(None);
+    };
+    let mut it = v.split(' ');
+    let at = it.next().and_then(|t| t.parse().ok());
+    let granted = match it.next() {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    };
+    Ok(at.map(|at| (at, granted)))
 }
 
 /// Seconds since the Unix epoch.
@@ -640,5 +756,26 @@ mod tests {
         let old = parse_cost("2 1000 10").unwrap();
         assert_eq!(old.per_sample().0, Duration::from_micros(500));
         assert!(parse_cost("garbage").is_none());
+    }
+
+    #[test]
+    fn full_disk_access_is_recorded_at_every_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("TCC.db");
+        let mut w = Watcher::new(Store::open_in_memory().unwrap(), dir.path())
+            .unwrap()
+            .with_access_check(vec![probe.clone()]);
+        w.sample(1_000).unwrap();
+        // No database: can't tell.
+        assert_eq!(recorded_access(w.store()).unwrap(), Some((1_000, None)));
+        // A grant is noticed at the next sample.
+        std::fs::write(&probe, b"").unwrap();
+        w.sample(1_300).unwrap();
+        assert_eq!(
+            recorded_access(w.store()).unwrap(),
+            Some((1_300, Some(true)))
+        );
+        let plain = Watcher::new(Store::open_in_memory().unwrap(), dir.path()).unwrap();
+        assert_eq!(recorded_access(plain.store()).unwrap(), None);
     }
 }

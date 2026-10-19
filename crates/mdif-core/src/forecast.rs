@@ -124,6 +124,49 @@ pub fn forecast(points: &[SpacePoint], p: &Params) -> Option<Forecast> {
     })
 }
 
+/// How urgent the disk is, from least to most. Notifications escalate through
+/// these, each level once per episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum Alert {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "14_days")]
+    Within14Days,
+    #[serde(rename = "3_days")]
+    Within3Days,
+    #[serde(rename = "1_day")]
+    WithinADay,
+    /// Less than [`low_floor`] is free.
+    #[serde(rename = "low")]
+    Low,
+}
+
+/// Free space below this is an alert whatever the trend: the larger of
+/// 10 GB and 2% of the volume.
+pub fn low_floor(total: u64) -> u64 {
+    10_000_000_000u64.max(total / 50)
+}
+
+/// The alert for `avail` bytes free now and the forecast. The forecast
+/// levels need the 3- or 14-day trend (a day and a half of history at
+/// least), so an afternoon of builds can't raise one: a runaway filler is an
+/// incident instead. Being below the floor is a fact and needs no trend.
+pub fn alert(f: Option<&Forecast>, avail: u64, total: u64) -> Alert {
+    if avail < low_floor(total) {
+        return Alert::Low;
+    }
+    let days = f
+        .filter(|f| f.rate.is_some_and(|r| r.window >= 3 * DAY))
+        .and_then(|f| f.full_in)
+        .map(|full| full.days);
+    match days {
+        Some(d) if d <= 1.0 => Alert::WithinADay,
+        Some(d) if d <= 3.0 => Alert::Within3Days,
+        Some(d) if d <= 14.0 => Alert::Within14Days,
+        _ => Alert::None,
+    }
+}
+
 fn full_in(avail: u64, r: &Rate) -> Option<FullIn> {
     if r.per_day <= 0.0 {
         return None;
@@ -426,5 +469,40 @@ mod tests {
         let pts = series(2, |h| 40.0 * GB - 4.0 * GB * h / 24.0);
         let f = forecast(&pts, &Params::default()).unwrap();
         assert_eq!(f.rate.unwrap().window, 3 * DAY);
+    }
+
+    #[test]
+    fn alerts_escalate_with_the_forecast() {
+        let at = |gb_per_day: f64| {
+            let pts = series(2, |h| 100.0 * GB - gb_per_day * GB * h / 24.0);
+            let f = forecast(&pts, &Params::default()).unwrap();
+            alert(Some(&f), f.avail, pts[0].total)
+        };
+        assert_eq!(at(1.0), Alert::None); // 98 GB left: full in 98 days
+        assert_eq!(at(10.0), Alert::Within14Days); // 80 GB: 8 days
+        assert_eq!(at(30.0), Alert::Within3Days); // 40 GB: 1.3 days
+        assert_eq!(at(40.0), Alert::WithinADay); // 20 GB: half a day
+        assert!(Alert::Low > Alert::WithinADay && Alert::Within14Days > Alert::None);
+    }
+
+    #[test]
+    fn an_afternoon_of_builds_raises_no_forecast_alert() {
+        // 6 hours at 100 GB/day with 60 GB left: the 6-hour window only.
+        let pts: Vec<SpacePoint> = series_every(1, 300, |h| 85.0 * GB - 100.0 * GB * h / 24.0)
+            .into_iter()
+            .take(73)
+            .collect();
+        let f = forecast(&pts, &Params::default()).unwrap();
+        assert_eq!(f.rate.unwrap().window, 6 * HOUR);
+        assert!(f.full_in.unwrap().days < 1.0);
+        assert_eq!(alert(Some(&f), f.avail, 500_000_000_000), Alert::None);
+    }
+
+    #[test]
+    fn low_space_alerts_without_a_trend() {
+        assert_eq!(low_floor(500_000_000_000), 10_000_000_000);
+        assert_eq!(low_floor(2_000_000_000_000), 40_000_000_000);
+        assert_eq!(alert(None, 9_000_000_000, 500_000_000_000), Alert::Low);
+        assert_eq!(alert(None, 11_000_000_000, 500_000_000_000), Alert::None);
     }
 }

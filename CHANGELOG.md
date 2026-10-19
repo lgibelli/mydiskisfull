@@ -58,7 +58,45 @@ All notable changes to this project are documented here. The format is based on
 - Churn by `cfprefsd` is said for what it is, an app saving its settings over and over, and its
   fix names the app whose large preferences file was just rewritten.
 
+- The menu bar app (`app/`, SwiftUI, built with `app/build.sh`): free space and the forecast in
+  the menu, open incidents with their fix, suggestions, and the tweaks as checkmarks that apply or
+  undo after showing what they change. An overview window with a gauge and a free-space chart
+  with the forecast, the disk map (a sunburst, a treemap coloured by each folder's growth in the
+  last day like a market heatmap, or a list; click to zoom in; the last map is kept with when it
+  was taken, and measuring again is suggested after 30 minutes), settings, a first-launch
+  welcome and an About panel with the watcher's measured cost. Notifications for a new
+  incident, the forecast crossing 14, 3 and 1 days or free space under 10 GB, and a tweak
+  something undid, once per episode. The watcher runs from the bundle as an SMAppService
+  LaunchAgent (its own label, `…mydiskisfull.watcher`) and takes over from `mdif agent install`.
+- `mdif status`: free space, the forecast, an alert level, open incidents, tweaks something undid
+  and whether the watcher has Full Disk Access. With `--json` it is what the app reads; it only
+  reads the history, so it takes milliseconds.
+- `mdif forecast --json --series` (the free-space history), `--json` for `mdif tweaks apply` and
+  `mdif tweaks revert`, and `mdif watch --log` (errors to `~/Library/Logs/MyDiskIsFull`).
+- The watcher records whether it has Full Disk Access at every sample, and what each folder
+  update listed (folders, entries, CPU, the biggest folders), which `mdif forecast` shows.
+- `mdif status` judges a tweak it applied by the settings its record names, not by where they
+  would be looked for now, so the app (without the shell's `GRADLE_USER_HOME` or
+  `XDG_CONFIG_HOME`) doesn't take it for undone.
+- `app/check-contract.sh`: decodes the real output of every command the app uses with the app's
+  own models, in CI.
+
 ### Fixed
+- The watcher was over its budget on a busy Mac: its folder updates came to about 2 s of CPU an
+  hour, two thirds of it re-listing five folders (two builds' `deps`, Chrome's and Slack's disk
+  caches, a log folder). A folder whose size hardly changes between listings (under a fifth of
+  the slowest growth an incident can have, 16 MB a period) now waits twice, then four times as
+  long to be listed again (8 hours at most for the biggest), and an update lists at most 20,000
+  entries of folders it has seen before, the most overdue first. On the same journal that is
+  0.5–0.8 s an hour, 0.4 s at most. What a folder grew while it waited still counts in full.
+- The watcher could stop for as long as a privacy prompt stayed unanswered: without Full Disk
+  Access, opening Documents, Desktop, Downloads, iCloud Drive, cloud storage, another app's
+  container or another volume shows a dialog, and the open waits for it (18 minutes on the
+  development Mac). The watcher and `mdif status` now leave those folders alone until they have
+  Full Disk Access.
+- `mdif forecast --json` printed prose when there was no history yet.
+- `mdif agent install` refuses to start a second watcher next to the app's, and `mdif agent
+  status` shows either.
 - Modified clones were counted twice: once one copy changes it gets its own clone ID while still
   sharing most blocks. Files that may share blocks are now measured by their physical extents
   (`F_LOG2PHYS_EXT`), so shared blocks count once; files whose layout can't be read are reported

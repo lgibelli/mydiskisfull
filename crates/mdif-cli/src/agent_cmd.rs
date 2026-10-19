@@ -10,6 +10,10 @@ use mdif_core::units::bytes;
 use crate::watch_cmd;
 
 pub const LABEL: &str = "io.github.lgibelli.mydiskisfull.watch";
+/// The menu bar app's watcher (an SMAppService agent). Not [`LABEL`]: macOS
+/// keeps a record of a command-line agent under its label, and an app's
+/// agent with the same label inherits it and is refused once it's disabled.
+pub const APP_LABEL: &str = "io.github.lgibelli.mydiskisfull.watcher";
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
@@ -19,10 +23,6 @@ fn plist_path() -> PathBuf {
     home()
         .join("Library/LaunchAgents")
         .join(format!("{LABEL}.plist"))
-}
-
-fn log_path() -> PathBuf {
-    home().join("Library/Logs/MyDiskIsFull/watch.log")
 }
 
 fn domain() -> Result<String> {
@@ -36,6 +36,38 @@ fn domain() -> Result<String> {
     ))
 }
 
+/// The app bundle whose LaunchAgent this is, when the app runs the watcher.
+fn run_by_app(launchctl_print: &str) -> Option<String> {
+    launchctl_print.lines().find_map(|l| {
+        let path = l.trim().strip_prefix("program = ")?;
+        let end = path.find(".app/Contents/")? + ".app".len();
+        Some(path[..end].to_string())
+    })
+}
+
+/// What launchd says about the job `label`, if it has one.
+fn print_job(domain: &str, label: &str) -> Option<String> {
+    let out = Command::new("launchctl")
+        .args(["print", &format!("{domain}/{label}")])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Two watchers would sample the same history twice.
+fn refuse_if_app(domain: &str) -> Result<()> {
+    if let Some(text) = print_job(domain, APP_LABEL) {
+        let app = run_by_app(&text).unwrap_or_else(|| "MyDiskIsFull".into());
+        bail!(
+            "the watcher already runs in {app}, with the same history. Turn \"Watch in the \
+             background\" off in its settings first if you'd rather run it from here."
+        );
+    }
+    Ok(())
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -43,9 +75,11 @@ fn xml_escape(s: &str) -> String {
 }
 
 pub fn install(interval: u64) -> Result<()> {
+    let domain = domain()?;
+    refuse_if_app(&domain)?;
     let exe = std::env::current_exe()?.canonicalize()?;
     let exe = exe.to_str().context("executable path is not UTF-8")?;
-    let log = log_path();
+    let log = watch_cmd::log_path();
     std::fs::create_dir_all(log.parent().unwrap())?;
     let plist = plist_path();
     std::fs::create_dir_all(plist.parent().unwrap())?;
@@ -85,7 +119,6 @@ pub fn install(interval: u64) -> Result<()> {
     );
     std::fs::write(&plist, body)?;
 
-    let domain = domain()?;
     // Replace a previous installation, if any.
     let _ = Command::new("launchctl")
         .args(["bootout", &format!("{domain}/{LABEL}")])
@@ -128,13 +161,12 @@ pub fn uninstall() -> Result<()> {
 
 pub fn status() -> Result<()> {
     let domain = domain()?;
-    let out = Command::new("launchctl")
-        .args(["print", &format!("{domain}/{LABEL}")])
-        .output()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
-        println!("Watcher: not installed (run `mdif agent install`).");
-    } else {
+    let mut found = false;
+    for (label, by) in [(LABEL, "mdif agent install"), (APP_LABEL, "the app")] {
+        let Some(text) = print_job(&domain, label) else {
+            continue;
+        };
+        found = true;
         let field = |k: &str| {
             text.lines().map(str::trim).find_map(|l| {
                 l.strip_prefix(k)
@@ -142,18 +174,20 @@ pub fn status() -> Result<()> {
             })
         };
         println!(
-            "Watcher: {} (pid {})",
+            "Watcher: {} (pid {}), run by {}",
             field("state").unwrap_or_else(|| "unknown".into()),
-            field("pid").unwrap_or_else(|| "-".into())
+            field("pid").unwrap_or_else(|| "-".into()),
+            run_by_app(&text).unwrap_or_else(|| by.into())
+        );
+    }
+    if !found {
+        println!(
+            "Watcher: not running (`mdif agent install`, or \"Watch in the background\" in the app)."
         );
     }
     let db = watch_cmd::default_db();
     if db.exists() {
-        let size: u64 = ["", "-wal", "-shm"]
-            .iter()
-            .filter_map(|s| std::fs::metadata(format!("{}{s}", db.display())).ok())
-            .map(|m| m.len())
-            .sum();
+        let size = watch_cmd::history_bytes(&db);
         let store = Store::open(&db)?;
         let rows: i64 = store.row_counts()?.iter().map(|(_, _, n)| n).sum();
         println!("History: {} ({rows} rows) in {}", bytes(size), db.display());
@@ -161,4 +195,20 @@ pub fn status() -> Result<()> {
         println!("History: none yet");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_is_found_from_the_program_path() {
+        let app = "\tprogram = /Applications/MyDiskIsFull.app/Contents/MacOS/mdif\n";
+        assert_eq!(
+            run_by_app(app).as_deref(),
+            Some("/Applications/MyDiskIsFull.app")
+        );
+        let cli = "\tprogram = /Users/me/.cargo/bin/mdif\n";
+        assert_eq!(run_by_app(cli), None);
+    }
 }

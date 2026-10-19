@@ -1,0 +1,158 @@
+{
+  "volume": "/System/Volumes/Data",
+  "total": 494384795648,
+  "avail": 21000000000,
+  "floor": 10000000000,
+  "alert": "3_days",
+  "alert_sentence": "At 7.5 GB a day (the 3-day trend), the disk is full in about 3 days, around Oct 22.",
+  "forecast": {
+    "at": 1792405800,
+    "avail": 21000000000,
+    "rate": {
+      "window": 259200,
+      "points": 864,
+      "per_day": 7500000000.0,
+      "low": 6000000000.0,
+      "high": 9000000000.0,
+      "steps_removed": 1
+    },
+    "recent": null,
+    "full_in": {
+      "days": 2.8,
+      "earliest": 2.33,
+      "latest": 3.5
+    },
+    "recent_full_in": null,
+    "steps": [
+      {
+        "ts": 1792300000,
+        "freed": 4000000000
+      }
+    ]
+  },
+  "history": {
+    "samples": 864,
+    "first": 1792146600,
+    "last": 1792405800,
+    "interval_secs": 300,
+    "bytes": 1048576
+  },
+  "incidents": [
+    {
+      "opened": 1792390000,
+      "updated": 1792405800,
+      "closed": null,
+      "incident": {
+        "kind": "growth",
+        "subject": "/Users/me/Library/Developer/Xcode/DerivedData",
+        "at": 1792405800,
+        "window": 21600,
+        "amount": 2000000000,
+        "per_day": 8000000000.0,
+        "fit": 0.97,
+        "size": 30000000000,
+        "full_in_days": 2.6
+      },
+      "sentence": "~/Library/Developer/Xcode/DerivedData grew 2.0 GB in 6 hours (8.0 GB a day, steadily, now 30.0 GB). At that rate the disk is full in 3 days.",
+      "fix_line": "Steps: In Xcode, Settings → Locations: delete Derived Data.",
+      "fix": {
+        "kind": "steps",
+        "detail": "In Xcode, Settings → Locations: delete Derived Data."
+      }
+    },
+    {
+      "opened": 1792380000,
+      "updated": 1792405800,
+      "closed": null,
+      "incident": {
+        "kind": "churn",
+        "subject": "SyncClient",
+        "at": 1792405800,
+        "window": 3600,
+        "amount": 5000000000,
+        "per_day": 120000000000.0,
+        "fit": 0.01,
+        "size": null,
+        "full_in_days": null
+      },
+      "sentence": "SyncClient wrote 5.0 GB in 60 minutes while the disk kept 1%: it is rewriting the same data (120.0 GB a day of SSD wear).",
+      "fix_line": "Run: osascript -e 'quit app \"SyncClient\"' (then open it again)",
+      "fix": {
+        "kind": "run",
+        "detail": {
+          "command": "osascript -e 'quit app \"SyncClient\"'",
+          "note": "then open it again"
+        }
+      }
+    },
+    {
+      "opened": 1792370000,
+      "updated": 1792405800,
+      "closed": null,
+      "incident": {
+        "kind": "growth",
+        "subject": "/Users/me/.gradle",
+        "at": 1792405800,
+        "window": 21600,
+        "amount": 1500000000,
+        "per_day": 6000000000.0,
+        "fit": 0.9,
+        "size": 9000000000,
+        "full_in_days": 3.5
+      },
+      "sentence": "~/.gradle grew 1.5 GB in 6 hours.",
+      "fix_line": "Tweak: Let Gradle clear caches unused for 14 days (`mdif tweaks apply gradle-caches`)",
+      "fix": {
+        "kind": "tweak",
+        "detail": "gradle-caches"
+      }
+    },
+    {
+      "opened": 1792360000,
+      "updated": 1792405800,
+      "closed": null,
+      "incident": {
+        "kind": "growth",
+        "subject": "/Users/me/Library/Caches/com.example",
+        "at": 1792405800,
+        "window": 21600,
+        "amount": 1200000000,
+        "per_day": 4800000000.0,
+        "fit": 0.88,
+        "size": 3000000000,
+        "full_in_days": 4.4
+      },
+      "sentence": "~/Library/Caches/com.example grew 1.2 GB in 6 hours.",
+      "fix_line": "Leave it: a cache refills by itself.",
+      "fix": {
+        "kind": "leave",
+        "detail": "a cache refills by itself."
+      }
+    }
+  ],
+  "tweaks": [
+    {
+      "id": "chrome-cache",
+      "title": "Cap Chrome's cache at 500 MB",
+      "status": "not applied",
+      "applied": 1792200000,
+      "undone": true
+    }
+  ],
+  "access": {
+    "checked": 1792405800,
+    "full_disk_access": false
+  },
+  "watcher_cost": {
+    "samples": 864,
+    "interval_secs": 300,
+    "cpu_us_per_sample": 5000,
+    "written_per_sample": 40000,
+    "cpu_us_per_hour": 660000,
+    "written_per_hour": 480000,
+    "owners_every_secs": 1800,
+    "periods": 143,
+    "cpu_us_per_period": 300000,
+    "catch_up_cpu_us": 1900000
+  }
+}

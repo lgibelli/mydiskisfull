@@ -3,6 +3,7 @@
 mod agent_cmd;
 mod map_cmd;
 mod owners_cmd;
+mod status_cmd;
 mod tweaks_cmd;
 mod watch_cmd;
 mod writers_cmd;
@@ -28,11 +29,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Free space, the forecast and what needs attention, at a glance
+    Status {
+        /// Print the result as JSON (what the menu bar app reads)
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        history: History,
+    },
     /// When the disk will be full, from the watcher's history
     Forecast {
         /// Print the result as JSON
         #[arg(long)]
         json: bool,
+        /// With --json, include the free-space history
+        #[arg(long, requires = "json")]
+        series: bool,
         #[command(flatten)]
         history: History,
     },
@@ -47,6 +59,9 @@ enum Cmd {
         /// Print errors only
         #[arg(long)]
         quiet: bool,
+        /// Append errors to ~/Library/Logs/MyDiskIsFull/watch.log
+        #[arg(long)]
+        log: bool,
         /// Seconds between updates of the growth per folder (0: off)
         #[arg(long, default_value_t = 1800)]
         owners_every: u64,
@@ -90,8 +105,8 @@ enum Cmd {
     Tweaks {
         #[command(subcommand)]
         action: Option<TweakAction>,
-        /// Print the list as JSON
-        #[arg(long)]
+        /// Print the list, or what apply and revert did, as JSON
+        #[arg(long, global = true)]
         json: bool,
         /// History database (where applied tweaks are recorded)
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
@@ -167,20 +182,29 @@ enum AgentAction {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Forecast { json, history } => watch_cmd::forecast(&history.db, &history.volume, json)?,
+        Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
+        Cmd::Forecast {
+            json,
+            series,
+            history,
+        } => watch_cmd::forecast(&history.db, &history.volume, json, series)?,
         Cmd::Watch {
             interval,
             once,
             quiet,
+            log,
             owners_every,
             history,
         } => watch_cmd::watch(
             &history.db,
             &history.volume,
-            Duration::from_secs(interval),
-            owners_every,
-            once,
-            quiet,
+            watch_cmd::WatchOptions {
+                interval: Duration::from_secs(interval),
+                owners_every,
+                once,
+                quiet,
+                log,
+            },
         )?,
         Cmd::Owners {
             hours,
@@ -196,8 +220,8 @@ fn main() -> Result<()> {
         Cmd::Suggest { json, history } => tweaks_cmd::suggest(&history.db, &history.volume, json)?,
         Cmd::Tweaks { action, json, db } => match action {
             None => tweaks_cmd::list(&db, json)?,
-            Some(TweakAction::Apply { id, dry_run }) => tweaks_cmd::apply(&db, &id, dry_run)?,
-            Some(TweakAction::Revert { id }) => tweaks_cmd::revert(&db, &id)?,
+            Some(TweakAction::Apply { id, dry_run }) => tweaks_cmd::apply(&db, &id, dry_run, json)?,
+            Some(TweakAction::Revert { id }) => tweaks_cmd::revert(&db, &id, json)?,
         },
         Cmd::Agent { action } => match action {
             AgentAction::Install { interval } => agent_cmd::install(interval)?,

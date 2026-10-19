@@ -1,0 +1,9 @@
+{
+  "id": "trash-auto-empty",
+  "title": "Empty the Trash automatically after 30 days",
+  "restored": [
+    "defaults com.apple.finder FXRemoveOldTrashItems: true → not set"
+  ],
+  "kept": [],
+  "restart": false
+}

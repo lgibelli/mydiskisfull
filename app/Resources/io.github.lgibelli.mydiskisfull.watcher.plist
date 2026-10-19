@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- The watcher, registered by the app with SMAppService. BundleProgram is
+     relative to the app, so it follows the app when it moves or updates.
+     Its label is not the one `mdif agent install` uses: macOS keeps a record
+     of a command-line agent under its label (disabled once it is removed),
+     and an app's agent with the same label inherits that record and is
+     refused. The app stops the command-line one first; the history is the
+     same file. -->
+<dict>
+	<key>Label</key>
+	<string>io.github.lgibelli.mydiskisfull.watcher</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/mdif</string>
+	<!-- No path in the user's home can be written here, so mdif opens its own
+	     log (~/Library/Logs/MyDiskIsFull/watch.log); --quiet keeps it to
+	     errors and incidents. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>mdif</string>
+		<string>watch</string>
+		<string>--quiet</string>
+		<string>--log</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- Restarted at most once a minute if it keeps failing. -->
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+</dict>
+</plist>

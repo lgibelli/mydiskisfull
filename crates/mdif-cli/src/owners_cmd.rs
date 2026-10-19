@@ -6,12 +6,12 @@ use std::path::Path;
 use anyhow::Result;
 use mdif_core::forecast::{DAY, HOUR};
 use mdif_core::owners;
-use mdif_core::store::Store;
+use mdif_core::store::{Episode, Store};
 use mdif_core::suggest;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
 use mdif_core::watch::unix_now;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::tweaks_cmd;
 use crate::watch_cmd::{home, local, tilde};
@@ -113,6 +113,20 @@ pub fn owners(db: &Path, hours: i64, top: usize, json_out: bool) -> Result<()> {
     Ok(())
 }
 
+/// An episode as `mdif incidents --json` and `mdif status --json` print it.
+pub(crate) fn episode_json(e: &Episode, home: &Path) -> Value {
+    let fix = suggest::for_incident(&e.incident, home);
+    json!({
+        "opened": e.opened,
+        "updated": e.updated,
+        "closed": e.closed,
+        "incident": e.incident,
+        "sentence": e.incident.sentence(Some(home)),
+        "fix_line": tweaks_cmd::fix_line(&fix),
+        "fix": fix,
+    })
+}
+
 pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
     let Some(store) = open(db)? else {
         return Ok(());
@@ -120,19 +134,7 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
     let home = home();
     let episodes = store.incidents_since(unix_now() - days * DAY)?;
     if json_out {
-        let out: Vec<_> = episodes
-            .iter()
-            .map(|e| {
-                json!({
-                    "opened": e.opened,
-                    "updated": e.updated,
-                    "closed": e.closed,
-                    "incident": e.incident,
-                    "sentence": e.incident.sentence(Some(&home)),
-                    "fix": suggest::for_incident(&e.incident, &home),
-                })
-            })
-            .collect();
+        let out: Vec<_> = episodes.iter().map(|e| episode_json(e, &home)).collect();
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }

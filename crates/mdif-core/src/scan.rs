@@ -223,6 +223,9 @@ pub fn size_of(path: &Path) -> Option<u64> {
 }
 
 pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
+    if !crate::privacy::may_open(root) {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
     let dev = mdif_macos::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
     bulk::open_dir(root)?;
@@ -256,7 +259,14 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         ..Totals::default()
     };
     let mut links = Links::new();
-    let entries = match bulk::read_dir(dir) {
+    // A folder that would show a privacy prompt counts as unreadable when
+    // prompts are being avoided (see crate::privacy).
+    let listed = if crate::privacy::may_open(dir) {
+        bulk::read_dir(dir)
+    } else {
+        Err(io::Error::from_raw_os_error(libc::EPERM))
+    };
+    let entries = match listed {
         Ok(e) => e,
         Err(_) => {
             base.unreadable_dirs = 1;

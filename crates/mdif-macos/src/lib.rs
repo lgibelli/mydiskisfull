@@ -9,7 +9,8 @@
 //! - [`fs`]: volume statistics and the per-process switch that stops cloud
 //!   placeholders from being downloaded while we look at them.
 //! - [`proc`]: bytes read/written per process (`proc_pid_rusage`, no root).
-//! - [`sys`]: when the Mac started, and how much swap it holds.
+//! - [`sys`]: when the Mac started, how much swap it holds, Full Disk Access,
+//!   and standard error into a log.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("mdif-macos only builds on macOS");

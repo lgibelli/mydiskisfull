@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>MyDiskIsFull</string>
+	<key>CFBundleExecutable</key>
+	<string>MyDiskIsFull</string>
+	<key>CFBundleIconFile</key>
+	<string>MyDiskIsFull</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.lgibelli.mydiskisfull</string>
+	<key>CFBundleName</key>
+	<string>MyDiskIsFull</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- Kept in step with the workspace version in Cargo.toml by app/build.sh. -->
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>100</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- A menu bar app: no Dock icon. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 The MyDiskIsFull contributors</string>
+</dict>
+</plist>

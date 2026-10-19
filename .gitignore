@@ -3,3 +3,8 @@ target/
 
 # Local agent notes, not part of the project.
 CLAUDE.md
+
+# The app bundle and its scratch files (app/build.sh).
+/build/
+# Signing account details for app/build.sh.
+release.env
