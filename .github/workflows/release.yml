@@ -41,7 +41,7 @@ jobs:
     runs-on: macos-15
     environment: release # add required reviewers in Settings → Environments
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
@@ -88,7 +88,7 @@ jobs:
 
       # A signed statement in Sigstore's public log binding these bytes to
       # this workflow, repository and commit.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             build/release/MyDiskIsFull-*.dmg
