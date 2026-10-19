@@ -132,7 +132,7 @@ fi
 
 say "1/5  Build: universal, full edition"
 ARCH=universal app/build.sh
-IDENTITY=$(codesign -dv "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p' | head -1)
+IDENTITY=$(codesign -dv --verbose=2 "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)/\1/p' | head -1)
 [ -n "$IDENTITY" ] || die "the app isn't signed with a Developer ID Application certificate"
 # Capture, then test: `codesign | grep -q` fails under pipefail exactly when
 # grep finds what it looks for.
