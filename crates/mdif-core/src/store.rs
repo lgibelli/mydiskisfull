@@ -5,6 +5,9 @@
 //! - **writes**: bytes written per process name during each sample interval;
 //! - **growth**: bytes each owner folder grew (or shrank) per period.
 //!
+//! Beside them: incident episodes, and the tweaks applied with what each
+//! one replaced (so it can be undone).
+//!
 //! Rows start at 5-minute resolution. After a day they are folded into hourly
 //! rows, after a month into daily rows, and daily rows are dropped after
 //! about a year. Free space keeps the *last* value of each bucket (a level);
@@ -66,12 +69,26 @@ pub struct Episode {
     pub incident: Incident,
 }
 
+/// A tweak as applied: the steps it took (JSON, see [`crate::tweaks`]) and
+/// the sizes of what it was for at the time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TweakRecord {
+    pub id: String,
+    pub applied: i64,
+    pub reverted: Option<i64>,
+    pub steps: String,
+    pub sizes: String,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        // The agent keeps the history open while commands like `mdif tweaks`
+        // write to it: wait for its commit instead of failing.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // Each page a sample touches is written to the WAL in full, and our
         // rows are tiny: 1 KB pages make a sample cost ~5 KB instead of ~19
         // KB with the default 4 KB pages. Only takes effect on a new file.
@@ -118,6 +135,14 @@ impl Store {
                  closed  INTEGER,
                  detail  TEXT    NOT NULL,
                  PRIMARY KEY (kind, subject, opened)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS tweaks (
+                 id       TEXT    NOT NULL,
+                 applied  INTEGER NOT NULL,
+                 reverted INTEGER,
+                 steps    TEXT    NOT NULL,
+                 sizes    TEXT    NOT NULL,
+                 PRIMARY KEY (id, applied)
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS meta (
                  key   TEXT PRIMARY KEY,
@@ -193,6 +218,16 @@ impl Store {
                 avail: r.get::<_, i64>(2)? as u64,
             })
         })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// When samples were taken since `since`, on any volume: when the
+    /// watcher was running.
+    pub fn sample_times(&self, since: i64) -> Result<Vec<i64>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT DISTINCT ts FROM space WHERE ts >= ?1 ORDER BY ts")?;
+        let rows = st.query_map(params![since], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -373,6 +408,63 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn add_tweak(&self, id: &str, applied: i64, steps: &str, sizes: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tweaks (id, applied, steps, sizes) VALUES (?1, ?2, ?3, ?4)",
+            params![id, applied, steps, sizes],
+        )?;
+        Ok(())
+    }
+
+    /// Records of `id` not reverted yet, the most recent first.
+    pub fn open_tweaks(&self, id: &str) -> Result<Vec<TweakRecord>> {
+        self.tweak_rows(
+            "SELECT id, applied, reverted, steps, sizes FROM tweaks
+             WHERE id = ?1 AND reverted IS NULL ORDER BY applied DESC",
+            params![id],
+        )
+    }
+
+    /// Every record, the most recent first.
+    pub fn all_tweaks(&self) -> Result<Vec<TweakRecord>> {
+        self.tweak_rows(
+            "SELECT id, applied, reverted, steps, sizes FROM tweaks ORDER BY applied DESC",
+            params![],
+        )
+    }
+
+    /// Drop the record of an apply that didn't happen.
+    pub fn forget_tweak(&self, id: &str, applied: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tweaks WHERE id = ?1 AND applied = ?2",
+            params![id, applied],
+        )?;
+        Ok(())
+    }
+
+    /// Mark every open record of `id` reverted at `at`.
+    pub fn revert_tweak(&self, id: &str, at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tweaks SET reverted = ?2 WHERE id = ?1 AND reverted IS NULL",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+
+    fn tweak_rows(&self, sql: &str, p: impl rusqlite::Params) -> Result<Vec<TweakRecord>> {
+        let mut st = self.conn.prepare_cached(sql)?;
+        let rows = st.query_map(p, |r| {
+            Ok(TweakRecord {
+                id: r.get(0)?,
+                applied: r.get(1)?,
+                reverted: r.get(2)?,
+                steps: r.get(3)?,
+                sizes: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -573,6 +665,25 @@ mod tests {
         s.compact(500 * 86_400).unwrap();
         assert!(s.space_since("/", 0).unwrap().is_empty());
         assert!(s.writes_since(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tweak_records_stay_open_until_reverted() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_tweak("t", 100, "[1]", "[]").unwrap();
+        s.add_tweak("t", 200, "[2]", "[]").unwrap();
+        s.add_tweak("u", 150, "[]", "[]").unwrap();
+        let open = s.open_tweaks("t").unwrap();
+        assert_eq!(
+            open.iter().map(|r| r.applied).collect::<Vec<_>>(),
+            [200, 100]
+        );
+        s.revert_tweak("t", 300).unwrap();
+        assert!(s.open_tweaks("t").unwrap().is_empty());
+        assert_eq!(s.open_tweaks("u").unwrap().len(), 1);
+        let all = s.all_tweaks().unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].reverted, Some(300));
     }
 
     #[test]

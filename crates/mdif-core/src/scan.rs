@@ -202,6 +202,26 @@ struct Walked {
     unreadable: Vec<PathBuf>,
 }
 
+/// Allocated bytes of `path`, a folder (every file in it once) or a file: 0
+/// when it doesn't exist, `None` when it can't be read.
+pub fn size_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // Measuring must never download a cloud placeholder.
+    mdif_macos::fs::forbid_dataless_materialization().ok()?;
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let opts = Options {
+                max_depth: 0,
+                min_node: u64::MAX,
+            };
+            scan(path, &opts).ok().map(|s| s.root.totals.allocated)
+        }
+        Ok(m) => Some(m.blocks() * 512),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+        Err(_) => None,
+    }
+}
+
 pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
     let dev = mdif_macos::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.

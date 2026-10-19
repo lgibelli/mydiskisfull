@@ -170,9 +170,7 @@ impl Incident {
                 )
             }
             Kind::Churn => format!(
-                "{} wrote {} in {} while the disk kept {}: it is rewriting the same data \
-                 ({} a day of SSD wear). A sync or log that is stuck is the usual cause; \
-                 restarting it usually stops it.",
+                "{} wrote {} in {} while the disk kept {}: {} ({} a day of SSD wear).{}",
                 crate::text::printable(&self.subject),
                 bytes(self.amount),
                 span(self.window),
@@ -181,7 +179,19 @@ impl Incident {
                 } else {
                     format!("{:.0}%", self.fit * 100.0)
                 },
+                // It writes for other apps.
+                if self.subject == "cfprefsd" {
+                    "an app is saving its settings over and over"
+                } else {
+                    "it is rewriting the same data"
+                },
                 bytes(self.per_day as u64),
+                if self.subject == "cfprefsd" {
+                    ""
+                } else {
+                    " A sync or log that is stuck is the usual cause; restarting it usually \
+                     stops it."
+                },
             ),
         }
     }
@@ -521,6 +531,18 @@ mod tests {
             s.starts_with("OneDrive wrote 3.0 GB in 60 minutes while the disk kept 1%"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn settings_churn_blames_the_app_not_cfprefsd() {
+        let mut i = churn_case(250_000_000, 0, 60).remove(0);
+        i.subject = "cfprefsd".into();
+        let s = i.sentence(None);
+        assert!(
+            s.contains("an app is saving its settings over and over"),
+            "{s}"
+        );
+        assert!(!s.contains("restarting it"), "{s}");
     }
 
     #[test]

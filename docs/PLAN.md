@@ -87,24 +87,34 @@ Two kinds, each with its own clauses.
 **Regrowth memory:** after any cleanup, the app records how fast the item comes back. "Cleared
 6 GB on Oct 16, back to 4 GB by Oct 17: not worth clearing; [suggestion]."
 
-### 3. Suggestions: how to avoid it
-Each cause maps to a fix that stops it from coming back. Fixes are reversible: the app records the
-old value, checks later that the fix worked (using the trend data), and can undo it in one click.
+### 3. Suggestions: how to avoid it (done in M3)
+Each cause maps to a fix that stops it from coming back (`mdif suggest`, and a "Fix:" line under
+every incident). A fix is a **tweak** when a setting can stop it, otherwise a command to run once,
+steps to take in the app, or the advice to leave it alone because it refills by itself.
+
+Tweaks (`mdif tweaks`) are reversible. Applying one records every value it replaces before it
+changes anything, and a failure halfway undoes what was done. Reverting restores only the settings
+that still hold the tweak's value, so a change made since is kept. Each tweak is checked later:
+the settings still hold, the restart it needed happened, and its folders shrank or grew slower
+than in the week before (from the watcher's history).
 
 | Cause | Suggestion | How the app applies it | Admin? |
 |---|---|---|---|
-| Apple Intelligence models (≈8 GB) | turn Apple Intelligence off | user pref `com.apple.CloudSubscriptionFeatures.optIn` (+ `auto_opt_in`), or a profile that blocks the features | no / approve profile |
-| Chrome on-device AI model (4 GB) | stop it downloading | Chrome policy `GenAILocalFoundationalModelSettings = 1` (profile) | approve profile |
-| Browser cache growth | cap the cache | policy `DiskCacheSize` | approve profile |
-| Build output regrowth (`target/`, `node_modules`, `build/`) | auto-clean stale builds; share one target dir between worktrees; exclude from Time Machine | cleanup rule + `CARGO_TARGET_DIR` advice + sticky TM exclusion | no |
-| Agent worktrees piling up | remove merged, clean worktrees automatically | `git worktree remove` rule | no |
-| Homebrew, Gradle, Cargo caches | retention settings | `HOMEBREW_CLEANUP_*`, Gradle `caches {}` init script, cargo `[gc.auto]` | no |
-| AI coding tool transcripts | retention | Claude Code `cleanupPeriodDays` | no |
-| Docker disk image | cap its size | Docker Desktop `diskSizeMiB` | no |
-| Local Time Machine snapshots holding deleted space | release them | `tmutil deletelocalsnapshots` | no |
-| Cloud files kept downloaded | free up space / unpin | system eviction; OneDrive needs its own `MarkUnpinned` action (research) | no |
-| Stuck sync client (churn) | restart it | quit and relaunch, then confirm writes drop | no |
-| Chat backups (WhatsApp), Messages "keep for", Photos/iCloud "Optimize" | change the setting | no API, so a deep link to the right settings pane with instructions | — |
+| Apple Intelligence models | turn Apple Intelligence off | tweak: every numeric opt-in flag in `com.apple.CloudSubscriptionFeatures.optIn` (the number differs between macOS versions) and `auto_opt_in` set to false; takes effect after a restart | no |
+| Chrome on-device AI model (4 GB) | stop it downloading | tweak: Chrome policy `GenAILocalFoundationalModelSettings = 1` in a user-scoped profile; once it's in effect, remove the copy | approve profile |
+| Browser cache growth | cap the cache | tweak: Chrome policy `DiskCacheSize` (500 MB) in a profile | approve profile |
+| Build output regrowth (`target/`, `node_modules`, `build/`) | clean it with its own tool; share one target dir between worktrees; auto-clean stale builds (M5); exclude from Time Machine | the command (`cargo clean --manifest-path …`, `flutter clean`), `build.target-dir` advice; rules in M5 | no |
+| Agent worktrees piling up | remove merged, clean worktrees | `git worktree remove` advice; automatic rule in M5 | no |
+| Homebrew, Gradle caches | retention settings | tweaks: `HOMEBREW_CLEANUP_MAX_AGE_DAYS=30` in `~/.homebrew/brew.env`; a Gradle init script (14 days, from Gradle 8.0). Cargo cleans its own cache since 1.88. | no |
+| AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
+| Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
+| Docker disk image | prune it; cap it in Docker's settings | `docker system prune`. Shrinking the image deletes its contents, so no tweak. | no |
+| Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | `tmutil deletelocalsnapshots <date>` | no |
+| Swap | restart | shown with its size when the disk is tight | no |
+| Cloud files kept downloaded | free up space / unpin | Finder's Free Up Space (steps); OneDrive needs its own `MarkUnpinned` action (research) | no |
+| Stuck sync client (churn) | restart it | quit and relaunch (known apps only: an unknown process name never goes into a command), then the churn clause shows whether writes dropped | no |
+| Chat backups (WhatsApp), Messages "keep for", Photos/iCloud "Optimize" | change the setting | no API, so the steps in the app | — |
+| A cache that refills after a cleanup | leave it | regrowth memory says so | — |
 | Spotlight, root-owned apps, `/Library` caches | cleanup with admin rights | privileged helper (SMAppService) | yes |
 
 ### 4. Cold data: what you never open, and offloading it
@@ -209,7 +219,8 @@ mydiskisfull/
                   proc_pid_rusage, statfs, setiopolicy_np, FSEvents, NSFileManager eviction
     mdif-core/    scanner, owners, map; history store + decimation; forecast and incident
                   detection; rules, suggestions, tweaks; providers; TM monitor
-    mdif-cli/     `mdif map | watch | forecast | writers | clean | tm | tweaks`
+    mdif-cli/     `mdif map | watch | forecast | owners | incidents | suggest | tweaks | writers`
+                  (later `clean | tm`)
     mdif-agent/   the watcher: tiny headless LaunchAgent, within the budget above
   app/            menu bar app (Tauri 2, opens a window only on demand); notifications
 ```
@@ -243,9 +254,41 @@ mydiskisfull/
   - `diskimages-helper` rewrites everything written into a mounted disk image, so it is
     allowlisted for churn (its clients are measured); attributing its writes to the image in
     the writers list is still to do.
-- **M3 – Suggestions + tweaks.** Cause → fix catalogue, apply/verify/revert, profiles.
-- **M4 – Menu bar app.** Gauge, incidents, map and clean screens, notifications, onboarding for
-  Full Disk Access.
+- **M3 – Suggestions + tweaks (done).** Cause → fix catalogue (`mdif suggest`, a fix under every
+  incident), seven tweaks with apply/verify/revert recorded in the history, configuration
+  profiles for Chrome's policies, and `diskimages-helper` writes shown with the image they go
+  to. Learned on the way, and handled:
+  - macOS no longer installs profiles from the command line. The app writes a user-scoped
+    `.mobileconfig` (the Custom Settings payload Apple Configurator writes) and opens it; the user
+    approves it in System Settings. It is in effect once its keys appear in
+    `/Library/Managed Preferences/<user>/`, and removing our own needs no password.
+  - Apple Intelligence's foundation models (`AssetsV2/…UAF_FM_*`) can't even be listed without
+    root, so the tweak's effect shows as free space, not as a folder shrinking.
+  - Gradle's `removeUnusedEntriesAfterDays` is write-only; the init script was checked offline
+    against Gradle 8.11 and 8.14 by reading the property behind it (30 → 14 days).
+  - Homebrew's `brew.env` takes `HOMEBREW_*` lines verbatim: no `export`, and quotes would be
+    part of the value.
+  - `defaults delete <domain>` leaves an empty plist behind.
+  - Docker's disk image is sparse (64 GB long, 5 GB allocated here), and shrinking its cap deletes
+    its contents, so Docker gets advice, not a tweak.
+  - macOS 27 deprecates `hdiutil create/attach` in favour of `diskutil image`; the e2e test
+    still uses `hdiutil`.
+  - The first real incident on the development Mac was churn by `cfprefsd`: 1.1 GB an hour that
+    the disk didn't keep. cfprefsd saves preferences for other apps; here a chat app was saving a
+    2.8 MB preferences file (thousands of logging-policy keys) every 4–11 seconds. Churn by
+    cfprefsd is now blamed on the app whose big preferences file was just rewritten.
+  - Measured cost of the watcher at its defaults on that Mac (five agent sessions building):
+    samples take about 5 ms of CPU and 33–44 KB of writes. The first owners period after a start
+    took 1.9 s (3,956 folders seen for the first time), the next 0.3 s (1,566 folders). Steady
+    state is about 0.65 s of CPU and 0.4 MB of writes an hour: inside the budget, but much
+    closer to it than on a CI runner (6 KB a sample). Averaged over the 76-minute run, the
+    catch-up made it read 1.7 s an hour, over budget, so the cost now measures samples and
+    folder updates apart and shows the catch-up on its own. Replaying FSEvents costs almost nothing
+    (2 ms for 1,000 events); listing is the cost, and six folders of 6k–40k entries (a browser
+    cache, Rust `deps`) were 80% of one listing.
+- **M4 – Menu bar app.** Gauge, incidents with their fixes, tweaks with one-click apply and undo,
+  map and clean screens, notifications (including a tweak that was undone), onboarding for Full
+  Disk Access.
 - **M5 – Cold data + offload, Clean, TM, cloud health.** Cold-folder detection, offload
   strategies over the verified Move flow, rules ported from the original shell script, TM
   monitor, OneDrive database.
@@ -257,8 +300,9 @@ mydiskisfull/
 - Forecast tests on recorded and synthetic series: steady growth, sawtooth, cleanup steps,
   plateau.
 - e2e: a real filler and churner, as Idlewild does with a real CPU burner and leak.
-- The budget is measured, not estimated: self CPU and self writes per sample, checked in CI on
-  a 2-minute run and scaled to the default 5-minute interval.
+- The budget is measured, not estimated: self CPU and writes per sample and per folder update
+  (the first update after a start reported apart), checked in CI on a 2-minute run and scaled to
+  the defaults (12 samples and 2 updates an hour).
 
 ## Open questions
 - UI shell: Tauri, or a native Swift menu bar like Idlewild driving the Rust core?

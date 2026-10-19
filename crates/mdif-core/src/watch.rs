@@ -110,34 +110,89 @@ struct Owners {
     /// Wall clock of the previous period: files created after it are new.
     last_wall: i64,
     every: i64,
+    /// Periods this process has run.
+    periods: u64,
 }
 
 /// What the watcher itself has cost, measured inside its samples only.
 ///
 /// Process start-up is left out on purpose: averaged over a short run it
 /// dominates and says nothing about the steady state (Idlewild's lesson).
+/// Samples and owners periods are measured apart, since a period costs
+/// far more and comes every few samples: an hour's cost is samples × their
+/// cost plus periods × theirs, right for a run of any length. The first
+/// period after a start is kept apart too (`catch_up`): it lists every
+/// folder changed while the watcher wasn't running, 1.9 s once on a busy
+/// Mac against 0.3 s for the next. It is counted in `cpu`, shown on its
+/// own, and stands in for a period until a later one has been measured.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cost {
     pub samples: u64,
-    /// CPU time (user + system) spent sampling.
+    /// CPU time (user + system) spent sampling, periods included.
     pub cpu: Duration,
     /// Bytes this process wrote while sampling (its history included).
     pub written: u64,
+    /// Owners periods after the first, and their CPU (listing folders and
+    /// evaluating the incident clauses).
+    pub periods: u64,
+    pub period_cpu: Duration,
+    /// CPU of the first owners period after the start.
+    pub catch_up: Duration,
+    /// Seconds between owners periods (0: growth per folder is off).
+    pub every: i64,
 }
 
 impl Cost {
+    /// CPU of a sample without an owners period, and bytes written per sample.
     pub fn per_sample(&self) -> (Duration, u64) {
         match self.samples {
             0 => (Duration::ZERO, 0),
-            n => (self.cpu / n as u32, self.written / n),
+            n => (
+                self.cpu.saturating_sub(self.period_cpu + self.catch_up) / n as u32,
+                self.written / n,
+            ),
         }
     }
 
-    /// Steady-state cost per hour at one sample every `interval` seconds.
+    /// CPU of an owners period, from those after the first; until one has
+    /// run, the first stands in (the costliest).
+    pub fn per_period(&self) -> Option<Duration> {
+        match self.periods {
+            0 => (self.catch_up > Duration::ZERO).then_some(self.catch_up),
+            n => Some(self.period_cpu / n as u32),
+        }
+    }
+
+    /// Steady-state cost per hour at one sample every `interval` seconds
+    /// and one owners period every [`Cost::every`].
     pub fn per_hour(&self, interval: i64) -> (Duration, u64) {
         let (cpu, written) = self.per_sample();
-        let per_hour = HOUR as f64 / interval.max(1) as f64;
-        (cpu.mul_f64(per_hour), (written as f64 * per_hour) as u64)
+        let samples = HOUR as f64 / interval.max(1) as f64;
+        let periods = match self.every {
+            0 => 0.0,
+            every => HOUR as f64 / every as f64,
+        };
+        let period = self.per_period().unwrap_or_default();
+        (
+            cpu.mul_f64(samples) + period.mul_f64(periods),
+            (written as f64 * samples) as u64,
+        )
+    }
+
+    /// Account for one sample: `cpu` and `written` in all, `period` the CPU
+    /// of its owners period if it had one (`first`: the first of the run).
+    fn add(&mut self, cpu: Duration, written: u64, period: Option<(Duration, bool)>) {
+        self.samples += 1;
+        self.cpu += cpu;
+        self.written += written;
+        match period {
+            Some((spent, true)) => self.catch_up += spent,
+            Some((spent, false)) => {
+                self.periods += 1;
+                self.period_cpu += spent;
+            }
+            None => {}
+        }
     }
 }
 
@@ -196,7 +251,9 @@ impl Watcher {
             last_period: None,
             last_wall,
             every: every.max(1),
+            periods: 0,
         });
+        self.cost.every = every.max(1);
         Ok(self)
     }
 
@@ -230,11 +287,16 @@ impl Watcher {
                     .filter(|(_, b)| *b >= OPEN_FILES_MIN)
                     .map(|(pid, _)| pid)
                     .collect();
+                let first = o.periods == 0;
+                let before = proc::own_usage().0;
                 let (g, p) = o.period(now, &heavy)?;
-                (g, Some(p))
+                let spent = proc::own_usage().0.saturating_sub(before);
+                (g, Some((p, spent, first)))
             }
             _ => (Vec::new(), None),
         };
+        let spent = period.map(|(_, spent, first)| (spent, first));
+        let period = period.map(|(p, _, _)| p);
         let mut meta = Vec::new();
         if let (Some(o), Some(_)) = (&self.owners, period) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
@@ -245,20 +307,13 @@ impl Watcher {
         // commit itself, which is counted in the in-memory total below and
         // so reaches the store with the next sample.
         let (cpu1, written1) = proc::own_usage();
-        let so_far = Cost {
-            samples: self.cost.samples + 1,
-            cpu: self.cost.cpu + cpu1.saturating_sub(cpu0),
-            written: self.cost.written + written1.saturating_sub(written0),
-        };
-        meta.push((
-            "watch.cost".to_string(),
-            format!(
-                "{} {} {}",
-                so_far.samples,
-                so_far.cpu.as_micros(),
-                so_far.written
-            ),
-        ));
+        let mut so_far = self.cost;
+        so_far.add(
+            cpu1.saturating_sub(cpu0),
+            written1.saturating_sub(written0),
+            spent,
+        );
+        meta.push(("watch.cost".to_string(), format_cost(&so_far)));
         let meta: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         self.store
             .record(&self.key, point, &writes, &growth, &meta)?;
@@ -266,15 +321,20 @@ impl Watcher {
             self.store.compact(now)?;
             self.last_compact = now;
         }
+        let before = proc::own_usage().0;
         let (incidents, opened) = match (&self.owners, period) {
             (Some(o), Some(_)) => self.detect(now, point.avail, 2 * o.every)?,
             _ => (Vec::new(), Vec::new()),
         };
 
         let (cpu2, written2) = proc::own_usage();
-        self.cost.samples += 1;
-        self.cost.cpu += cpu2.saturating_sub(cpu0);
-        self.cost.written += written2.saturating_sub(written0);
+        // The incident clauses are part of the period's cost.
+        let detect = cpu2.saturating_sub(before);
+        self.cost.add(
+            cpu2.saturating_sub(cpu0),
+            written2.saturating_sub(written0),
+            spent.map(|(s, first)| (s + detect, first)),
+        );
         Ok(Sample {
             point,
             writes,
@@ -423,6 +483,7 @@ impl Owners {
         let up = self.tracker.apply(&events, self.last_wall, now);
         self.last_wall = wall;
         self.last_period = Some(now);
+        self.periods += 1;
         self.tracker.prune(now - FORGET_AFTER);
         let period = Period {
             events: replayed,
@@ -454,12 +515,36 @@ pub fn recorded_cost(store: &Store) -> Result<Option<Cost>> {
     let Some(v) = store.meta("watch.cost")? else {
         return Ok(None);
     };
+    Ok(parse_cost(&v))
+}
+
+/// `samples cpu_us written periods period_cpu_us catch_up_us every`; older
+/// watchers wrote the first three only.
+fn format_cost(c: &Cost) -> String {
+    format!(
+        "{} {} {} {} {} {} {}",
+        c.samples,
+        c.cpu.as_micros(),
+        c.written,
+        c.periods,
+        c.period_cpu.as_micros(),
+        c.catch_up.as_micros(),
+        c.every
+    )
+}
+
+fn parse_cost(v: &str) -> Option<Cost> {
     let n: Vec<u64> = v.split(' ').filter_map(|x| x.parse().ok()).collect();
-    Ok((n.len() == 3).then(|| Cost {
+    let at = |i: usize| n.get(i).copied().unwrap_or(0);
+    matches!(n.len(), 3 | 7).then(|| Cost {
         samples: n[0],
         cpu: Duration::from_micros(n[1]),
         written: n[2],
-    }))
+        periods: at(3),
+        period_cpu: Duration::from_micros(at(4)),
+        catch_up: Duration::from_micros(at(5)),
+        every: at(6) as i64,
+    })
 }
 
 /// Sample every `interval`, aligned to the wall clock so buckets line up,
@@ -518,5 +603,42 @@ mod tests {
         assert_eq!(pts.len(), 2);
         let cost = recorded_cost(w.store()).unwrap().unwrap();
         assert_eq!(cost.samples, 2);
+    }
+
+    #[test]
+    fn an_hour_is_samples_plus_periods_whatever_the_run_length() {
+        let ms = Duration::from_millis;
+        // A 76-minute run: 16 samples of 5 ms, the catch-up period (1.9 s)
+        // and one more period (300 ms).
+        let mut c = Cost {
+            every: 1800,
+            ..Cost::default()
+        };
+        for i in 0..16 {
+            let period = match i {
+                6 => Some((ms(1900), true)),
+                12 => Some((ms(300), false)),
+                _ => None,
+            };
+            let extra = period.map_or(ms(0), |(p, _)| p);
+            c.add(ms(5) + extra, 40_000, period);
+        }
+        assert_eq!(c.per_sample(), (ms(5), 40_000));
+        assert_eq!(c.per_period(), Some(ms(300)));
+        // 12 samples and 2 periods an hour.
+        assert_eq!(c.per_hour(300), (ms(660), 480_000));
+        // Stored and read back.
+        assert_eq!(parse_cost(&format_cost(&c)), Some(c));
+        // Before a second period, the catch-up stands in for one.
+        let mut early = Cost {
+            every: 1800,
+            ..Cost::default()
+        };
+        early.add(ms(1905), 1, Some((ms(1900), true)));
+        assert_eq!(early.per_period(), Some(ms(1900)));
+        // An old three-field record still reads.
+        let old = parse_cost("2 1000 10").unwrap();
+        assert_eq!(old.per_sample().0, Duration::from_micros(500));
+        assert!(parse_cost("garbage").is_none());
     }
 }

@@ -21,8 +21,10 @@ All notable changes to this project are documented here. The format is based on
   (a sawtooth) are kept, and a recent speed-up is reported separately. Also the heaviest writers
   of the last 24 hours and what the watcher itself cost.
 - `mdif agent install | uninstall | status`: the watcher as a low-priority LaunchAgent.
-- The watcher measures its own CPU time and writes per sample: about 4 ms and 9 KB, so 50 ms
-  and 110 KB per hour at the default interval, against a budget of 1 s and 1 MB.
+- The watcher measures its own CPU time and writes: samples and folder updates apart (an hour is
+  12 of one and 2 of the other at the defaults), and the first folder update after a start, which
+  catches up on everything changed while it wasn't running, on its own. On a busy development
+  Mac that came to about 0.65 s and 0.4 MB an hour, against a budget of 1 s and 1 MB.
 - An end-to-end test with real processes on a scratch APFS image (a filler, a churner, a
   read-only decoy and a one-off cleanup), and a CI job that checks the watcher's budget.
 - Growth per folder (`mdif owners`). Every 30 minutes the watcher replays the FSEvents journal
@@ -37,6 +39,24 @@ All notable changes to this project are documented here. The format is based on
   that keeps rewriting data (≥ 1 GB in an hour, steadily, while the disk kept < 10%), each in
   one sentence. Episodes open once and close when the clauses stop holding; the agent logs new
   ones and `mdif forecast` shows open ones first, with the folders that grew most.
+
+- Suggestions (`mdif suggest`): what to do about each cause so it stays fixed, from the
+  watcher's history (open incidents, folders that grew, cleanups that refilled) and from a look
+  at the disk (what a tweak would stop, and when space is tight: local Time Machine snapshots,
+  swap, Docker's disk image). Incidents now end with their fix, in `mdif incidents`,
+  `mdif forecast` and the agent's log. Commands are printed for you to run, with paths
+  shell-quoted; a process name never goes into a command.
+- Tweaks (`mdif tweaks`, `mdif tweaks apply <id> [--dry-run]`, `mdif tweaks revert <id>`):
+  Apple Intelligence off, Chrome's on-device AI model off and its cache capped (as configuration
+  profiles you approve in System Settings), Gradle and Homebrew keeping unused downloads for less
+  long, Claude Code keeping transcripts for 14 days, and the Trash emptied after 30 days. Applying
+  records what each one replaces, reverting puts it back (but keeps what you changed since), and
+  `mdif tweaks` shows whether it worked: the setting still holds, the restart happened, and its
+  folders shrank or grew slower than before.
+- `mdif writers` names the disk image `diskimages-helper` is writing to, since those bytes are
+  its clients' writes.
+- Churn by `cfprefsd` is said for what it is, an app saving its settings over and over, and its
+  fix names the app whose large preferences file was just rewritten.
 
 ### Fixed
 - Modified clones were counted twice: once one copy changes it gets its own clone ID while still
