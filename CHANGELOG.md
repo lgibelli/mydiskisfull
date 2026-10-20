@@ -6,20 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
-### Changed
-- A redesigned app. A main window with a sidebar and four pages: Overview (a capacity ring and
-  the forecast in a sentence, led by whatever would fill the disk soonest; what needs attention,
-  each with its fix; the last days; the biggest fixes), Trends (free space with the forecast and
-  its plausible range, the alert floor, cleanups, readings under the pointer; what grew and wrote
-  most), Disk Map (a storage bar, then the sunburst, treemap or list) and Fixes (suggestions and
-  the tweaks as switches). ⌘1 to ⌘4 switch pages.
-- The menu bar shows a glance instead of a long menu: free space, the forecast, the last three
-  days and what needs attention, with the way into the window. The app joins the Dock while a
-  window is open.
-- A new icon, Settings as a grouped form, a new welcome, and the disk map coloured by folder by
-  default (growth is one click away).
+Nothing yet.
 
-## [0.1.0] - 2026-10-19
+## [0.1.0] - 2026-10-20
 
 The first release.
 
@@ -86,19 +75,25 @@ The first release.
 - Churn by `cfprefsd` is said for what it is, an app saving its settings over and over, and its
   fix names the app whose large preferences file was just rewritten.
 
-- The menu bar app (`app/`, SwiftUI, built with `app/build.sh`): free space and the forecast in
-  the menu, open incidents with their fix, suggestions, and the tweaks as checkmarks that apply or
-  undo after showing what they change. An overview window with a gauge and a free-space chart
-  with the forecast, the disk map (a sunburst, a treemap coloured by each folder's growth in the
-  last day like a market heatmap, or a list; click to zoom in), which keeps itself current
-  while it's open: measured again on opening if the last map is over 30 minutes old and every
-  hour while it stays open, at background priority, the previous map showing meanwhile. Never
-  in the background, though: one whole-disk map takes about 200 s of CPU, 200 times the
-  watcher's budget for an hour. Settings, a first-launch
-  welcome and an About panel with the watcher's measured cost. Notifications for a new
-  incident, the forecast crossing 14, 3 and 1 days or free space under 10 GB, and a tweak
-  something undid, once per episode. The watcher runs from the bundle as an SMAppService
-  LaunchAgent (its own label, `…mydiskisfull.watcher`) and takes over from `mdif agent install`.
+- The app (`app/`, SwiftUI, built with `app/build.sh`). A main window with a sidebar and four
+  pages, ⌘1 to ⌘4: Overview (a capacity ring and the forecast in a sentence, led by whatever
+  would fill the disk soonest; what needs attention, each with its fix; the last days; the
+  biggest fixes), Trends (free space with the forecast and its plausible range, the alert floor,
+  cleanups, readings under the pointer; what grew and wrote most), Disk Map (a storage bar, then
+  a sunburst, a treemap or a list, coloured by folder or, like a market heatmap, by each
+  folder's growth in the last day; click to zoom in) and Fixes (suggestions, and the tweaks as
+  switches that apply or undo after saying what they change and what you give up). The map
+  keeps itself current while it's open: measured again on opening if the last map is over 30
+  minutes old and every hour while it stays open, at background priority, the previous map
+  showing meanwhile. Never in the background, though: one whole-disk map takes about 200 s of
+  CPU, 200 times the watcher's budget for an hour. In the menu bar, a glance: free space, the
+  forecast, the last three days and what needs attention, with the way into the window. The app
+  joins the Dock only while a window is open, and stays in the menu bar when it starts at login.
+  Settings, a first-launch welcome and an About panel with the watcher's measured cost.
+  Notifications for a new incident, the forecast crossing 14, 3 and 1 days or free space under
+  10 GB, and a tweak something undid, once per episode. The watcher runs from the bundle as an
+  SMAppService LaunchAgent (its own label, `…mydiskisfull.watcher`) and takes over from
+  `mdif agent install`.
 - `app/build.sh --app-store`: an App Store edition of the app, without the tweaks and the
   per-app writes (the App Sandbox rules them out; their code isn't compiled in). Where they
   would be, it says why and links the free, open-source full version. Not sandboxed yet.
