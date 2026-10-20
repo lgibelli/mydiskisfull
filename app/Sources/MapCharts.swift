@@ -55,7 +55,9 @@ struct MapContext {
         guard let node else { return Color.gray.opacity(0.25) }
         switch mode {
         case .folder:
-            return Color(hue: hue, saturation: 0.55, brightness: max(0.45, 0.85 - 0.1 * Double(depth)))
+            // Strong in the middle, lighter towards the edge.
+            let d = Double(depth - 1)
+            return Color(hue: hue, saturation: max(0.28, 0.62 - 0.1 * d), brightness: min(0.96, 0.84 + 0.04 * d))
         case .growth:
             guard let g = growth(of: node), abs(g) >= 10_000_000 else {
                 return Color(white: 0.42 - 0.04 * Double(min(depth, 4)))
@@ -67,8 +69,11 @@ struct MapContext {
         }
     }
 
+    /// Top-level folders take these in turn, starting from the brand's blue;
+    /// none is red, which means growth in the other colouring.
     static func hue(_ index: Int) -> Double {
-        (Double(index) * 0.618_034).truncatingRemainder(dividingBy: 1)
+        let palette = [0.62, 0.50, 0.76, 0.90, 0.09, 0.40, 0.68, 0.55, 0.14, 0.83]
+        return palette[index % palette.count]
     }
 }
 
@@ -78,7 +83,7 @@ struct MapExplorer: View {
     let map: DiskMap
     let context: MapContext
     @State private var style: MapStyle = .sunburst
-    @State private var colouring: MapColouring = .growth
+    @State private var colouring: MapColouring = .folder
     @State private var trail: [Node] = []
     @State private var hovered: Node?
 
@@ -216,7 +221,7 @@ struct SunburstChart: View {
                     var fill = context.colour(s.node, colouring, hue: s.hue, depth: s.depth)
                     if let h = hovered, let n = s.node, n === h { fill = fill.opacity(0.7) }
                     ctx.fill(path, with: .color(fill))
-                    ctx.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor)), lineWidth: 1)
+                    ctx.stroke(path, with: .color(Theme.card), lineWidth: 1.5)
                     // Names where they fit: on the first two rings, wide arcs.
                     let mid = (s.start + s.end) / 2, r = inner + ring / 2
                     let arc = (s.end - s.start) * r
@@ -329,13 +334,13 @@ struct TreemapChart: View {
                     if t.depth == 1 && t.node?.children != nil && r.width > 90 && r.height > 60 {
                         // A group: a header strip over its own tiles, as in a
                         // sector of a market heatmap.
-                        ctx.fill(Path(r), with: .color(Color.primary.opacity(0.12)))
+                        ctx.fill(Path(roundedRect: r, cornerRadius: 5), with: .color(Color.primary.opacity(0.08)))
                         if let n = t.node {
                             label(ctx, n, in: CGRect(x: r.minX + 4, y: r.minY, width: r.width - 8, height: 16),
                                   header: true)
                         }
                     } else {
-                        ctx.fill(Path(r), with: .color(fill))
+                        ctx.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(fill))
                         if let n = t.node { label(ctx, n, in: r, header: false) }
                     }
                 }
@@ -486,7 +491,7 @@ private struct ListRow: View {
                     .font(.caption).monospacedDigit()
                     .foregroundStyle(g > 0 ? .red : .green)
             }
-            Capsule().fill(Color.accentColor.opacity(0.5))
+            Capsule().fill(LinearGradient(colors: Theme.brand, startPoint: .leading, endPoint: .trailing))
                 .frame(width: max(2, 80 * share), height: 6)
                 .frame(width: 80, alignment: .leading)
             Text(Format.bytes(node.totals.privateBytes))

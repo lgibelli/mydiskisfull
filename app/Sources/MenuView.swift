@@ -1,112 +1,178 @@
-// The menu. Only genuine menu items: Text (shown disabled, for status lines),
-// Button, Toggle (a checkmark), Divider and Menu for submenus. Sentences are
-// split over several lines, since a menu item never wraps.
+// The menu bar panel: a glance, not the app. How full the disk is, where
+// it's heading, anything that needs attention, and the way into the main
+// window, where everything else is.
 
+import AppKit
 import SwiftUI
 
-struct MenuView: View {
+struct StatusPanel: View {
     @ObservedObject var monitor: Monitor
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        if let s = monitor.status {
-            Text("\(Format.bytes(s.avail)) free of \(Format.bytes(s.total))")
-            Text(trend(s))
-        } else if let e = monitor.statusError {
-            Text("Can't read the watcher's history")
-            Lines(e)
-        } else {
-            Text("Reading the history…")
-        }
-
-        if let p = monitor.watcherProblem {
-            Divider()
-            Text(p)
-            if monitor.watcher.status == .requiresApproval {
-                Button("Open Login Items…") { monitor.watcher.openLoginItems() }
+        VStack(alignment: .leading, spacing: 0) {
+            if let s = monitor.status {
+                header(s)
+                    .padding(16)
+                forecast(s)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
             } else {
-                Button("Start Watching") { Task { await monitor.watcher.start(); await monitor.refresh() } }
+                HStack(spacing: 10) {
+                    if let e = monitor.statusError {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text(e).font(.callout).lineLimit(3)
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text("Reading the history…").font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+            }
+            attention
+            Divider()
+            footer
+                .padding(12)
+        }
+        .frame(width: 340)
+        .onAppear { monitor.viewed() }
+        .task(id: monitor.lastRefresh) { await monitor.loadDetail() }
+    }
+
+    private func header(_ s: Status) -> some View {
+        let used = Double(s.total - s.avail) / Double(max(s.total, 1))
+        return HStack(spacing: 14) {
+            CapacityRing(used: used, colors: monitor.health.ring, lineWidth: 7) {
+                Text("\(Int((used * 100).rounded()))%")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .frame(width: 66, height: 66)
+            VStack(alignment: .leading, spacing: 3) {
+                HealthPill(health: monitor.health)
+                Text("\(Format.bytes(s.avail)) free")
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                Text("of \(Format.bytes(s.total)) on \(Disk.name)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func forecast(_ s: Status) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(Headline.title(s)).font(.headline)
+                Text(Headline.detail(s))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let series = monitor.detail?.series, series.count >= 2 {
+                Sparkline(series: series,
+                          color: monitor.health == .calm || monitor.health == .learning ? Theme.brand[0] : monitor.health.tint)
+                    .frame(height: 46)
             }
         }
+    }
+
+    @ViewBuilder
+    private var attention: some View {
+        let rows = attentionRows
+        if !rows.isEmpty {
+            Divider()
+            VStack(spacing: 2) {
+                ForEach(rows.prefix(3), id: \.title) { r in
+                    PanelRow(symbol: r.symbol, color: r.color, title: r.title) {
+                        open { AppDelegate.show(.overview) }
+                    }
+                }
+                if rows.count > 3 {
+                    Text("and \(rows.count - 3) more")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .padding(.leading, 46).padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    private struct Row {
+        let symbol: String
+        let color: Color
+        let title: String
+    }
+
+    private var attentionRows: [Row] {
+        var rows: [Row] = []
+        if let p = monitor.watcherProblem { rows.append(Row(symbol: "pause.fill", color: .orange, title: p)) }
         if monitor.lacksFullDiskAccess {
-            Divider()
-            Text("The watcher can't see into other apps' folders")
-            Button("Give It Full Disk Access…") { Privacy.openSettings() }
+            rows.append(Row(symbol: "lock.fill", color: .blue, title: "Needs Full Disk Access"))
         }
+        for e in monitor.status?.incidents ?? [] {
+            let i = e.incident
+            let title = i.kind == .growth
+                ? "\(URL(fileURLWithPath: i.subject).lastPathComponent) grows \(Format.bytes(i.perDay)) a day"
+                : "\(i.subject) rewrites \(Format.bytes(i.perDay)) a day"
+            rows.append(Row(symbol: i.kind == .growth ? "flame.fill" : "arrow.triangle.2.circlepath",
+                            color: .red, title: title))
+        }
+        for t in monitor.undone {
+            rows.append(Row(symbol: "arrow.uturn.backward", color: .purple, title: "Undone: \(t.title)"))
+        }
+        return rows
+    }
 
-        if let s = monitor.status, !s.incidents.isEmpty {
-            Divider()
-            Text("Filling the disk")
-            ForEach(s.incidents) { e in
-                Menu(incidentTitle(e)) {
-                    Lines(e.sentence)
-                    Divider()
-                    FixItems(fix: e.fix, monitor: monitor)
-                }
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button {
+                open { AppDelegate.show(Navigator.shared.pane) }
+            } label: {
+                Text("Open MyDiskIsFull").frame(maxWidth: .infinity)
             }
-        }
-        #if !APP_STORE
-        if !monitor.undone.isEmpty {
-            Divider()
-            ForEach(monitor.undone) { t in
-                Menu("Undone since: \(t.title)") {
-                    Lines("Something changed its setting back, probably an update.")
-                    Button("Apply Again…") { monitor.apply(t.id) }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+
+            Menu {
+                ForEach(Pane.allCases) { p in
+                    Button(p.title) { open { AppDelegate.show(p) } }
                 }
+                Divider()
+                Button("Settings…") { open { showSettings() } }
+                    .keyboardShortcut(",", modifiers: .command)
+                Button("About MyDiskIsFull") { open { AppDelegate.open("about") } }
+                #if !APP_STORE
+                UpdateItem(updates: monitor.updates)
+                #endif
+                Divider()
+                Button("Quit MyDiskIsFull") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q", modifiers: .command)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 17))
             }
-        }
-        #endif
-
-        Divider()
-        SuggestionsMenu(monitor: monitor)
-        TweaksMenu(monitor: monitor)
-
-        Divider()
-        Button("Show Overview…") { show("overview") }
-        Button("Disk Map…") { show("map") }
-
-        Divider()
-        Button("Settings…") { showSettings() }
-            .keyboardShortcut(",", modifiers: .command)
-        Button("About MyDiskIsFull") { show("about") }
-        #if !APP_STORE
-        UpdateItem(updates: monitor.updates)
-        #endif
-        Divider()
-        Button("Quit MyDiskIsFull") { NSApp.terminate(nil) }
-            .keyboardShortcut("q", modifiers: .command)
-    }
-
-    private func trend(_ s: Status) -> String {
-        guard let f = s.forecast else { return "No samples yet" }
-        guard let r = f.rate else {
-            return "Collecting history: \(s.history.samples) samples so far"
-        }
-        if r.perDay <= 0 { return "Not filling (\(Format.window(r.window)) trend)" }
-        if let full = f.fullIn {
-            return "Full in about \(Format.days(full.days)), around \(Format.date(at: f.at, inDays: full.days))"
-        }
-        return "Filling at \(Format.bytes(r.perDay)) a day"
-    }
-
-    private func incidentTitle(_ e: Episode) -> String {
-        let i = e.incident
-        switch i.kind {
-        case .growth:
-            return "\(Format.path(i.subject)) grows \(Format.bytes(i.perDay)) a day"
-        case .churn:
-            return "\(i.subject) rewrites \(Format.bytes(i.perDay)) a day"
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
         }
     }
 
-    private func show(_ id: String) {
-        openWindow(id: id)
-        NSApp.activate(ignoringOtherApps: true)
+    /// The panel goes, as a menu would, when what it opens comes forward.
+    private func open(_ action: () -> Void) {
+        let panel = NSApp.keyWindow
+        action()
+        if let panel, panel is NSPanel || String(describing: type(of: panel)).contains("MenuBarExtra") {
+            panel.close()
+        }
     }
 
-    /// An agent app isn't activated by opening a window, so Settings would
-    /// open behind whatever is in front. Activate, then bring it forward.
+    /// Settings would open behind whatever is in front: activate, then
+    /// bring it forward.
     private func showSettings() {
         openSettings()
         NSApp.activate(ignoringOtherApps: true)
@@ -114,6 +180,35 @@ struct MenuView: View {
             NSApp.windows.first { $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" }?
                 .makeKeyAndOrderFront(nil)
         }
+    }
+}
+
+/// A row that highlights under the pointer, like a menu item.
+private struct PanelRow: View {
+    let symbol: String
+    let color: Color
+    let title: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                IconTile(symbol: symbol, color: color, size: 24)
+                Text(title).font(.callout).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(hovering ? Color.primary.opacity(0.08) : .clear,
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -127,118 +222,3 @@ struct UpdateItem: View {
     }
 }
 #endif
-
-/// A sentence as menu lines.
-struct Lines: View {
-    let text: String
-    init(_ text: String) { self.text = text }
-
-    var body: some View {
-        ForEach(Array(Format.lines(text).enumerated()), id: \.offset) { _, line in
-            Text(line)
-        }
-    }
-}
-
-/// What to do about a cause: a tweak to apply, a command to copy (never
-/// run), or what to change by hand.
-struct FixItems: View {
-    let fix: Fix
-    @ObservedObject var monitor: Monitor
-
-    var body: some View {
-        switch fix {
-        case .tweak(let id):
-            let t = monitor.tweak(id)
-            #if APP_STORE
-            Text("Fix: \(t?.title ?? id)")
-            FullVersionItems(missing: .tweaks)
-            #else
-            if t?.isApplied == true {
-                Text("Fix: \(t?.title ?? id) (applied)")
-            } else {
-                Button("Fix: \(t?.title ?? id)…") { monitor.apply(id) }
-            }
-            #endif
-        case .run(let command, let note):
-            Lines(note)
-            Button("Copy the Command") { monitor.copy(command) }
-            Lines(command)
-        case .steps(let text):
-            Lines(text)
-        case .leave(let text):
-            Lines("Leave it: " + text)
-        }
-    }
-}
-
-struct SuggestionsMenu: View {
-    @ObservedObject var monitor: Monitor
-
-    var body: some View {
-        Menu("Fix It for Good") {
-            if let list = monitor.suggestions {
-                if list.isEmpty {
-                    Text("Nothing to suggest")
-                    Lines("No runaway fillers, and nothing a tweak would stop takes much space.")
-                }
-                ForEach(Array(list.enumerated()), id: \.offset) { _, s in
-                    Menu(title(s)) {
-                        Lines(s.cause)
-                        Divider()
-                        FixItems(fix: s.fix, monitor: monitor)
-                    }
-                }
-            } else {
-                Text("Measuring…")
-            }
-        }
-    }
-
-    /// The cause's first sentence: "Gradle's caches take 8.8 GB."
-    private func title(_ s: Suggestion) -> String {
-        let first = s.cause.components(separatedBy: ". ").first ?? s.cause
-        let t = first.hasSuffix(".") ? String(first.dropLast()) : first
-        return t.count > 70 ? String(t.prefix(68)) + "…" : t
-    }
-}
-
-struct TweaksMenu: View {
-    @ObservedObject var monitor: Monitor
-
-    var body: some View {
-        Menu("Tweaks") {
-            #if APP_STORE
-            FullVersionItems(missing: .tweaks)
-            #else
-            if let list = monitor.tweaks {
-                ForEach(list.filter { !$0.isAbsent }) { t in
-                    let byUs = t.applied != nil
-                    Toggle(isOn: Binding(
-                        get: { t.isApplied || t.status == "waiting for approval" },
-                        set: { on in on ? monitor.apply(t.id) : monitor.revert(t.id) }
-                    )) {
-                        Text(label(t))
-                    }
-                    // Applied by hand: there is no record of what it replaced.
-                    .disabled(t.isApplied && !byUs)
-                }
-                Divider()
-                Text("Each stops something filling the disk again,")
-                Text("and can be undone here.")
-            } else {
-                Text("Measuring…")
-            }
-            #endif
-        }
-    }
-
-    private func label(_ t: TweakInfo) -> String {
-        var s = t.title
-        if t.status == "waiting for approval" { s += " (waiting for approval)" }
-        else if t.status == "partly applied" { s += " (partly applied)" }
-        else if t.isApplied && t.applied == nil { s += " (set outside MyDiskIsFull)" }
-        else if !t.isApplied, let size = t.size, size >= 100_000_000 { s += " — \(Format.bytes(size))" }
-        return s
-    }
-}

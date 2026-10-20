@@ -49,7 +49,8 @@ final class Updater: ObservableObject {
 /// not take the focus, so a scheduled update alert would sit behind whatever
 /// is in front, unseen. While an update is shown the app joins the Dock (so
 /// the alert can come forward and Cmd-Tab reaches it) and a notification
-/// says so; both go when the alert has been seen or the session ends.
+/// says so; the notification goes when the alert has been seen, the Dock
+/// icon when the session ends (unless a window is still open).
 final class UpdateReminders: NSObject, SPUStandardUserDriverDelegate {
     private let settings: AppSettings
 
@@ -67,7 +68,7 @@ final class UpdateReminders: NSObject, SPUStandardUserDriverDelegate {
         let userInitiated = state.userInitiated
         // Sparkle calls these on the main thread; the protocol can't say so.
         MainActor.assumeIsolated {
-            _ = NSApp.setActivationPolicy(.regular)
+            Dock.showingUpdate = true
             // A check the user asked for already has their attention.
             guard !userInitiated, settings.notificationsEnabled else { return }
             Notifier.update(version: version)
@@ -82,7 +83,7 @@ final class UpdateReminders: NSObject, SPUStandardUserDriverDelegate {
 
     func standardUserDriverWillFinishUpdateSession() {
         MainActor.assumeIsolated {
-            _ = NSApp.setActivationPolicy(.accessory)
+            Dock.showingUpdate = false
         }
     }
 }

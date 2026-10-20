@@ -45,29 +45,40 @@ enum Missing {
     static let pitch = "The full version is free and open source."
 }
 
-/// The note in a menu: lines that don't wrap, and the link.
-struct FullVersionItems: View {
-    let missing: Missing
-
-    var body: some View {
-        Text(missing.title)
-        Lines(missing.why + " " + Missing.pitch)
-        Button("Get the Full Version…") { Edition.openFullVersion() }
-    }
-}
-
-/// The note in a window.
+/// Where a feature would be: what's missing, why, and the link. Compact
+/// where it would repeat (under each suggestion): the title and the link.
 struct FullVersionNote: View {
     let missing: Missing
     var title: String?
+    var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title ?? missing.title).font(.headline)
-            Text(missing.why + " " + Missing.pitch)
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Get the Full Version…") { Edition.openFullVersion() }
+        if compact {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.app.fill").foregroundStyle(.blue)
+                Text(title ?? missing.title).font(.callout.weight(.medium))
+                Text("· in the full version").font(.callout).foregroundStyle(.secondary)
+                Button("Get the Full Version…") { Edition.openFullVersion() }
+                    .buttonStyle(.link)
+                    .font(.callout)
+            }
+            .help(missing.why + " " + Missing.pitch)
+        } else {
+            note
+        }
+    }
+
+    private var note: some View {
+        HStack(alignment: .top, spacing: 12) {
+            IconTile(symbol: "arrow.down.app.fill", color: .blue, size: 30)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title ?? missing.title).font(.headline)
+                Text(missing.why + " " + Missing.pitch)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Get the Full Version…") { Edition.openFullVersion() }
+                    .padding(.top, 2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

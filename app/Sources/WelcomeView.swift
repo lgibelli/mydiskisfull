@@ -1,5 +1,6 @@
 // The first launch: start the watcher, give it Full Disk Access, allow
-// notifications. Each step says what it's for and shows when it's done.
+// notifications. Each step says what it's for and shows when it's done;
+// Get Started opens the main window.
 
 import ServiceManagement
 import SwiftUI
@@ -20,63 +21,60 @@ struct WelcomeView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 14) {
-                if let icon = NSApp.applicationIconImage {
-                    Image(nsImage: icon).resizable().frame(width: 56, height: 56)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("MyDiskIsFull").font(.title2.bold())
-                    Text("Watches your disk, tells you when it will be full and what fills it, and helps keep it from filling again.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            StepRow(number: 1, done: watcher.isOn, title: "Start the watcher",
-                    text: "A small background process that samples free space \(Edition.appStore ? "" : "and disk writes ")every 5 minutes, and which folders grew every 30. About shows what it costs, measured.") {
-                if watcher.status == .requiresApproval {
-                    Button("Open Login Items…") { watcher.openLoginItems() }
-                } else {
-                    Button(watcher.hasCommandLineAgent ? "Move It Into the App" : "Start") {
-                        Task { await watcher.start(); await monitor.refresh() }
+        VStack(spacing: 0) {
+            hero
+            VStack(alignment: .leading, spacing: 12) {
+                StepRow(number: 1, done: watcher.isOn, title: "Start the watcher",
+                        text: "A small background process that samples free space \(Edition.appStore ? "" : "and disk writes ")every 5 minutes, and which folders grew every 30. Its budget is a second of CPU an hour, and About shows what it really uses.") {
+                    if watcher.status == .requiresApproval {
+                        Button("Open Login Items…") { watcher.openLoginItems() }
+                    } else {
+                        Button(watcher.hasCommandLineAgent ? "Move It Into the App" : "Start") {
+                            Task { await watcher.start(); await monitor.refresh() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(watcher.busy || watcher.isOn)
                     }
-                    .disabled(watcher.busy || watcher.isOn)
                 }
-            }
 
-            StepRow(number: 2, done: appAccess == true && watcherAccess != false,
-                    title: "Give it Full Disk Access",
-                    text: accessText) {
-                Button("Open Privacy Settings…") { Privacy.openSettings() }
-            }
+                StepRow(number: 2, done: appAccess == true && watcherAccess != false,
+                        title: "Give it Full Disk Access",
+                        text: accessText) {
+                    Button("Open Privacy Settings…") { Privacy.openSettings() }
+                }
 
-            StepRow(number: 3, done: notificationsAsked && !notificationsDenied, title: "Allow notifications",
-                    text: notificationsDenied
-                        ? "They're turned off for MyDiskIsFull in System Settings, so macOS won't ask again. Turn on Allow Notifications there."
-                        : "For a runaway filler, the disk filling within two weeks, or a fix something undid. Each is announced once.") {
-                if notificationsDenied {
-                    Button("Open Notification Settings…") { Notifier.openSettings() }
-                } else {
-                    Button("Allow…") {
-                        Notifier.requestAuthorization()
-                        notificationsAsked = true
+                StepRow(number: 3, done: notificationsAsked && !notificationsDenied, title: "Allow notifications",
+                        text: notificationsDenied
+                            ? "They're turned off for MyDiskIsFull in System Settings, so macOS won't ask again. Turn on Allow Notifications there."
+                            : "For a runaway filler, the disk filling within two weeks, or a fix something undid. Each is announced once.") {
+                    if notificationsDenied {
+                        Button("Open Notification Settings…") { Notifier.openSettings() }
+                    } else {
+                        Button("Allow…") {
+                            Notifier.requestAuthorization()
+                            notificationsAsked = true
+                        }
+                        .disabled(notificationsAsked)
                     }
-                    .disabled(notificationsAsked)
                 }
-            }
 
-            HStack {
-                if SMAppService.mainApp.status != .enabled {
-                    Text("It opens at login, so the forecast stays in the menu bar.")
-                        .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    if SMAppService.mainApp.status != .enabled {
+                        Text("It opens at login, so the forecast stays in the menu bar.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Get Started") { finish() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .keyboardShortcut(.defaultAction)
                 }
-                Spacer()
-                Button("Done") { finish() }.keyboardShortcut(.defaultAction)
+                .padding(.top, 8)
             }
+            .padding(24)
         }
-        .padding(24)
-        .frame(width: 560)
+        .frame(width: 620)
+        .background(Theme.canvas)
         .onAppear {
             watcher.refresh()
             Task { await checkNotifications() }
@@ -89,6 +87,38 @@ struct WelcomeView: View {
                 await monitor.refresh()
                 await checkNotifications()
             }
+        }
+    }
+
+    private var hero: some View {
+        VStack(spacing: 10) {
+            if let icon = NSApp.applicationIconImage {
+                Image(nsImage: icon).resizable().frame(width: 96, height: 96)
+                    .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+            }
+            Text("Welcome to MyDiskIsFull")
+                .font(.system(size: 28, weight: .bold))
+            Text("Know when your disk will be full and what fills it, and keep it from filling again.")
+                .font(.title3)
+                .opacity(0.85)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 40)
+        }
+        .foregroundStyle(.white)
+        .padding(.top, 44)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity)
+        .background {
+            ZStack {
+                LinearGradient(colors: [Color(red: 0.07, green: 0.10, blue: 0.24), Color(red: 0.05, green: 0.24, blue: 0.36)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                RadialGradient(colors: [Theme.brand[1].opacity(0.45), .clear], center: .topTrailing,
+                               startRadius: 0, endRadius: 360)
+                RadialGradient(colors: [Theme.brand[0].opacity(0.4), .clear], center: .bottomLeading,
+                               startRadius: 0, endRadius: 320)
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -121,6 +151,7 @@ struct WelcomeView: View {
             try? SMAppService.mainApp.register()
         }
         dismiss()
+        AppDelegate.show(.overview)
     }
 }
 
@@ -132,17 +163,25 @@ private struct StepRow<Action: View>: View {
     @ViewBuilder let action: Action
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: done ? "checkmark.circle.fill" : "\(number).circle")
-                .font(.title2)
-                .foregroundStyle(done ? .green : .secondary)
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                Circle().fill(done ? AnyShapeStyle(Color.green.gradient) : AnyShapeStyle(Color.primary.opacity(0.08)))
+                if done {
+                    Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                } else {
+                    Text("\(number)").font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 30, height: 30)
+            .animation(.spring(duration: 0.4), value: done)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.headline)
                 Text(text).font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if !done { action.padding(.top, 2) }
+                if !done { action.padding(.top, 4) }
             }
             Spacer(minLength: 0)
         }
+        .card(padding: 16)
     }
 }

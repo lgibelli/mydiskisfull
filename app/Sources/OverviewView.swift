@@ -1,302 +1,390 @@
-// The overview: how full the disk is, where the trend goes, what needs
-// attention, and what grew and wrote the most in the last day.
+// The overview: how full the disk is and where it's heading, in a sentence;
+// what needs attention, each with what to do; the last days at a glance;
+// and the fixes that free the most.
 
-import Charts
 import SwiftUI
 
-struct OverviewView: View {
+struct OverviewPage: View {
     @ObservedObject var monitor: Monitor
-    @State private var detail: ForecastDetail?
-    @State private var error: String?
-    @State private var span: Span = .threeDays
-
-    enum Span: String, CaseIterable, Identifiable {
-        case day = "1 day", threeDays = "3 days", twoWeeks = "14 days", all = "All"
-        var id: String { rawValue }
-        var seconds: Double? {
-            switch self {
-            case .day: 86_400
-            case .threeDays: 3 * 86_400
-            case .twoWeeks: 14 * 86_400
-            case .all: nil
-            }
-        }
-    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let s = monitor.status {
-                    Header(status: s)
-                    Attention(monitor: monitor)
-                    chart(s)
-                    if let d = detail {
-                        HStack(alignment: .top, spacing: 24) {
-                            TopList(title: "Grew the most, last 24 hours",
-                                    rows: d.growth24h.filter { $0.bytes > 0 }.prefix(8)
-                                        .map { (Format.path($0.owner), $0.bytes) })
-                            #if APP_STORE
-                            FullVersionNote(missing: .writers, title: "Wrote the most, last 24 hours")
-                            #else
-                            TopList(title: "Wrote the most, last 24 hours",
-                                    rows: d.writes24h.prefix(8).map { ($0.name, $0.bytes) })
-                            #endif
-                        }
-                    }
-                } else if let e = monitor.statusError ?? error {
-                    Label(e, systemImage: "exclamationmark.triangle")
-                } else {
-                    ProgressView()
+        Page(title: "Overview", subtitle: subtitle) {
+            if let s = monitor.status {
+                Hero(status: s, health: monitor.health)
+                AttentionSection(monitor: monitor)
+                HStack(alignment: .top, spacing: 16) {
+                    TrendGlance(monitor: monitor)
+                    GrewGlance(monitor: monitor)
                 }
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(minWidth: 620, minHeight: 520)
-        .task(id: monitor.lastRefresh) { await load() }
-    }
-
-    private func load() async {
-        do {
-            detail = try await Core.json(ForecastDetail.self, ["forecast", "--series"])
-            error = nil
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    // MARK: - The chart
-
-    private struct Point: Identifiable {
-        let date: Date
-        let gb: Double
-        let series: String
-        var id: String { "\(series)\(date.timeIntervalSince1970)" }
-    }
-
-    @ViewBuilder
-    private func chart(_ s: Status) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Free space").font(.headline)
-                Spacer()
-                Picker("", selection: $span) {
-                    ForEach(Span.allCases) { Text($0.rawValue).tag($0) }
+                FixesGlance(monitor: monitor)
+            } else if let e = monitor.statusError {
+                ContentUnavailableView {
+                    Label("Can't read the watcher's history", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(e)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 280)
-            }
-            let points = history()
-            if points.count < 2 {
-                Text("The chart starts once the watcher has a few samples.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 120)
+                .frame(minHeight: 360)
             } else {
-                Chart {
-                    ForEach(points + projection(s)) { p in
-                        LineMark(x: .value("Time", p.date), y: .value("GB free", p.gb))
-                            .foregroundStyle(by: .value("Series", p.series))
-                            .lineStyle(p.series == "Forecast" ? StrokeStyle(lineWidth: 1.5, dash: [5, 4])
-                                                              : StrokeStyle(lineWidth: 2))
-                    }
-                    ForEach(steps(s), id: \.ts) { step in
-                        RuleMark(x: .value("Cleanup", Date(timeIntervalSince1970: TimeInterval(step.ts))))
-                            .foregroundStyle(.green.opacity(0.4))
-                            .annotation(position: .top, alignment: .leading) {
-                                Text("+\(Format.bytes(step.freed))").font(.caption2).foregroundStyle(.green)
-                            }
-                    }
-                }
-                .chartForegroundStyleScale(["Free": Color.accentColor, "Forecast": Color.orange])
-                .chartYAxisLabel("GB free")
-                .frame(height: 220)
-                if let r = s.forecast?.rate {
-                    Text(rateLine(r)).font(.caption).foregroundStyle(.secondary)
-                }
+                ProgressView().frame(maxWidth: .infinity, minHeight: 360)
             }
         }
     }
 
-    private func history() -> [Point] {
-        guard let d = detail else { return [] }
-        let cutoff = span.seconds.map { Date().timeIntervalSince1970 - $0 } ?? 0
-        return (d.series ?? []).compactMap { p in
-            guard p.count == 2, Double(p[0]) >= cutoff else { return nil }
-            return Point(date: Date(timeIntervalSince1970: TimeInterval(p[0])), gb: Double(p[1]) / 1e9,
-                         series: "Free")
-        }
-    }
-
-    /// Where the trend goes: half the span ahead, or to the day it's full.
-    private func projection(_ s: Status) -> [Point] {
-        guard let f = s.forecast, let r = f.rate, r.perDay > 0 else { return [] }
-        let ahead = (span.seconds ?? 14 * 86_400) / 2
-        let secs = min(ahead, (f.fullIn?.days ?? .infinity) * 86_400)
-        let start = Date(timeIntervalSince1970: TimeInterval(f.at))
-        let end = Double(f.avail) - r.perDay * secs / 86_400
-        return [
-            Point(date: start, gb: Double(f.avail) / 1e9, series: "Forecast"),
-            Point(date: start.addingTimeInterval(secs), gb: max(0, end) / 1e9, series: "Forecast"),
-        ]
-    }
-
-    private func steps(_ s: Status) -> [Step] {
-        let cutoff = span.seconds.map { Int64(Date().timeIntervalSince1970 - $0) } ?? 0
-        return (s.forecast?.steps ?? []).filter { $0.ts >= cutoff }
-    }
-
-    private func rateLine(_ r: Rate) -> String {
-        let pace = r.perDay > 0 ? "Filling at \(Format.bytes(r.perDay)) a day"
-                                : "Not filling (\(Format.bytes(-r.perDay)) a day freed)"
-        return "\(pace), the \(Format.window(r.window)) trend from \(r.points) samples; "
-            + "plausibly \(Format.bytes(max(0, r.low)))–\(Format.bytes(max(0, r.high))) a day. "
-            + "Cleanups are taken out of the trend."
+    private var subtitle: String {
+        guard let s = monitor.status, let first = s.history.first else { return Disk.name }
+        return "\(Disk.name) · watched since \(Format.when(first))"
     }
 }
 
-/// How full, and when it's full.
-private struct Header: View {
+// MARK: - The hero
+
+private struct Hero: View {
     let status: Status
+    let health: Health
 
     var body: some View {
         let s = status
-        let used = Double(s.total - s.avail)
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("\(Format.bytes(s.avail)) free").font(.title.bold())
-                Text("of \(Format.bytes(s.total))").foregroundStyle(.secondary)
-                Spacer()
-                if let first = s.history.first {
-                    Text("Watching since \(Format.when(first)) · \(s.history.samples) samples")
-                        .font(.caption).foregroundStyle(.secondary)
+        let used = Double(s.total - s.avail) / Double(max(s.total, 1))
+        HStack(spacing: 34) {
+            CapacityRing(used: used, colors: health.ring, lineWidth: 18) {
+                VStack(spacing: 2) {
+                    Text(Format.bytes(s.avail))
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                    Text("free of \(Format.bytes(s.total))")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
-            Gauge(value: used, in: 0...Double(max(s.total, 1))) {}
-                .gaugeStyle(.linearCapacity)
-                .tint(s.alert >= .within3Days ? .red : (s.alert > .none ? .orange : .accentColor))
-            Text(sentence).font(.callout)
-        }
-    }
+            .frame(width: 196, height: 196)
 
-    private var sentence: String {
-        let s = status
-        if let a = s.alertSentence { return a }
-        guard let f = s.forecast else { return "No samples yet: the watcher takes one every 5 minutes." }
-        guard let r = f.rate else {
-            return "Collecting history: a forecast needs 8 samples covering 3 hours."
+            VStack(alignment: .leading, spacing: 12) {
+                HealthPill(health: health)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(Headline.title(s))
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(Headline.detail(s))
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(alignment: .top, spacing: 32) {
+                    Fact(label: "Used", value: "\(Format.bytes(s.total - s.avail)) · \(Int((used * 100).rounded()))%")
+                    let pace = Headline.pace(s)
+                    Fact(label: pace.label, value: pace.value)
+                    if let f = s.forecast, !f.steps.isEmpty {
+                        Fact(label: "Cleaned up", value: Format.bytes(f.steps.reduce(0) { $0 + $1.freed }))
+                    } else {
+                        Fact(label: "Samples", value: s.history.samples.formatted())
+                    }
+                }
+                .padding(.top, 6)
+            }
+            Spacer(minLength: 0)
         }
-        if r.perDay <= 0 { return "Not filling over the \(Format.window(r.window)) trend." }
-        if let full = f.fullIn {
-            return "At \(Format.bytes(r.perDay)) a day, the disk is full in about \(Format.days(full.days)), around \(Format.date(at: f.at, inDays: full.days))."
-        }
-        return "Filling at \(Format.bytes(r.perDay)) a day."
+        .card(padding: 28, tint: health.tint)
     }
 }
 
-/// Incidents, undone tweaks and watcher problems, each with what to do.
-private struct Attention: View {
+// MARK: - What needs attention
+
+private struct AttentionSection: View {
     @ObservedObject var monitor: Monitor
 
     var body: some View {
         let s = monitor.status
-        VStack(alignment: .leading, spacing: 10) {
-            if let p = monitor.watcherProblem {
-                Card(icon: "pause.circle", title: p, text: monitor.watcher.caption) {
-                    Button("Start Watching") { Task { await monitor.watcher.start(); await monitor.refresh() } }
+        let count = monitor.attentionCount
+        VStack(alignment: .leading, spacing: 12) {
+            if count == 0 {
+                AllClear()
+            } else {
+                HStack(spacing: 8) {
+                    Text("Needs your attention").font(.title3.weight(.semibold))
+                    Pill(text: "\(count)", color: monitor.health == .urgent ? .red : .orange)
                 }
-            }
-            if monitor.lacksFullDiskAccess {
-                Card(icon: "lock", title: "The watcher can't see into other apps' folders",
-                     text: "macOS keeps it out without Full Disk Access, so what grows there goes unseen.") {
-                    Button("Open Privacy Settings…") { Privacy.openSettings() }
+                if let p = monitor.watcherProblem {
+                    AttentionCard(symbol: "pause.fill", color: .orange, title: p,
+                                  text: monitor.watcher.caption) {
+                        if monitor.watcher.status == .requiresApproval {
+                            Button("Open Login Items…") { monitor.watcher.openLoginItems() }
+                        } else {
+                            Button("Start Watching") {
+                                Task { await monitor.watcher.start(); await monitor.refresh() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
                 }
-            }
-            ForEach(s?.incidents ?? []) { e in
-                Card(icon: "flame", title: e.incident.kind == .growth ? "Keeps growing" : "Keeps rewriting the disk",
-                     text: e.sentence) {
-                    FixButton(fix: e.fix, line: e.fixLine, monitor: monitor)
+                if monitor.lacksFullDiskAccess {
+                    AttentionCard(symbol: "lock.fill", color: .blue,
+                                  title: "Let MyDiskIsFull see the whole disk",
+                                  text: "Without Full Disk Access, macOS keeps the watcher out of other apps' folders, so what grows there goes unseen. It only ever reads sizes, never what's in a file.") {
+                        Button("Open Privacy Settings…") { Privacy.openSettings() }
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
-            }
-            #if !APP_STORE
-            ForEach(monitor.undone) { t in
-                Card(icon: "arrow.uturn.backward", title: "Undone since: \(t.title)",
-                     text: "Something changed its setting back, probably an update.") {
-                    Button("Apply Again…") { monitor.apply(t.id) }
+                ForEach(s?.incidents ?? []) { e in
+                    AttentionCard(symbol: e.incident.kind == .growth ? "flame.fill" : "arrow.triangle.2.circlepath",
+                                  color: .red, title: title(e), text: e.sentence,
+                                  badge: "\(Format.bytes(e.incident.perDay)) a day") {
+                        FixActions(fix: e.fix, line: e.fixLine, monitor: monitor)
+                    }
                 }
+                #if !APP_STORE
+                ForEach(monitor.undone) { t in
+                    AttentionCard(symbol: "arrow.uturn.backward", color: .purple,
+                                  title: "Undone since: \(t.title)",
+                                  text: "Something changed the setting back, probably an update. Apply it again to keep the space from filling.") {
+                        Button("Apply Again…") { monitor.apply(t.id) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                #endif
             }
-            #endif
+        }
+    }
+
+    private func title(_ e: Episode) -> String {
+        let i = e.incident
+        switch i.kind {
+        case .growth: return "\(URL(fileURLWithPath: i.subject).lastPathComponent) keeps growing"
+        case .churn: return "\(i.subject) keeps rewriting the disk"
         }
     }
 }
 
-private struct FixButton: View {
+private struct AllClear: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 30))
+                .foregroundStyle(.white, Color.green.gradient)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Nothing out of the ordinary").font(.headline)
+                Text("No folder is running away and no app is churning the disk. MyDiskIsFull keeps watching in the background and tells you when that changes.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .card(padding: 18, tint: .green)
+    }
+}
+
+struct AttentionCard<Actions: View>: View {
+    let symbol: String
+    let color: Color
+    let title: String
+    let text: String
+    var badge: String?
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            IconTile(symbol: symbol, color: color, size: 34)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title).font(.headline)
+                    Spacer(minLength: 8)
+                    if let badge { Pill(text: badge, color: color, symbol: "arrow.up.right") }
+                }
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                actions
+                    .padding(.top, 2)
+            }
+        }
+        .card(padding: 16)
+    }
+}
+
+/// What to do about a cause: a tweak to apply, a command to copy (never
+/// run), or what to change by hand.
+struct FixActions: View {
     let fix: Fix
     let line: String
     @ObservedObject var monitor: Monitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            switch fix {
-            case .tweak(let id):
-                #if APP_STORE
-                FullVersionNote(missing: .tweaks, title: "Fix: \(monitor.tweak(id)?.title ?? id)")
-                #else
-                Button("Fix: \(monitor.tweak(id)?.title ?? id)…") { monitor.apply(id) }
-                #endif
-            case .run(let command, let note):
-                Text(note).font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Text(command).font(.caption.monospaced()).textSelection(.enabled)
-                    Button("Copy") { monitor.copy(command) }.controlSize(.small)
+        switch fix {
+        case .tweak(let id):
+            let title = monitor.tweak(id)?.title ?? line
+            #if APP_STORE
+            FullVersionNote(missing: .tweaks, title: "Fix: \(title)", compact: true)
+            #else
+            if monitor.tweak(id)?.isApplied == true {
+                Label("\(title): applied", systemImage: "checkmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            } else {
+                Button {
+                    monitor.apply(id)
+                } label: {
+                    Label("\(title)…", systemImage: "wand.and.stars")
                 }
-            case .steps, .leave:
-                Text(line).font(.caption).foregroundStyle(.secondary)
+                .buttonStyle(.borderedProminent)
             }
-        }
-    }
-}
-
-private struct Card<Actions: View>: View {
-    let icon: String
-    let title: String
-    let text: String
-    @ViewBuilder let actions: Actions
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).font(.title2).foregroundStyle(.orange).frame(width: 28)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.headline)
+            #endif
+        case .run(let command, let note):
+            VStack(alignment: .leading, spacing: 8) {
+                Text(note).font(.callout).fixedSize(horizontal: false, vertical: true)
+                CommandBox(command: command) { monitor.copy(command) }
+            }
+        case .steps(let text):
+            Label {
                 Text(text).fixedSize(horizontal: false, vertical: true)
-                actions
+            } icon: {
+                Image(systemName: "hand.point.right.fill").foregroundStyle(.blue)
             }
-            Spacer(minLength: 0)
+            .font(.callout)
+        case .leave(let text):
+            Label {
+                Text("Leave it: " + text).fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "leaf.fill").foregroundStyle(.teal)
+            }
+            .font(.callout)
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
-private struct TopList: View {
-    let title: String
-    let rows: [(String, Int64)]
+/// A command to copy, in a code box: the app never runs it.
+struct CommandBox: View {
+    let command: String
+    let copy: () -> Void
+    @State private var copied = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
-            if rows.isEmpty {
-                Text("Nothing yet.").foregroundStyle(.secondary)
-            }
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack {
-                    Text(row.0).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    Text(Format.bytes(row.1)).monospacedDigit().foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            Text(command)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                copy()
+                withAnimation { copied = true }
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    withAnimation { copied = false }
                 }
-                .font(.callout)
+            } label: {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .frame(minWidth: 64)
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.hairline))
+    }
+}
+
+// MARK: - At a glance
+
+private struct TrendGlance: View {
+    @ObservedObject var monitor: Monitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Free space", subtitle: "The last 3 days") {
+                MoreLink(title: "Trends") { Navigator.shared.pane = .trends }
+            }
+            if let series = monitor.detail?.series, series.count >= 2 {
+                Sparkline(series: series, color: monitor.health == .calm ? .accentColor : monitor.health.tint)
+                    .frame(height: 120)
+            } else {
+                Text("The chart starts once the watcher has a few samples.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .card()
+    }
+}
+
+private struct GrewGlance: View {
+    @ObservedObject var monitor: Monitor
+
+    var body: some View {
+        let rows = (monitor.detail?.growth24h ?? []).filter { $0.bytes > 0 }.prefix(4)
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Grew the most", subtitle: "The last 24 hours") {
+                MoreLink(title: "Trends") { Navigator.shared.pane = .trends }
+            }
+            if rows.isEmpty {
+                Text("Nothing grew much.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                VStack(spacing: 11) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, g in
+                        BarRow(name: URL(fileURLWithPath: g.owner).lastPathComponent,
+                               detail: Format.path(URL(fileURLWithPath: g.owner).deletingLastPathComponent().path),
+                               value: g.bytes, largest: rows.first?.bytes ?? 1, color: .orange,
+                               help: Format.path(g.owner))
+                    }
+                }
+                .frame(minHeight: 120, alignment: .top)
+            }
+        }
+        .card()
+    }
+}
+
+private struct FixesGlance: View {
+    @ObservedObject var monitor: Monitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Ways to free space", subtitle: "Largest first, each with what you give up") {
+                MoreLink(title: "All Fixes") { Navigator.shared.pane = .fixes }
+            }
+            if let list = monitor.suggestions {
+                if list.isEmpty {
+                    Text("Nothing to suggest: no runaway fillers, and nothing a tweak would stop takes much space.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(list.prefix(3).enumerated()), id: \.offset) { i, s in
+                            if i > 0 { Divider().padding(.leading, 44) }
+                            Button { Navigator.shared.pane = .fixes } label: {
+                                HStack(spacing: 12) {
+                                    IconTile(symbol: s.symbol, color: s.tint, size: 30)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(s.headline).font(.callout.weight(.medium)).lineLimit(1)
+                                        Text(s.fixKind).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    if let size = s.space {
+                                        Text(Format.bytes(size))
+                                            .font(.system(.callout, design: .rounded).weight(.semibold))
+                                            .monospacedDigit()
+                                    }
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(.vertical, 9)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Measuring the folders that tend to grow…").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .card()
     }
 }

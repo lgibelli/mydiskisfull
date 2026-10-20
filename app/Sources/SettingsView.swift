@@ -1,5 +1,5 @@
 // Settings: the watcher, opening at login, notifications, updates and Full
-// Disk Access. Laid out with GroupBox, not Form: settings this small shouldn't
+// Disk Access, as a grouped form like System Settings. Small enough not to
 // scroll.
 
 import ServiceManagement
@@ -20,86 +20,94 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            GroupBox {
-                VStack(spacing: 10) {
-                    SwitchRow(title: "Watch in the background", caption: watcher.caption, isOn: $watching)
-                        .onChange(of: watching) { _, on in
-                            guard on != watcher.isOn else { return }
-                            Task {
-                                if on { await watcher.start() } else { await watcher.stop() }
-                                watching = watcher.isOn
-                                await monitor.refresh()
-                            }
-                        }
-                        .disabled(watcher.busy)
-                    if watcher.status == .requiresApproval {
-                        Button("Open Login Items…") { watcher.openLoginItems() }
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                    Divider()
-                    SwitchRow(title: "Open at login",
-                              caption: "So the menu bar shows the forecast and notifications reach you.",
-                              isOn: $atLogin)
-                        .onChange(of: atLogin) { _, on in
-                            // Also fires when load() or a failed change sets it back.
-                            guard on != (SMAppService.mainApp.status == .enabled) else { return }
-                            setLogin(on)
-                        }
-                    Divider()
-                    SwitchRow(title: "Notifications",
-                              caption: Edition.appStore
-                                  ? "A runaway filler, the disk filling within two weeks. Each once."
-                                  : "A runaway filler, the disk filling within two weeks, a tweak something undid. Each once.",
-                              isOn: $notify)
-                        .onChange(of: notify) { _, on in
-                            monitor.settings.notificationsEnabled = on
-                            if on { Notifier.requestAuthorization() }
-                        }
-                    #if !APP_STORE
-                    Divider()
-                    SwitchRow(title: "Check for updates automatically",
-                              caption: "Once a day, from GitHub. Updates are signed, and nothing else is sent.",
-                              isOn: $checkUpdates)
-                        .onChange(of: checkUpdates) { _, on in
-                            // Sparkle owns and keeps this one.
-                            monitor.updates.automaticallyChecksForUpdates = on
-                        }
-                    #endif
+        Form {
+            Section("Monitoring") {
+                Toggle(isOn: $watching) {
+                    Text("Watch in the background")
+                    Text(watcher.caption)
                 }
-                .padding(.vertical, 4)
+                .onChange(of: watching) { _, on in
+                    guard on != watcher.isOn else { return }
+                    Task {
+                        if on { await watcher.start() } else { await watcher.stop() }
+                        watching = watcher.isOn
+                        await monitor.refresh()
+                    }
+                }
+                .disabled(watcher.busy)
+                if watcher.status == .requiresApproval {
+                    Button("Open Login Items…") { watcher.openLoginItems() }
+                }
+                Toggle(isOn: $atLogin) {
+                    Text("Open at login")
+                    Text("So the menu bar shows the forecast and notifications reach you.")
+                }
+                .onChange(of: atLogin) { _, on in
+                    // Also fires when load() or a failed change sets it back.
+                    guard on != (SMAppService.mainApp.status == .enabled) else { return }
+                    setLogin(on)
+                }
+                if let e = watcher.problem ?? loginError {
+                    Label(e, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
             }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Full Disk Access").font(.headline)
-                    AccessLine(who: "The watcher", granted: monitor.status?.access?.fullDiskAccess,
-                               unknown: "It checks when it starts and every 30 minutes.")
-                    AccessLine(who: "This app (the disk map and suggestions)",
-                               granted: Privacy.appHasFullDiskAccess, unknown: "Can't tell.")
+            Section("Notifications") {
+                Toggle(isOn: $notify) {
+                    Text("Notify me")
+                    Text(Edition.appStore
+                         ? "When something runs away, or the disk will be full within two weeks. Each once."
+                         : "When something runs away, the disk will be full within two weeks, or a tweak was undone. Each once.")
+                }
+                .onChange(of: notify) { _, on in
+                    monitor.settings.notificationsEnabled = on
+                    if on { Notifier.requestAuthorization() }
+                }
+                if let p = Notifier.authorizationProblem, notify {
+                    LabeledContent {
+                        Button("Notification Settings…") { Notifier.openSettings() }
+                    } label: {
+                        Label(p, systemImage: "bell.slash.fill").foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            #if !APP_STORE
+            Section("Updates") {
+                Toggle(isOn: $checkUpdates) {
+                    Text("Check for updates automatically")
+                    Text("Once a day, from GitHub. Updates are signed, and nothing else is sent.")
+                }
+                .onChange(of: checkUpdates) { _, on in
+                    // Sparkle owns and keeps this one.
+                    monitor.updates.automaticallyChecksForUpdates = on
+                }
+                LabeledContent("Version \(AboutView.version)") {
+                    Button("Check Now") { monitor.updates.checkForUpdates() }
+                }
+            }
+            #endif
+
+            Section {
+                AccessLine(who: "The watcher", granted: monitor.status?.access?.fullDiskAccess,
+                           unknown: "Checks when it starts and every 30 minutes")
+                AccessLine(who: "This app (the disk map and fixes)",
+                           granted: Privacy.appHasFullDiskAccess, unknown: "Can't tell")
+                LabeledContent {
+                    Button("Open Privacy Settings…") { Privacy.openSettings() }
+                } label: {
                     Text("Without it, macOS keeps MyDiskIsFull out of other apps' folders and Mail, so what grows there goes unseen. It only ever reads sizes, never what's in a file.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Open Privacy Settings…") { Privacy.openSettings() }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
+            } header: {
+                Text("Full Disk Access")
             }
-
-            if let e = watcher.problem ?? loginError {
-                Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
-            }
-            if let p = Notifier.authorizationProblem, notify {
-                HStack {
-                    Label(p, systemImage: "bell.slash").font(.caption).foregroundStyle(.orange)
-                    Button("Notification Settings…") { Notifier.openSettings() }.controlSize(.small)
-                }
-            }
-            Spacer(minLength: 0)
         }
-        .padding(20)
-        .frame(width: 540)
-        .fixedSize(horizontal: false, vertical: true)
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+        .scrollDisabled(true)
+        .frame(width: 560, height: Edition.appStore ? 520 : 640)
         .onAppear {
             watcher.refresh()
             watching = watcher.isOn
@@ -128,35 +136,11 @@ struct AccessLine: View {
     let unknown: String
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: granted == true ? "checkmark.circle.fill"
-                  : granted == false ? "xmark.circle.fill" : "questionmark.circle")
+        LabeledContent(who) {
+            Label(granted == true ? "Has it" : granted == false ? "Doesn't have it" : unknown,
+                  systemImage: granted == true ? "checkmark.circle.fill"
+                      : granted == false ? "xmark.circle.fill" : "questionmark.circle")
                 .foregroundStyle(granted == true ? .green : granted == false ? .orange : .secondary)
-            Text(who)
-            Text(granted == true ? "has it" : granted == false ? "doesn't have it" : unknown)
-                .foregroundStyle(.secondary)
-        }
-        .font(.callout)
-    }
-}
-
-/// A switch with a one-line explanation under it, text at the leading edge
-/// and the switch at the trailing one, so rows line up.
-struct SwitchRow: View {
-    let title: String
-    let caption: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                Text(caption)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch)
         }
     }
 }

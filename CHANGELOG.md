@@ -6,7 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+- A redesigned app. A main window with a sidebar and four pages: Overview (a capacity ring and
+  the forecast in a sentence, led by whatever would fill the disk soonest; what needs attention,
+  each with its fix; the last days; the biggest fixes), Trends (free space with the forecast and
+  its plausible range, the alert floor, cleanups, readings under the pointer; what grew and wrote
+  most), Disk Map (a storage bar, then the sunburst, treemap or list) and Fixes (suggestions and
+  the tweaks as switches). ⌘1 to ⌘4 switch pages.
+- The menu bar shows a glance instead of a long menu: free space, the forecast, the last three
+  days and what needs attention, with the way into the window. The app joins the Dock while a
+  window is open.
+- A new icon, Settings as a grouped form, a new welcome, and the disk map coloured by folder by
+  default (growth is one click away).
 
 ## [0.1.0] - 2026-10-19
 

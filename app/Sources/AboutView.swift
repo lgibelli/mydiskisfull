@@ -8,19 +8,21 @@ struct AboutView: View {
     @ObservedObject var monitor: Monitor
     @State private var appCPU: Double = 0
 
-    private var version: String {
+    /// "0.1.0 (100)".
+    static var version: String {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        return "Version \(v) (\(b))"
+        return "\(v) (\(b))"
     }
 
     var body: some View {
         VStack(spacing: 12) {
             if let icon = NSApp.applicationIconImage {
-                Image(nsImage: icon).resizable().frame(width: 72, height: 72)
+                Image(nsImage: icon).resizable().frame(width: 96, height: 96)
+                    .shadow(color: .black.opacity(0.25), radius: 10, y: 5)
             }
-            Text("MyDiskIsFull").font(.title2.bold())
-            Text(version).font(.caption).foregroundStyle(.secondary)
+            Text("MyDiskIsFull").font(.system(size: 24, weight: .bold))
+            Text("Version \(Self.version)").font(.callout).foregroundStyle(.secondary)
             #if !APP_STORE
             UpdateLine(updates: monitor.updates)
             #endif
@@ -30,32 +32,31 @@ struct AboutView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 30)
 
-            GroupBox {
-                VStack(spacing: 10) {
-                    if let c = monitor.status?.watcherCost {
-                        HStack(spacing: 0) {
-                            Stat(value: String(format: "%.2f s", Double(c.cpuUsPerHour) / 1e6),
-                                 label: "watcher CPU an hour")
-                            Divider().frame(height: 32)
-                            Stat(value: Format.bytes(c.writtenPerHour), label: "it writes an hour")
-                            Divider().frame(height: 32)
-                            Stat(value: Format.bytes(monitor.status?.history.bytes ?? 0), label: "history")
-                        }
-                        Text(costNote(c)).font(.caption2).foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("The watcher's cost shows once it has run.").foregroundStyle(.secondary)
+            VStack(spacing: 10) {
+                if let c = monitor.status?.watcherCost {
+                    HStack(spacing: 0) {
+                        Stat(value: String(format: "%.2f s", Double(c.cpuUsPerHour) / 1e6),
+                             label: "watcher CPU an hour")
+                        Divider().frame(height: 32)
+                        Stat(value: Format.bytes(c.writtenPerHour), label: "it writes an hour")
+                        Divider().frame(height: 32)
+                        Stat(value: Format.bytes(monitor.status?.history.bytes ?? 0), label: "history")
                     }
-                    Divider()
-                    Text(String(format: "This app has used %.0f ms of CPU since it opened %@ ago, including the commands it ran.",
-                                appCPU, Format.duration(Int64(Date().timeIntervalSince(monitor.launched)))))
-                        .font(.caption2).foregroundStyle(.secondary)
+                    Text(costNote(c)).font(.caption2).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("The watcher's cost shows once it has run.").foregroundStyle(.secondary)
                 }
-                .padding(.vertical, 6)
+                Divider()
+                Text(String(format: "This app has used %.0f ms of CPU since it opened %@ ago, including the commands it ran.",
+                            appCPU, Format.duration(Int64(Date().timeIntervalSince(monitor.launched)))))
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
-            .padding(.horizontal, 20)
+            .card(padding: 16)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
 
             Text("Free and open source, under the MIT or Apache 2.0 licence. No telemetry, no account.")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -72,8 +73,11 @@ struct AboutView: View {
                 .font(.caption)
             #endif
         }
-        .padding(24)
+        .padding(.horizontal, 24)
+        .padding(.top, 36)
+        .padding(.bottom, 24)
         .frame(width: 520)
+        .background(Theme.canvas)
         .onAppear { appCPU = monitor.ownCPUms }
     }
 

@@ -298,14 +298,19 @@ mydiskisfull/
     (2 ms for 1,000 events); listing is the cost, and six folders of 6k–40k entries (a browser
     cache, Rust `deps`) were 80% of one listing.
 - **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
-  - The menu: free space and the forecast, open incidents with their fix, tweaks something
-    undid, the watcher's state, "Fix It for Good" (`mdif suggest`) and the tweaks, each a
-    checkmark that applies or undoes it after showing what it changes and what you give up.
-  - Windows: an overview (gauge, free-space chart with the forecast and cleanups, what grew and
-    wrote most), the disk map (sunburst, treemap or list, click to zoom; the treemap is coloured
-    like a market heatmap by each folder's growth in the last 24 hours from the watcher's
-    history), settings, a welcome for the first launch, and About with the watcher's measured
-    cost.
+  - A main window with a sidebar (the disk at a glance, the watcher's state) and four pages:
+    Overview (a capacity ring, the forecast in one sentence led by whatever fills the disk
+    soonest, what needs attention with its fix, the last days, the biggest fixes), Trends
+    (free-space chart with the forecast, its plausible range, the alert floor and the cleanups;
+    what grew and wrote most), Disk Map (a storage bar, then sunburst, treemap or list, click to
+    zoom; coloured by folder or, like a market heatmap, by each folder's growth in the last 24
+    hours) and Fixes (`mdif suggest`, then the tweaks, each a switch that applies or undoes it
+    after showing what it changes and what you give up). One visual system (`Theme.swift`).
+  - The menu bar: a panel with a glance (ring, free space, forecast, three-day sparkline, what
+    needs attention) and the way into the window. The app joins the Dock while a window is open
+    and leaves it when the last one closes; opened by the login item it stays in the menu bar.
+  - Settings (a grouped form), a welcome for the first launch, and About with the watcher's
+    measured cost.
   - Notifications: a new incident (with "Apply Fix…" or "Copy Command"), the forecast crossing
     14 days, 3 days and 1 day or free space under 10 GB (2% on big disks), and a tweak that was
     undone; each once per episode, withdrawn when it's over. The forecast levels need the 3-day
@@ -327,7 +332,7 @@ mydiskisfull/
       the app, its checks are made as the app: one grant covers both. The app is signed with a
       Developer ID from `release.env` (gitignored) when there is one.
     - The disk map is kept (`~/Library/Caches/<bundle id>/disk-map.json`) with when it was
-      taken. It's measured again while someone looks: when the window opens and the kept one is
+      taken. It's measured again while someone looks: when the page opens and the kept one is
       over 30 minutes old, and every hour while it stays open, at background priority, the old
       one showing meanwhile. Never in the background: one whole-volume map measured about 200 s
       of CPU (191 s of it in the kernel) over 104 s at background priority on the development
