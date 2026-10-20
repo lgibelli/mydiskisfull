@@ -74,7 +74,7 @@ or download `mdif-…-macos-universal.tar.gz` from the same release on its own.
 
 Requires macOS and Rust 1.88+; the menu bar app needs macOS 14 and Xcode's command line tools.
 
-### The menu bar app
+### The app
 
 ```sh
 git clone https://github.com/lgibelli/mydiskisfull.git
@@ -86,15 +86,26 @@ app/build.sh --app-store      # the App Store edition, in build/AppStore (see be
 
 The first launch starts the watcher (a LaunchAgent inside the app running the same `mdif watch`
 as below; one started with `mdif agent install` is stopped, and the history carries on), asks for
-Full Disk Access and for notifications. The menu shows free space and when the
-disk will be full, what is filling it with the fix for each, suggestions, and the tweaks, which
-apply and undo with a click after saying what they change and what you give up. The overview
-window charts free space with the forecast. The disk map measures while you look at it (when it
-opens, if the last one is over 30 minutes old, and every hour while it stays open) and shows the
-space as a sunburst, as a treemap like a stock-market heatmap (tile size is space, colour is how
-much the folder grew or shrank in the last day) or as a list; click a folder to zoom in.
-Notifications come once per episode: a runaway filler, the disk full within two weeks, three days
-or a day, and a tweak something undid.
+Full Disk Access and for notifications.
+
+The app has a main window with four pages:
+
+- **Overview**: how full the disk is and, in one sentence, where it's heading; anything that needs
+  attention (a runaway filler, a tweak something undid, the watcher stopped), each with what to
+  do; the last days at a glance; and the fixes that free the most.
+- **Trends**: free space over time with where the trend goes and how sure it is, the cleanups
+  left out of the trend, and what grew and what wrote the most in the last day.
+- **Disk Map**: where the space is now, as a sunburst, as a treemap (tile size is space) or as a
+  list, coloured by folder or, like a stock-market heatmap, by how much each folder grew or shrank
+  in the last day; click a folder to zoom in. It measures while you look at it (when the page opens, if the
+  last map is over 30 minutes old, and every hour while it stays open).
+- **Fixes**: suggestions, largest first, and the tweaks, which apply and undo with a switch after
+  saying what they change and what you give up.
+
+The menu bar keeps a glance (free space, the forecast, the last three days, what needs attention)
+and the way into the window. The app joins the Dock only while a window is open. Notifications
+come once per episode: a runaway filler, the disk full within two weeks, three days or a day, and
+a tweak something undid.
 
 Without Full Disk Access macOS keeps the watcher out of other apps' folders and your Desktop,
 Documents and Downloads. It leaves them alone rather than ask, since a background process asking

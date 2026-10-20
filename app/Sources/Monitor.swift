@@ -1,10 +1,11 @@
-// What the menu shows, and when to speak up.
+// What the windows and the menu bar panel show, and when to speak up.
 //
 // The watcher (a separate process) does all the sampling. The app reads its
-// history with `mdif status` every ten minutes and whenever the menu opens,
-// which costs a few milliseconds, so the menu bar item stays within the
-// budget the watcher keeps. Suggestions and tweaks measure folders and take
-// seconds, so they are only computed when the menu is opened.
+// history with `mdif status` every ten minutes and whenever someone looks
+// (the panel opens, a window comes forward), which costs a few milliseconds,
+// so the menu bar item stays within the budget the watcher keeps. The
+// free-space series is read only while someone looks. Suggestions and tweaks
+// measure folders and take seconds, so they are only computed then too.
 
 import AppKit
 import Combine
@@ -14,6 +15,8 @@ import UserNotifications
 final class Monitor: ObservableObject {
     @Published private(set) var status: Status?
     @Published private(set) var statusError: String?
+    /// The free-space series and what grew and wrote in the last day.
+    @Published private(set) var detail: ForecastDetail?
     @Published private(set) var suggestions: [Suggestion]?
     @Published private(set) var tweaks: [TweakInfo]?
     @Published private(set) var measuring = false
@@ -27,7 +30,7 @@ final class Monitor: ObservableObject {
 
     private var timer: Timer?
     private var measuredAt: Date?
-    private var menuObserver: NSObjectProtocol?
+    private var lookObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
     private var watcherChanges: AnyCancellable?
     private var refreshing = false
@@ -53,10 +56,11 @@ final class Monitor: ObservableObject {
         t.tolerance = 120
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        menuObserver = NotificationCenter.default.addObserver(
-            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        // A window or the menu bar panel came forward: someone is looking.
+        lookObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.menuOpened() }
+            Task { @MainActor in self?.viewed() }
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -97,13 +101,25 @@ final class Monitor: ObservableObject {
         watcher.refresh()
     }
 
-    /// The menu opened: make what it shows current.
-    func menuOpened() {
+    /// Someone is looking: make what they see current.
+    func viewed() {
         if lastRefresh.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
-            Task { await refresh() }
+            Task {
+                await refresh()
+                await loadDetail()
+            }
+        } else if detail == nil {
+            Task { await loadDetail() }
         }
         if measuredAt.map({ Date().timeIntervalSince($0) > Self.measureEvery }) ?? true {
             Task { await measure() }
+        }
+    }
+
+    /// The series behind the charts, from the same history: milliseconds.
+    func loadDetail() async {
+        if let d = try? await Core.json(ForecastDetail.self, ["forecast", "--series"], timeout: 60) {
+            detail = d
         }
     }
 
@@ -122,7 +138,15 @@ final class Monitor: ObservableObject {
 
     func tweak(_ id: String) -> TweakInfo? { tweaks?.first { $0.id == id } }
 
-    // MARK: - What the menu bar shows
+    // MARK: - What the menu bar and the windows show
+
+    var health: Health { Health(status) }
+
+    /// How many things the overview asks someone to look at.
+    var attentionCount: Int {
+        (status?.incidents.count ?? 0) + undone.count + (watcherProblem == nil ? 0 : 1)
+            + (lacksFullDiskAccess ? 1 : 0)
+    }
 
     /// Tweaks this app applied that something undid (none in the App Store
     /// edition, which can't apply them).

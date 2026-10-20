@@ -51,6 +51,12 @@ enum Format {
         return "\(max(secs, 0)) s"
     }
 
+    /// "just now", "4 min ago", "3 hours ago".
+    static func ago(_ ts: Int64, now: Date = Date()) -> String {
+        let secs = Int64(now.timeIntervalSince1970) - ts
+        return secs < 60 ? "just now" : "\(duration(secs)) ago"
+    }
+
     /// "3-day" or "6-hour", for a trend window.
     static func window(_ secs: Int64) -> String {
         secs >= 86_400 ? "\(secs / 86_400)-day" : "\(secs / 3_600)-hour"
@@ -66,21 +72,5 @@ enum Format {
         if p == home { return "~" }
         if p.hasPrefix(home + "/") { return "~" + p.dropFirst(home.count) }
         return p
-    }
-
-    /// Splits `text` into lines of at most `width` characters, at spaces, for
-    /// menu items, which never wrap by themselves.
-    static func lines(_ text: String, width: Int = 64) -> [String] {
-        var out: [String] = []
-        var line = ""
-        for word in text.split(separator: " ") {
-            if !line.isEmpty && line.count + 1 + word.count > width {
-                out.append(line)
-                line = ""
-            }
-            line += line.isEmpty ? String(word) : " " + word
-        }
-        if !line.isEmpty { out.append(line) }
-        return out
     }
 }
