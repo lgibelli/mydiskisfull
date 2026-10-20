@@ -6,7 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+- Before a tweak asks you to install a configuration profile, the app says what a profile is
+  and shows everything this one holds (one Chrome setting, for your user only) and what it
+  doesn't (no certificates, accounts, VPN or remote management), what System Settings and
+  Chrome will say, how to undo it, and the file itself. The profile's description in System
+  Settings says the same, and `mdif tweaks apply --dry-run` prints it. A tweak waiting for its
+  profile has a "Review and Install…" button.
+- Profiles are installed in General → Device Management from macOS 15; the app and `mdif` name
+  that pane there, and Privacy & Security → Profiles on macOS 14.
 
 ## [0.1.0] - 2026-10-20
 

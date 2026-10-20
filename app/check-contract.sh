@@ -5,8 +5,9 @@
 # either side fails here instead of leaving the menu empty.
 #
 # What a fresh history can't show (open incidents, every kind of fix, an
-# undone tweak) comes from app/Tests/*.json; a Rust test in status_cmd.rs
-# holds those fixtures to the real serialization.
+# undone tweak, a tweak that installs a profile) comes from app/Tests/*.json;
+# Rust tests in status_cmd.rs and tweaks_cmd.rs hold those fixtures to the
+# real serialization.
 #
 #   app/build.sh && app/check-contract.sh
 #
@@ -44,4 +45,5 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     apply="$T/apply.json" \
     map="$T/map.json" \
     status=app/Tests/status-incidents.json \
+    apply=app/Tests/apply-profile.json \
     revert=app/Tests/revert.json

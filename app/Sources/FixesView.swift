@@ -148,6 +148,16 @@ private struct TweakRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text("You give up: \(t.cost)").font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if t.status == "waiting for approval" {
+                    HStack(spacing: 10) {
+                        Text("Nothing changes until you install its profile in System Settings.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Review and Install…") { monitor.apply(t.id) }
+                            .controlSize(.small)
+                    }
+                    .padding(.top, 2)
+                }
             }
             Spacer(minLength: 12)
             Toggle("", isOn: Binding(

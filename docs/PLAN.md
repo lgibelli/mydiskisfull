@@ -273,6 +273,12 @@ mydiskisfull/
     `.mobileconfig` (the Custom Settings payload Apple Configurator writes) and opens it; the user
     approves it in System Settings. It is in effect once its keys appear in
     `/Library/Managed Preferences/<user>/`, and removing our own needs no password.
+  - A profile is what companies use to manage Macs, so asking for one without saying what's in
+    it reads as a threat (the author's own reaction). Before handing one over, the app shows
+    everything it holds and doesn't, what System Settings will show and say (unsigned), what
+    Chrome will say ("managed by your organization"), how to undo it, and the file itself; the
+    profile's own description, which System Settings shows, says the same. The pane is General
+    → Device Management from macOS 15, Privacy & Security → Profiles before.
   - Apple Intelligence's foundation models (`AssetsV2/…UAF_FM_*`) can't even be listed without
     root, so the tweak's effect shows as free space, not as a folder shrinking.
   - Gradle's `removeUnusedEntriesAfterDays` is write-only; the init script was checked offline
