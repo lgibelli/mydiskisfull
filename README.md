@@ -202,8 +202,9 @@ from coming back (illustrative):
 ```
 
 A tweak is a setting that stops something from filling the disk again: Apple Intelligence off,
-Chrome's on-device AI model and its cache size (as a configuration profile you approve in System
-Settings), how long Gradle, Homebrew and Claude Code keep what they no longer use, and emptying
+Chrome's on-device AI model and its cache size (each a configuration profile holding that one
+Chrome setting, which you install yourself in System Settings; the app shows what's in it, and
+the file, first), how long Gradle, Homebrew and Claude Code keep what they no longer use, and emptying
 the Trash after 30 days. `mdif tweaks apply <id> --dry-run` shows exactly what one changes and
 what you give up. Applying one records every value it replaces, so `mdif tweaks revert <id>` puts
 them back exactly, except a setting you changed since, which it leaves alone. `mdif tweaks` then

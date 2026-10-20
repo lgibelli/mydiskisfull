@@ -288,9 +288,9 @@ pub fn settled(fix: Fix, home: &Path) -> Fix {
             t.title
         )),
         Ok(Status::Pending) => Fix::Steps(format!(
-            "\"{}\" is waiting for you to install its profile in System Settings → Privacy & \
-             Security → Profiles.",
-            t.title
+            "\"{}\" is waiting for you to install its profile in System Settings → {}.",
+            t.title,
+            crate::profile::settings_place()
         )),
         _ => fix,
     }
@@ -471,8 +471,9 @@ fn from_tweaks(
                 push(
                     format!("\"{}\" is waiting for your approval.", t.title),
                     Fix::Steps(format!(
-                        "In System Settings → Privacy & Security → Profiles, install the \
-                         MyDiskIsFull profile, then quit and reopen {app}."
+                        "In System Settings → {}, install the MyDiskIsFull profile, then quit \
+                         and reopen {app}.",
+                        crate::profile::settings_place()
                     )),
                     (1, 0),
                 );

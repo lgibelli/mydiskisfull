@@ -1,7 +1,9 @@
 // Applying and undoing a tweak: what it changes and what you give up first,
-// from a dry run, then what happened. The Rust core records every value it
-// replaces before changing anything, so Undo puts back exactly what was there.
-// Not in the App Store edition (see Edition.swift).
+// from a dry run, then what happened. A tweak that installs a configuration
+// profile shows everything the profile holds first (ProfileReview.swift). The
+// Rust core records every value it replaces before changing anything, so Undo
+// puts back exactly what was there. Not in the App Store edition (see
+// Edition.swift).
 
 #if !APP_STORE
 import AppKit
@@ -21,20 +23,28 @@ enum TweakFlow {
             show(.informational, plan.title, "Already applied: there is nothing to change.")
             return false
         }
-        let text = """
-            \(plan.why)
+        if let profile = plan.profiles.first {
+            guard ProfileReviewPanel.run(plan, profile) else { return false }
+        } else {
+            let text = """
+                \(plan.why)
 
-            You give up: \(plan.cost)
+                You give up: \(plan.cost)
 
-            It changes:
-            \(plan.changes.map { "• \($0)" }.joined(separator: "\n"))
+                It changes:
+                \(plan.changes.map { "• \($0)" }.joined(separator: "\n"))
 
-            MyDiskIsFull keeps what it replaces, so Undo puts it back.
-            """
-        guard ask(plan.title, text, button: "Apply") else { return false }
+                MyDiskIsFull keeps what it replaces, so Undo puts it back.
+                """
+            guard ask(plan.title, text, button: "Apply") else { return false }
+        }
         do {
             let done = try await Core.json(TweakApplied.self, ["tweaks", "apply", id])
-            show(.informational, done.title, done.next ?? "Done.")
+            // The review said what to do in System Settings, which is open
+            // now: an alert would only cover it.
+            if plan.profiles.isEmpty {
+                show(.informational, done.title, done.next ?? "Done.")
+            }
             return true
         } catch {
             show(.warning, "The tweak wasn't applied", error.localizedDescription

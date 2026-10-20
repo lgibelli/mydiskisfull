@@ -270,8 +270,35 @@ struct TweakApplied: Decodable {
     let dryRun: Bool
     /// "setting: before → after".
     let changes: [String]
+    /// The configuration profiles it hands to System Settings, as they are.
+    let profiles: [ProfileInfo]
     /// What to expect now; nil for a dry run or when nothing changed.
     let next: String?
+}
+
+/// A configuration profile a tweak installs: everything it holds, so it can
+/// be shown before anyone is asked to install it.
+struct ProfileInfo: Decodable {
+    /// What System Settings lists it as.
+    let name: String
+    /// What System Settings shows with it.
+    let description: String
+    /// The app it sets ("Google Chrome") and that app's preferences domain.
+    let app: String
+    let domain: String
+    let settings: [ProfileSetting]
+    /// Where it's saved, "~/…".
+    let file: String
+    /// The file itself, an XML property list.
+    let contents: String
+    /// Where System Settings installs it ("General → Device Management").
+    let place: String
+}
+
+struct ProfileSetting: Decodable {
+    let key: String
+    /// As JSON writes it: `1`, `true`, `"text"`.
+    let value: String
 }
 
 /// `mdif tweaks revert <id> --json`.

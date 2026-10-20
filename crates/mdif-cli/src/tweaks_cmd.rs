@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use mdif_core::profile::{self, Profile};
 use mdif_core::settings::Setting;
 use mdif_core::store::Store;
 use mdif_core::suggest::{self, Fix};
@@ -137,11 +138,11 @@ fn state_line(t: &Tweak, status: Status, check: Option<&Check>, size: Option<u64
             what()
         ),
         (Status::Partial, None) => format!("Partly applied.{}", what()),
-        (Status::Pending, _) => {
-            "Waiting for you to install its profile in System Settings → Privacy & Security → \
-             Profiles."
-                .into()
-        }
+        (Status::Pending, _) => format!(
+            "Waiting for you to install its profile in System Settings → {}. Nothing changes \
+             until you do.",
+            profile::settings_place()
+        ),
         (Status::Applied, None) => "Applied (not by MyDiskIsFull, so it can't undo it).".into(),
         (Status::Applied, Some(c)) if c.restart_pending => format!(
             "Applied {}; takes effect after a restart.",
@@ -200,7 +201,16 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
         t.apply(&home, &store, unix_now())?
     };
     let changes: Vec<String> = steps.iter().map(step_line).collect();
-    let next = (!dry_run && !steps.is_empty()).then(|| next_line(t.after));
+    // Profiles it installs, which nobody should have to take on trust.
+    let profiles: Vec<(&Profile, &Path)> = steps
+        .iter()
+        .filter_map(|s| match &s.setting {
+            Setting::Profile { profile, dir } if s.to.is_some() => Some((profile, dir.as_path())),
+            _ => None,
+        })
+        .collect();
+    let next = (!dry_run && !steps.is_empty())
+        .then(|| next_line(t.after, profiles.first().map(|(p, _)| *p)));
     if json_out {
         let out = json!({
             "id": t.id,
@@ -209,6 +219,10 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
             "cost": t.cost,
             "dry_run": dry_run,
             "changes": changes,
+            "profiles": profiles
+                .iter()
+                .map(|(p, dir)| profile_json(p, dir))
+                .collect::<Result<Vec<_>>>()?,
             "next": next,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -225,6 +239,16 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
     for c in &changes {
         println!("    {c}");
     }
+    for (p, dir) in &profiles {
+        println!("  The profile holds, for {} ({}):", p.app, p.domain);
+        for (k, v) in &p.prefs {
+            println!("    {k} = {v}");
+        }
+        println!("  System Settings shows with it: {}", p.description);
+        if !dry_run {
+            println!("  Saved as {}", tilde(&p.file_in(dir).to_string_lossy()));
+        }
+    }
     match next {
         None => println!("Nothing changed (dry run)."),
         Some(next) => {
@@ -238,16 +262,40 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
 }
 
 /// What to expect once a tweak is applied.
-fn next_line(after: After) -> String {
+fn next_line(after: After, profile: Option<&Profile>) -> String {
     match after {
         After::Nothing => "Done; it takes effect from now on.".into(),
         After::Relaunch(app) => format!("Done; it takes effect once {app} restarts."),
         After::Restart => "Done; restart the Mac when it suits you to finish.".into(),
         After::Approve(app) => format!(
-            "Next: System Settings is open at Privacy & Security → Profiles. Install the \
-             MyDiskIsFull profile there, then quit and reopen {app}."
+            "Next: System Settings is open at {}. Double-click “{}”, read what it holds, then \
+             click Install and enter your password. If macOS says it's unsigned or unverified, \
+             that's because MyDiskIsFull made it on this Mac rather than a company signing it. \
+             Then quit and reopen {app}. Until you install it, nothing changes.",
+            profile::settings_place(),
+            profile.map_or("the MyDiskIsFull profile", |p| p.name.as_str()),
         ),
     }
+}
+
+/// A profile as the app shows it before anyone installs it: what it holds,
+/// what System Settings will say about it, and the file itself.
+fn profile_json(p: &Profile, dir: &Path) -> Result<Value> {
+    let settings: Vec<Value> = p
+        .prefs
+        .iter()
+        .map(|(k, v)| json!({ "key": k, "value": v.to_string() }))
+        .collect();
+    Ok(json!({
+        "name": p.name,
+        "description": p.description,
+        "app": p.app,
+        "domain": p.domain,
+        "settings": settings,
+        "file": tilde(&p.file_in(dir).to_string_lossy()),
+        "contents": String::from_utf8(p.mobileconfig()?)?,
+        "place": profile::settings_place(),
+    }))
 }
 
 pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
@@ -391,4 +439,38 @@ fn capitalized(s: &str) -> String {
     c.next()
         .map(|f| f.to_uppercase().chain(c).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Map;
+    use std::collections::BTreeSet;
+
+    /// The fixture the app's contract check decodes (app/Tests): a tweak that
+    /// installs a profile, which CI, without Chrome, can't produce. Held here
+    /// to the real serialization.
+    const FIXTURE: &str = include_str!("../../../app/Tests/apply-profile.json");
+
+    fn keys(v: &Value) -> BTreeSet<String> {
+        v.as_object().unwrap().keys().cloned().collect()
+    }
+
+    #[test]
+    fn the_apps_profile_fixture_has_the_shape_apply_prints() {
+        let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+        let shown = &fixture["profiles"][0];
+        let p = Profile {
+            identifier: "io.github.lgibelli.mydiskisfull.test".into(),
+            name: "test".into(),
+            description: "test".into(),
+            app: "Test".into(),
+            domain: "io.github.lgibelli.mydiskisfull.test".into(),
+            prefs: Map::from_iter([("k".to_string(), json!(1))]),
+        };
+        let real = profile_json(&p, Path::new("/nowhere")).unwrap();
+        assert_eq!(keys(&real), keys(shown));
+        assert_eq!(keys(&real["settings"][0]), keys(&shown["settings"][0]));
+        assert_eq!(real["settings"][0]["value"], "1");
+    }
 }

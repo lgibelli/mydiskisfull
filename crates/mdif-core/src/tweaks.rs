@@ -159,7 +159,8 @@ pub const CATALOGUE: &[Tweak] = &[
                 h,
                 "chrome-ai-model",
                 "MyDiskIsFull: no on-device AI model in Chrome",
-                "Stops Google Chrome from downloading its on-device AI model (about 4 GB).",
+                "Chrome doesn't download its on-device AI model (about 4 GB), and deletes the copy \
+                 it has",
                 "GenAILocalFoundationalModelSettings",
                 json!(1),
             )])
@@ -181,7 +182,7 @@ pub const CATALOGUE: &[Tweak] = &[
                 h,
                 "chrome-cache",
                 "MyDiskIsFull: Chrome cache at most 500 MB",
-                "Caps Google Chrome's disk cache at 500 MB per profile.",
+                "Chrome keeps at most 500 MB of cache for each person using it",
                 "DiskCacheSize",
                 json!(500 << 20),
             )])
@@ -576,20 +577,34 @@ pub fn profiles_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/MyDiskIsFull/Profiles")
 }
 
+/// A profile that sets one Chrome policy, `key` = `value`, so that
+/// `effect`. A plain user default won't do: Chrome reads one as a
+/// *recommended* policy, which most policies (these two among them) can't be,
+/// so it ignores it. Only a managed preference is mandatory.
 fn chrome_policy(
     home: &Path,
     id: &str,
     name: &str,
-    description: &str,
+    effect: &str,
     key: &str,
     value: Value,
 ) -> Change {
+    // What System Settings shows when it offers to install it: all it
+    // holds, what it can't do, what Chrome will say, and how to undo it.
+    let description = format!(
+        "Made by MyDiskIsFull on this Mac. It holds one Google Chrome setting, for your user \
+         only: {key} = {value}, so that {effect}. Nothing else is in it: no certificates, \
+         accounts, passwords, VPN or remote management, and nothing for other apps or users. \
+         While it is installed, Chrome says it is managed by your organization: that is this \
+         setting. To undo it, remove this profile, or turn the tweak off in MyDiskIsFull."
+    );
     Change {
         setting: Setting::Profile {
             profile: Profile {
                 identifier: format!("io.github.lgibelli.mydiskisfull.{id}"),
                 name: name.into(),
-                description: description.into(),
+                description,
+                app: "Google Chrome".into(),
                 domain: "com.google.Chrome".into(),
                 prefs: Map::from_iter([(key.to_string(), value)]),
             },
@@ -827,6 +842,7 @@ mod tests {
             identifier: "io.github.lgibelli.mydiskisfull.test-never-approved".into(),
             name: "test".into(),
             description: "test".into(),
+            app: "test".into(),
             domain: "io.github.lgibelli.mydiskisfull.test".into(),
             prefs: Map::from_iter([("k".to_string(), json!(1))]),
         };

@@ -1,0 +1,28 @@
+{
+  "id": "chrome-ai-model",
+  "title": "Stop Chrome downloading its on-device AI model",
+  "why": "Chrome downloads it (about 4 GB) for its built-in AI features, and fetches it again if the folder is deleted.",
+  "cost": "Chrome's features that run AI on this Mac stop working; nothing else changes.",
+  "dry_run": true,
+  "changes": [
+    "profile \"MyDiskIsFull: no on-device AI model in Chrome\": not installed → installed"
+  ],
+  "profiles": [
+    {
+      "name": "MyDiskIsFull: no on-device AI model in Chrome",
+      "description": "Made by MyDiskIsFull on this Mac. It holds one Google Chrome setting, for your user only: GenAILocalFoundationalModelSettings = 1, so that Chrome doesn't download its on-device AI model (about 4 GB), and deletes the copy it has. Nothing else is in it: no certificates, accounts, passwords, VPN or remote management, and nothing for other apps or users. While it is installed, Chrome says it is managed by your organization: that is this setting. To undo it, remove this profile, or turn the tweak off in MyDiskIsFull.",
+      "app": "Google Chrome",
+      "domain": "com.google.Chrome",
+      "settings": [
+        {
+          "key": "GenAILocalFoundationalModelSettings",
+          "value": "1"
+        }
+      ],
+      "file": "~/Library/Application Support/MyDiskIsFull/Profiles/io.github.lgibelli.mydiskisfull.chrome-ai-model.mobileconfig",
+      "contents": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>PayloadContent</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>PayloadType</key>\n\t\t\t<string>com.apple.ManagedClient.preferences</string>\n\t\t\t<key>PayloadIdentifier</key>\n\t\t\t<string>io.github.lgibelli.mydiskisfull.chrome-ai-model.prefs</string>\n\t\t\t<key>PayloadUUID</key>\n\t\t\t<string>2735211D-7256-8285-8819-7531CDD05CAC</string>\n\t\t\t<key>PayloadVersion</key>\n\t\t\t<integer>1</integer>\n\t\t\t<key>PayloadDisplayName</key>\n\t\t\t<string>com.google.Chrome</string>\n\t\t\t<key>PayloadEnabled</key>\n\t\t\t<true/>\n\t\t\t<key>PayloadContent</key>\n\t\t\t<dict>\n\t\t\t\t<key>com.google.Chrome</key>\n\t\t\t\t<dict>\n\t\t\t\t\t<key>Forced</key>\n\t\t\t\t\t<array>\n\t\t\t\t\t\t<dict>\n\t\t\t\t\t\t\t<key>mcx_preference_settings</key>\n\t\t\t\t\t\t\t<dict>\n\t\t\t\t\t\t\t\t<key>GenAILocalFoundationalModelSettings</key>\n\t\t\t\t\t\t\t\t<integer>1</integer>\n\t\t\t\t\t\t\t</dict>\n\t\t\t\t\t\t</dict>\n\t\t\t\t\t</array>\n\t\t\t\t</dict>\n\t\t\t</dict>\n\t\t</dict>\n\t</array>\n\t<key>PayloadDisplayName</key>\n\t<string>MyDiskIsFull: no on-device AI model in Chrome</string>\n\t<key>PayloadDescription</key>\n\t<string>Made by MyDiskIsFull on this Mac. It holds one Google Chrome setting, for your user only: GenAILocalFoundationalModelSettings = 1, so that Chrome doesn&apos;t download its on-device AI model (about 4 GB), and deletes the copy it has. Nothing else is in it: no certificates, accounts, passwords, VPN or remote management, and nothing for other apps or users. While it is installed, Chrome says it is managed by your organization: that is this setting. To undo it, remove this profile, or turn the tweak off in MyDiskIsFull.</string>\n\t<key>PayloadIdentifier</key>\n\t<string>io.github.lgibelli.mydiskisfull.chrome-ai-model</string>\n\t<key>PayloadOrganization</key>\n\t<string>MyDiskIsFull</string>\n\t<key>PayloadScope</key>\n\t<string>User</string>\n\t<key>PayloadType</key>\n\t<string>Configuration</string>\n\t<key>PayloadUUID</key>\n\t<string>C4782814-D940-83AD-A59A-C0CFACA46818</string>\n\t<key>PayloadVersion</key>\n\t<integer>1</integer>\n\t<key>PayloadRemovalDisallowed</key>\n\t<false/>\n</dict>\n</plist>",
+      "place": "General → Device Management"
+    }
+  ],
+  "next": null
+}

@@ -3,14 +3,17 @@
 //!
 //! macOS no longer installs profiles from the command line. We write the
 //! `.mobileconfig`, open it, and the user approves it in System Settings
-//! (Privacy & Security → Profiles). The profile is user-scoped and only
-//! carries preferences for one app's domain, in the Custom Settings form
-//! Apple Configurator writes. Once installed, its keys appear in
+//! ([`settings_place`]). The profile is user-scoped and only carries
+//! preferences for one app's domain, in the Custom Settings form Apple
+//! Configurator writes. Its description, which System Settings shows when
+//! it offers to install it, says all it holds and how to undo it. Once
+//! installed, its keys appear in
 //! `/Library/Managed Preferences/<user>/<domain>.plist`, which is how we
 //! tell it's in effect. Removing one of ours needs no password.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -19,7 +22,7 @@ use serde_json::{Map, Value};
 /// Where macOS puts preferences that profiles manage.
 const MANAGED: &str = "/Library/Managed Preferences";
 
-/// System Settings → Privacy & Security → Profiles.
+/// Where System Settings installs profiles ([`settings_place`]).
 pub const SETTINGS_PANE: &str = "x-apple.systempreferences:com.apple.Profiles-Settings.extension";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,7 +31,12 @@ pub struct Profile {
     pub identifier: String,
     /// What System Settings lists it as.
     pub name: String,
+    /// What System Settings shows when it offers to install it.
     pub description: String,
+    /// The app it sets, by name ("Google Chrome"). Records made before it
+    /// was kept have none.
+    #[serde(default)]
+    pub app: String,
     /// The app's preferences domain, e.g. `com.google.Chrome`.
     pub domain: String,
     pub prefs: Map<String, Value>,
@@ -140,10 +148,10 @@ impl Profile {
                 .context("running profiles")?;
             if !out.status.success() && self.in_effect() {
                 bail!(
-                    "couldn't remove the profile \"{}\" ({}). Remove it in System Settings → \
-                     Privacy & Security → Profiles.",
+                    "couldn't remove the profile \"{}\" ({}). Remove it in System Settings → {}.",
                     self.name,
-                    String::from_utf8_lossy(&out.stdout).trim()
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    settings_place()
                 );
             }
         }
@@ -152,6 +160,27 @@ impl Profile {
             _ => Ok(()),
         }
     }
+}
+
+/// Where profiles are installed in System Settings, as its sidebar names
+/// it: General → Device Management from macOS 15, Privacy & Security →
+/// Profiles before.
+pub fn settings_place() -> &'static str {
+    static PLACE: OnceLock<&str> = OnceLock::new();
+    PLACE.get_or_init(|| {
+        let major = Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|o| {
+                let v = String::from_utf8_lossy(&o.stdout).into_owned();
+                v.trim().split('.').next()?.parse::<u32>().ok()
+            });
+        match major {
+            Some(m) if m < 15 => "Privacy & Security → Profiles",
+            _ => "General → Device Management",
+        }
+    })
 }
 
 fn dict<'a>(entries: impl IntoIterator<Item = (&'a str, plist::Value)>) -> plist::Dictionary {
@@ -206,6 +235,7 @@ mod tests {
             identifier: "io.github.lgibelli.mydiskisfull.test".into(),
             name: "Test & <check>".into(),
             description: "Escaping: \" ' & < >".into(),
+            app: "Google Chrome".into(),
             domain: "com.google.Chrome".into(),
             prefs: Map::from_iter([
                 ("GenAILocalFoundationalModelSettings".to_string(), json!(1)),
