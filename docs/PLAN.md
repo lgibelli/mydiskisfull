@@ -221,7 +221,7 @@ mydiskisfull/
                   detection; rules, suggestions, tweaks; providers; TM monitor
     mdif-cli/     `mdif map | watch | forecast | owners | incidents | suggest | tweaks | writers`
                   (later `clean | tm`)
-  app/            menu bar app: native Swift (SwiftUI MenuBarExtra), built by app/build.sh;
+  app/            the app: native Swift (SwiftUI, a window and a MenuBarExtra), built by app/build.sh;
                   bundles mdif, and registers `mdif watch` as its LaunchAgent (SMAppService)
 ```
 

@@ -22,7 +22,7 @@ Free and open source, with no telemetry and no account.
 > `mdif forecast`), growth per folder and runaway-filler incidents (`mdif owners`,
 > `mdif incidents`), what to do about each cause (`mdif suggest`) and reversible tweaks that stop
 > things coming back (`mdif tweaks`), the honest disk map (`mdif map`) and the disk-writer monitor
-> (`mdif writers`) work today, in a menu bar app and on the command line. 0.1.0 is the first
+> (`mdif writers`) work today, in the app and on the command line. 0.1.0 is the first
 > release; what's next is in the [plan](docs/PLAN.md).
 
 ## Why another disk tool
@@ -72,7 +72,7 @@ or download `mdif-…-macos-universal.tar.gz` from the same release on its own.
 
 ## Build it
 
-Requires macOS and Rust 1.88+; the menu bar app needs macOS 14 and Xcode's command line tools.
+Requires macOS and Rust 1.88+; the app needs macOS 14 and Xcode's command line tools.
 
 ### The app
 
@@ -235,7 +235,7 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np`, `sysctl` (boot time, swap) |
 | `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder, incidents, suggestions and tweaks (reversible settings and configuration profiles) |
 | `crates/mdif-cli` | The `mdif` command |
-| `app/` | The menu bar app (SwiftUI). It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
+| `app/` | The app (SwiftUI): a main window and a glance in the menu bar. It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
 
 ## The Mac App Store
 
