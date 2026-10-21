@@ -58,7 +58,7 @@ private struct ProfileReview: View {
             contents
             next
 
-            Text("To undo it, turn the switch off on the Fixes page, or remove the profile in System Settings.")
+            Text("To undo it, turn the switch off on the Prevent page, or remove the profile in System Settings.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

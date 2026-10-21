@@ -5,8 +5,11 @@
 //! - **writes**: bytes written per process name during each sample interval;
 //! - **growth**: bytes each owner folder grew (or shrank) per period.
 //!
-//! Beside them: incident episodes, and the tweaks applied with what each
-//! one replaced (so it can be undone).
+//! Beside them: incident episodes, the tweaks applied with what each one
+//! replaced (so it can be undone), the clean-ups done through
+//! MyDiskIsFull (so the forecast knows them for what they are), and what
+//! the disk was made of each time it was measured whole (`strata`: bytes
+//! per kind, from `mdif space`), kept as long as free space.
 //!
 //! Rows start at 5-minute resolution. After a day they are folded into hourly
 //! rows, after a month into daily rows, and daily rows are dropped after
@@ -59,6 +62,19 @@ pub struct Store {
     conn: Connection,
 }
 
+/// One whole measurement: when, and bytes per layer.
+pub type Strata = (i64, Vec<(String, u64)>);
+
+/// What was written on one local day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayWrites {
+    /// Unix time of the day's local midnight.
+    pub day: i64,
+    pub bytes: u64,
+    /// The biggest writers that day, largest first.
+    pub top: Vec<(String, u64)>,
+}
+
 /// One episode of an incident: from when it first held to when it stopped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Episode {
@@ -68,6 +84,22 @@ pub struct Episode {
     /// The incident as last seen.
     pub incident: Incident,
 }
+
+/// A clean-up done through MyDiskIsFull (`mdif clean`, `mdif tidy`): when it
+/// started and ended, and what it freed by its own measure. The forecast
+/// takes out what came back around it, whatever its size (see
+/// [`crate::forecast::forecast_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cleanup {
+    pub start: i64,
+    pub end: i64,
+    pub freed: u64,
+}
+
+/// Clean-ups kept: the most recent this many, none older than [`CLEANUPS_DAYS`].
+pub const CLEANUPS_KEPT: i64 = 200;
+/// The forecast looks four weeks back at most.
+pub const CLEANUPS_DAYS: i64 = 30;
 
 /// A tweak as applied: the steps it took (JSON, see [`crate::tweaks`]) and
 /// the sizes of what it was for at the time.
@@ -147,7 +179,18 @@ impl Store {
              CREATE TABLE IF NOT EXISTS meta (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS cleanups (
+                 started INTEGER NOT NULL,
+                 ended   INTEGER NOT NULL,
+                 freed   INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS strata (
+                 ts    INTEGER NOT NULL,
+                 layer TEXT    NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 PRIMARY KEY (ts, layer)
+             ) WITHOUT ROWID;",
         )?;
         Ok(Store { conn })
     }
@@ -240,6 +283,47 @@ impl Store {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// What was written each local day since `since`, oldest first, with the
+    /// `top` writers of each. `offset` is the local time zone's offset from
+    /// UTC at a time ([`mdif_macos::sys::utc_offset`]). A row goes to the
+    /// day its time falls on: a 5-minute row is stamped with when it ended,
+    /// a folded one with when its hour or day began.
+    pub fn writes_daily(
+        &self,
+        since: i64,
+        offset: &dyn Fn(i64) -> i64,
+        top: usize,
+    ) -> Result<Vec<DayWrites>> {
+        const DAY: i64 = 86_400;
+        let mut st = self.conn.prepare_cached(
+            "SELECT ts, name, SUM(bytes) FROM writes WHERE ts >= ?1 GROUP BY ts, name",
+        )?;
+        let mut days: std::collections::BTreeMap<i64, HashMap<String, u64>> = Default::default();
+        let mut rows = st.query(params![since])?;
+        while let Some(r) = rows.next()? {
+            let ts: i64 = r.get(0)?;
+            let off = offset(ts);
+            let midnight = (ts + off).div_euclid(DAY) * DAY - off;
+            *days
+                .entry(midnight)
+                .or_default()
+                .entry(r.get(1)?)
+                .or_default() += r.get::<_, i64>(2)? as u64;
+        }
+        Ok(days
+            .into_iter()
+            .map(|(day, by)| {
+                let mut by: Vec<(String, u64)> = by.into_iter().collect();
+                by.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                DayWrites {
+                    day,
+                    bytes: by.iter().map(|(_, b)| b).sum(),
+                    top: by.into_iter().take(top).collect(),
+                }
+            })
+            .collect())
     }
 
     /// Every process name's per-interval writes since `since`, oldest first.
@@ -356,6 +440,16 @@ impl Store {
         Ok(out)
     }
 
+    /// How much `owner` grew in each period since `since`, oldest first.
+    pub fn growth_of(&self, owner: &str, since: i64) -> Result<Vec<(i64, i64)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ts, SUM(bytes) FROM growth WHERE owner = ?1 AND ts >= ?2 GROUP BY ts
+             ORDER BY ts",
+        )?;
+        let rows = st.query_map(params![owner, since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Fold rows older than their tier's retention into the next tier and
     /// drop what falls off the last one. Only whole buckets are folded, so a
     /// bucket is never split between two rows of the coarser tier.
@@ -400,6 +494,7 @@ impl Store {
             "DELETE FROM space WHERE res = ?1 AND ts < ?2",
             params![last.res, now - last.keep],
         )?;
+        tx.execute("DELETE FROM strata WHERE ts < ?1", params![now - last.keep])?;
         for (table, _) in QUANTITIES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE res = ?1 AND ts < ?2"),
@@ -467,6 +562,70 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Record a clean-up, and forget the oldest past [`CLEANUPS_KEPT`] or
+    /// [`CLEANUPS_DAYS`].
+    pub fn add_cleanup(&self, c: &Cleanup) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO cleanups (started, ended, freed) VALUES (?1, ?2, ?3)",
+            params![c.start, c.end, c.freed as i64],
+        )?;
+        tx.execute(
+            "DELETE FROM cleanups WHERE ended < ?1
+             OR rowid NOT IN (SELECT rowid FROM cleanups ORDER BY ended DESC LIMIT ?2)",
+            params![c.end - CLEANUPS_DAYS * 86_400, CLEANUPS_KEPT],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Clean-ups that ended since `since`, in the order they started.
+    /// What the disk was made of when it was measured at `ts`: bytes per
+    /// layer (a kind, the Trash, what the scan couldn't see). The same `ts`
+    /// again replaces it.
+    pub fn add_strata(&self, ts: i64, layers: &[(&str, u64)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM strata WHERE ts = ?1", params![ts])?;
+        for (layer, bytes) in layers {
+            tx.prepare_cached("INSERT INTO strata (ts, layer, bytes) VALUES (?1, ?2, ?3)")?
+                .execute(params![ts, layer, *bytes as i64])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Each measurement since `since`, oldest first, with its layers.
+    pub fn strata_since(&self, since: i64) -> Result<Vec<Strata>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ts, layer, bytes FROM strata WHERE ts >= ?1 ORDER BY ts, layer",
+        )?;
+        let mut out: Vec<Strata> = Vec::new();
+        let mut rows = st.query(params![since])?;
+        while let Some(r) = rows.next()? {
+            let ts: i64 = r.get(0)?;
+            let layer = (r.get::<_, String>(1)?, r.get::<_, i64>(2)?.max(0) as u64);
+            match out.last_mut() {
+                Some((t, l)) if *t == ts => l.push(layer),
+                _ => out.push((ts, vec![layer])),
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn cleanups_since(&self, since: i64) -> Result<Vec<Cleanup>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT started, ended, freed FROM cleanups WHERE ended >= ?1 ORDER BY started, ended",
+        )?;
+        let rows = st.query_map(params![since], |r| {
+            Ok(Cleanup {
+                start: r.get(0)?,
+                end: r.get(1)?,
+                freed: r.get::<_, i64>(2)?.max(0) as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -484,6 +643,22 @@ impl Store {
             Some(r) => Some(r.get(0)?),
             None => None,
         })
+    }
+
+    pub fn delete_meta(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
+    /// Every key starting with `prefix`, with its value, in key order: one
+    /// query for a group of settings.
+    pub fn meta_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT key, value FROM meta WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+        )?;
+        let rows = st.query_map(params![prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Rows per (table, resolution), for tests and `mdif watch --status`.
@@ -550,6 +725,52 @@ mod tests {
         s.add_space("/other", point(300, 1)).unwrap();
         let got = s.space_since("/", 0).unwrap();
         assert_eq!(got, [point(300, 41 * GB), point(600, 40 * GB)]);
+    }
+
+    #[test]
+    fn writes_are_summed_per_local_day_with_the_biggest_writers() {
+        let s = Store::open_in_memory().unwrap();
+        const DAY: i64 = 86_400;
+        let base = 20_000 * DAY; // a UTC midnight
+        let w = |name: &str, b: u64| (name.to_string(), b);
+        // Two hours ahead of UTC: 23:00 UTC is 01:00 the next local day.
+        s.add_writes(base + 3_600, &[w("a", 10), w("b", 5)])
+            .unwrap();
+        s.add_writes(base + 7_200, &[w("a", 1), w("c", 7)]).unwrap();
+        s.add_writes(base + 23 * 3_600, &[w("b", 100)]).unwrap();
+        let days = s.writes_daily(0, &|_| 2 * 3_600, 2).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].day, base - 2 * 3_600);
+        assert_eq!(days[0].bytes, 23);
+        assert_eq!(days[0].top, [w("a", 11), w("c", 7)]);
+        assert_eq!(days[1].day, base + DAY - 2 * 3_600);
+        assert_eq!(
+            (days[1].bytes, days[1].top.clone()),
+            (100, vec![w("b", 100)])
+        );
+        // Only what's since `since`.
+        assert_eq!(
+            s.writes_daily(base + 3 * 3_600, &|_| 0, 3).unwrap()[0].bytes,
+            100
+        );
+    }
+
+    #[test]
+    fn strata_are_kept_per_measurement_and_replaced_by_the_same_time() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_strata(100, &[("apps", 5), ("macos", 9)]).unwrap();
+        s.add_strata(200, &[("apps", 6)]).unwrap();
+        s.add_strata(200, &[("apps", 7), ("trash", 1)]).unwrap();
+        let got = s.strata_since(0).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], (100, vec![("apps".into(), 5), ("macos".into(), 9)]));
+        assert_eq!(got[1], (200, vec![("apps".into(), 7), ("trash".into(), 1)]));
+        assert_eq!(s.strata_since(150).unwrap().len(), 1);
+        s.compact(200 + 400 * 86_400 + 1).unwrap();
+        assert!(
+            s.strata_since(0).unwrap().is_empty(),
+            "as old as free space is kept"
+        );
     }
 
     #[test]
@@ -693,5 +914,39 @@ mod tests {
         s.set_meta("k", "v").unwrap();
         s.set_meta("k", "w").unwrap();
         assert_eq!(s.meta("k").unwrap().as_deref(), Some("w"));
+        s.set_meta("a.x", "1").unwrap();
+        s.set_meta("a.y", "2").unwrap();
+        s.set_meta("a_z", "3").unwrap();
+        assert_eq!(
+            s.meta_prefixed("a.").unwrap(),
+            [("a.x".into(), "1".into()), ("a.y".into(), "2".into())]
+        );
+        s.delete_meta("a.x").unwrap();
+        assert_eq!(s.meta("a.x").unwrap(), None);
+        assert_eq!(s.meta_prefixed("a.").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cleanups_are_kept_bounded() {
+        let s = Store::open_in_memory().unwrap();
+        let day = 86_400;
+        let c = |end: i64| Cleanup {
+            start: end - 10,
+            end,
+            freed: GB,
+        };
+        s.add_cleanup(&c(100)).unwrap();
+        assert_eq!(s.cleanups_since(0).unwrap(), [c(100)]);
+        // A month later the first is forgotten.
+        s.add_cleanup(&c(100 + 31 * day)).unwrap();
+        assert_eq!(s.cleanups_since(0).unwrap(), [c(100 + 31 * day)]);
+        // And only the most recent are kept.
+        for k in 0..(CLEANUPS_KEPT + 20) {
+            s.add_cleanup(&c(40 * day + k)).unwrap();
+        }
+        let kept = s.cleanups_since(0).unwrap();
+        assert_eq!(kept.len(), CLEANUPS_KEPT as usize);
+        assert_eq!(kept[0], c(40 * day + 20));
+        assert_eq!(s.cleanups_since(40 * day + 210).unwrap().len(), 10);
     }
 }

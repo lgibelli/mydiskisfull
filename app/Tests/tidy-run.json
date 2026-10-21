@@ -1,0 +1,25 @@
+{
+  "dry_run": false,
+  "freed": 8467000161,
+  "done": [
+    {
+      "id": "simulators",
+      "path": "/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime/3e800c38767f9f2c5fc86acdad7adf44565e051a.asset",
+      "what": "deleted",
+      "bytes": 8067000161
+    },
+    {
+      "id": "caches",
+      "path": "/Users/me/Library/Caches/com.example.chat",
+      "what": "emptied",
+      "bytes": 400000000
+    }
+  ],
+  "failed": [
+    {
+      "id": "caches",
+      "path": "/Users/me/Library/Caches/com.example.editor",
+      "why": "Quit Example Editor first: it's using ~/Library/Caches/com.example.editor."
+    }
+  ]
+}

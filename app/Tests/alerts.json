@@ -1,0 +1,10 @@
+{
+  "low_free": 20000000000,
+  "low_free_auto": 10000000000,
+  "full_within_days": 3,
+  "growth_min": 2000000000,
+  "churn_per_hour": 1000000000,
+  "notify_forecast": true,
+  "notify_growth": true,
+  "notify_churn": false
+}

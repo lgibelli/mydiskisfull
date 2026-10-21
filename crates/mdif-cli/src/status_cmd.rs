@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use mdif_core::alerts;
 use mdif_core::forecast::{self, Alert, DAY, Forecast, Params};
 use mdif_core::privacy;
 use mdif_core::store::{Episode, Store};
@@ -15,7 +16,7 @@ use serde_json::json;
 
 use crate::owners_cmd::episode_json;
 use crate::tweaks_cmd::{fix_line, status_word};
-use crate::watch_cmd::{self, date, days, duration, home, window};
+use crate::watch_cmd::{self, basis, date, days, duration, full_range, home, percent};
 
 /// A tweak MyDiskIsFull applied and hasn't reverted, as it reads now.
 struct Applied {
@@ -50,8 +51,19 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => s.space_since(&st.mount_point, now - 400 * DAY)?,
         None => Vec::new(),
     };
-    let f = forecast::forecast(&pts, &Params::default());
-    let alert = forecast::alert(f.as_ref(), st.avail, st.total);
+    let cleanups = match (&store, pts.first()) {
+        (Some(s), Some(first)) => s.cleanups_since(first.ts)?,
+        _ => Vec::new(),
+    };
+    // The thresholds the user set (`mdif alerts`), and the defaults for the
+    // rest.
+    let user = match &store {
+        Some(s) => alerts::Settings::load(s)?,
+        None => alerts::Settings::default(),
+    };
+    let f = forecast::forecast_with(&pts, &cleanups, &Params::default());
+    let alert = user.alert(f.as_ref(), st.avail, st.total);
+    let keep = crate::keep_cmd::load_or_warn(db);
     let open: Vec<Episode> = match &store {
         Some(s) => s
             .incidents_since(now)?
@@ -79,7 +91,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
             "volume": st.mount_point,
             "total": st.total,
             "avail": st.avail,
-            "floor": forecast::low_floor(st.total),
+            "floor": user.floor(st.total),
             "alert": alert,
             "alert_sentence": alert_sentence(alert, f.as_ref(), st.avail),
             "forecast": f,
@@ -90,7 +102,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
                 "interval_secs": interval,
                 "bytes": watch_cmd::history_bytes(db),
             },
-            "incidents": open.iter().map(|e| episode_json(e, &home)).collect::<Vec<_>>(),
+            "incidents": open.iter().map(|e| episode_json(e, &home, &keep)).collect::<Vec<_>>(),
             "tweaks": applied.iter().map(|a| json!({
                 "id": a.tweak.id,
                 "title": a.tweak.title,
@@ -103,6 +115,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
                 "full_disk_access": granted,
             })),
             "watcher_cost": cost.map(|c| watch_cmd::cost_json(&c, interval)),
+            "alerts": user.in_effect(st.total),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -124,7 +137,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     }
     for e in &open {
         println!("Runaway: {}", e.incident.sentence(Some(&home)));
-        let fix = mdif_core::suggest::for_incident(&e.incident, &home);
+        let fix = mdif_core::suggest::for_incident(&e.incident, &home, &keep);
         println!("  Fix: {}", fix_line(&fix));
     }
     for a in applied.iter().filter(|a| a.undone()) {
@@ -175,17 +188,22 @@ fn trend_line(f: &Forecast, samples: usize) -> String {
         (None, _) => format!(
             "Collecting history ({samples} samples): a forecast needs at least 8 covering 3 hours."
         ),
-        (Some(r), _) if r.per_day <= 0.0 => {
-            format!("Not filling, over the {} trend.", window(&r))
-        }
         (Some(r), Some(full)) => format!(
-            "Full in about {}, around {} ({} a day, the {} trend).",
+            "Full in about {}, around {} ({}; about {} a day, {}).",
             days(full.days),
             date(f.at, full.days),
-            bytes(r.per_day as u64),
-            window(&r)
+            full_range(f.at, &full),
+            bytes(r.per_day.max(0.0) as u64),
+            basis(f, &r)
         ),
-        (Some(r), None) => format!("Filling at {} a day.", bytes(r.per_day as u64)),
+        (Some(r), None) if r.per_day <= 0.0 => {
+            format!("Not filling ({}).", basis(f, &r))
+        }
+        (Some(r), None) => format!(
+            "Filling at about {} a day, but not full for a long time ({}).",
+            bytes(r.per_day as u64),
+            basis(f, &r)
+        ),
     }
 }
 
@@ -198,13 +216,18 @@ fn alert_sentence(alert: Alert, f: Option<&Forecast>, avail: u64) -> Option<Stri
         return None;
     }
     let f = f?;
-    let (r, full) = (f.rate?, f.full_in?);
+    let (r, full, by) = (f.rate?, f.full_in?, f.full_by?);
+    let (p, within) = match alert {
+        Alert::WithinADay => (by.d1, "a day"),
+        Alert::Within3Days => (by.d3, "3 days"),
+        _ => (by.d14, "14 days"),
+    };
     Some(format!(
-        "At {} a day (the {} trend), the disk is full in about {}, around {}.",
-        bytes(r.per_day as u64),
-        window(&r),
+        "At about {} a day, the disk is full in about {}, around {} ({} likely within {within}).",
+        bytes(r.per_day.max(0.0) as u64),
         days(full.days),
-        date(f.at, full.days)
+        date(f.at, full.days),
+        percent(p)
     ))
 }
 
@@ -247,7 +270,7 @@ mod tests {
                 full_in_days: None,
             },
         };
-        let printed = episode_json(&e, Path::new("/Users/me"));
+        let printed = episode_json(&e, Path::new("/Users/me"), &Default::default());
         assert_eq!(keys(&printed), keys(&shown[0]));
         assert_eq!(keys(&printed["incident"]), keys(&shown[0]["incident"]));
         assert_eq!(printed["incident"]["kind"], "churn");
@@ -284,6 +307,39 @@ mod tests {
         assert_eq!(
             tweak["status"],
             status_word(mdif_core::tweaks::Status::NotApplied)
+        );
+    }
+
+    /// The fixture's forecast has the fields a simulated forecast prints,
+    /// nested ones included.
+    #[test]
+    fn the_apps_fixture_has_the_forecast_status_prints() {
+        use mdif_core::store::SpacePoint;
+        let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+        let shown = &fixture["forecast"];
+        // Three days filling 7.5 GB a day, with a cleanup on the second.
+        let pts: Vec<SpacePoint> = (0..=72)
+            .map(|k: i64| SpacePoint {
+                ts: 1_792_146_600 + k * 3600,
+                total: 494_384_795_648,
+                avail: (43.5e9 - 7.5e9 * k as f64 / 24.0 + if k > 30 { 4e9 } else { 0.0 }) as u64,
+            })
+            .collect();
+        let f = forecast::forecast(&pts, &Params::default()).unwrap();
+        assert_eq!(f.method, forecast::Method::Simulation);
+        let printed = serde_json::to_value(&f).unwrap();
+        assert_eq!(keys(&printed), keys(shown));
+        assert_eq!(printed["method"], shown["method"]);
+        for k in ["rate", "trend", "full_in", "full_by", "paces"] {
+            assert_eq!(keys(&printed[k]), keys(&shown[k]), "{k}");
+        }
+        assert_eq!(keys(&printed["steps"][0]), keys(&shown["steps"][0]));
+        // The sentence the notification shows, as the fixture has it.
+        let sentence = alert_sentence(Alert::Within3Days, Some(&f), f.avail).unwrap();
+        let words = |s: &str| s.split(' ').take(4).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            words(&sentence),
+            words(fixture["alert_sentence"].as_str().unwrap())
         );
     }
 }

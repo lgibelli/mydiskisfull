@@ -1,0 +1,758 @@
+{
+  "measured": 1792583880,
+  "took_secs": 38.4,
+  "volume": {
+    "total": 494384795648,
+    "used": 374352000000,
+    "free": 120032795648,
+    "purgeable": 701514000
+  },
+  "comes_back": [
+    {
+      "what": "purgeable",
+      "bytes": 701514000,
+      "how": "macOS frees it when it needs room"
+    },
+    {
+      "what": "swap",
+      "bytes": 7519000000,
+      "how": "after a restart"
+    },
+    {
+      "what": "trash",
+      "bytes": 1204000000,
+      "how": "when you empty the Trash"
+    }
+  ],
+  "kinds": [
+    {
+      "id": "apps",
+      "title": "Apps",
+      "bytes": 61289000000,
+      "frees": 55102000000,
+      "reclaimable": 8715000000,
+      "items": [
+        {
+          "path": "/Applications/Final Cut Pro.app",
+          "name": "Final Cut Pro",
+          "bytes": 7005000000,
+          "frees": 6313000000,
+          "age": 2592000,
+          "last_used": 1792152000,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Applications/SimCity.app",
+          "name": "SimCity",
+          "bytes": 4742000000,
+          "frees": 4702000000,
+          "age": 17280000,
+          "last_used": 1772366400,
+          "flags": [
+            "unused"
+          ],
+          "note": "Not opened since March",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Applications/Xcode.app",
+          "name": "Xcode",
+          "bytes": 4202000000,
+          "frees": 1207000000,
+          "age": 1728000,
+          "last_used": 1792497600,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Applications/iMovie.app",
+          "name": "iMovie",
+          "bytes": 3973000000,
+          "frees": 3627000000,
+          "age": 4320000,
+          "last_used": null,
+          "flags": [
+            "unused"
+          ],
+          "note": "Never opened",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Applications/Microsoft Word.app",
+          "name": "Microsoft Word",
+          "bytes": 2946000000,
+          "frees": 2946000000,
+          "age": 691200,
+          "last_used": 1792411200,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "title": "Your files",
+      "bytes": 58000000000,
+      "frees": 55597000000,
+      "reclaimable": 13120000000,
+      "items": [
+        {
+          "path": "/Users/me/devel",
+          "name": "devel",
+          "bytes": 30214000000,
+          "frees": 27902000000,
+          "age": 3542400,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Desktop",
+          "name": "Desktop",
+          "bytes": 18109000000,
+          "frees": 18019000000,
+          "age": 94608000,
+          "last_used": null,
+          "flags": [
+            "cold"
+          ],
+          "note": "Mostly unchanged since 2023",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Downloads",
+          "name": "Downloads",
+          "bytes": 2380000000,
+          "frees": 2380000000,
+          "age": 1036800,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/.Trash",
+          "name": "Trash",
+          "bytes": 1204000000,
+          "frees": 1204000000,
+          "age": 777600,
+          "last_used": null,
+          "flags": [],
+          "note": "Freed when you empty the Trash",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/Shared",
+          "name": "Shared",
+          "bytes": 1576000000,
+          "frees": 1575000000,
+          "age": 5184000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "dev",
+      "title": "Developer tools",
+      "bytes": 54076000000,
+      "frees": 53713000000,
+      "reclaimable": 3120000000,
+      "items": [
+        {
+          "path": "/opt/homebrew",
+          "name": "Homebrew",
+          "bytes": 11156000000,
+          "frees": 11156000000,
+          "age": 2592000,
+          "last_used": null,
+          "flags": [],
+          "note": "`brew cleanup` removes old versions",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/.gradle",
+          "name": "Gradle",
+          "bytes": 8835000000,
+          "frees": 8835000000,
+          "age": 5184000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime/3e800c38767f9f2c5fc86acdad7adf44565e051a.asset",
+          "name": "iOS 27.0 Simulator",
+          "bytes": 8067000000,
+          "frees": 8067000000,
+          "age": 3110400,
+          "last_used": 1792152000,
+          "flags": [],
+          "note": "Xcode → Settings → Components removes it; it downloads again when needed",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Developer/CoreSimulator/Devices",
+          "name": "Simulator devices",
+          "bytes": 7456000000,
+          "frees": 7093000000,
+          "age": 432000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Containers/com.docker.docker",
+          "name": "Docker",
+          "bytes": 5760000000,
+          "frees": 5760000000,
+          "age": 345600,
+          "last_used": null,
+          "flags": [],
+          "note": "Docker's disk image: `docker system prune` frees what no container uses",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Android",
+          "name": "Android SDK",
+          "bytes": 5470000000,
+          "frees": 5470000000,
+          "age": 17280000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Developer/Xcode/DerivedData",
+          "name": "Xcode DerivedData",
+          "bytes": 3120000000,
+          "frees": 3120000000,
+          "age": 864000,
+          "last_used": null,
+          "flags": [
+            "build"
+          ],
+          "note": "Xcode's build output: the next build makes it again",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "macos",
+      "title": "macOS",
+      "bytes": 51044000000,
+      "frees": 21040000000,
+      "reclaimable": 0,
+      "items": [
+        {
+          "path": "/",
+          "name": "macOS",
+          "bytes": 13656000000,
+          "frees": 0,
+          "age": null,
+          "last_used": null,
+          "flags": [],
+          "note": "macOS itself, read-only",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/System/Volumes/Preboot",
+          "name": "Preboot",
+          "bytes": 11032000000,
+          "frees": 0,
+          "age": null,
+          "last_used": null,
+          "flags": [],
+          "note": "What the Mac starts up from",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/System/Library/AssetsV2",
+          "name": "System downloads",
+          "bytes": 7793000000,
+          "frees": 7581000000,
+          "age": 3456000,
+          "last_used": null,
+          "flags": [],
+          "note": "Voices, dictionaries and models macOS downloads",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/System/Volumes/VM",
+          "name": "Swap",
+          "bytes": 7519000000,
+          "frees": 0,
+          "age": null,
+          "last_used": null,
+          "flags": [],
+          "note": "Comes back after a restart",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/private/var/db",
+          "name": "db",
+          "bytes": 4196000000,
+          "frees": 4149000000,
+          "age": 259200,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Volumes/Recovery",
+          "name": "Recovery",
+          "bytes": 1538000000,
+          "frees": 0,
+          "age": null,
+          "last_used": null,
+          "flags": [],
+          "note": "macOS Recovery",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "build",
+      "title": "Build output",
+      "bytes": 44039000000,
+      "frees": 36409000000,
+      "reclaimable": 42829000000,
+      "items": [
+        {
+          "path": "/Users/me/devel/app/src-tauri/target",
+          "name": "app/src-tauri/target",
+          "bytes": 20765000000,
+          "frees": 17941000000,
+          "age": 172800,
+          "last_used": null,
+          "flags": [
+            "build"
+          ],
+          "note": "Rust build output",
+          "action": {
+            "kind": "delete",
+            "label": "Delete Build Output",
+            "paths": [
+              "/Users/me/devel/app/src-tauri/target"
+            ],
+            "confirm": "Delete ~/devel/app/src-tauri/target? 38.7 GB on disk. It's deleted, not moved to the Trash; the next build makes it again.",
+            "done": null
+          },
+          "about": null
+        },
+        {
+          "path": "/Users/me/devel/app/src-tauri/target/debug/incremental",
+          "name": "app/src-tauri/target/debug/incremental",
+          "bytes": 17944000000,
+          "frees": 13260000000,
+          "age": 172800,
+          "last_used": null,
+          "flags": [
+            "build"
+          ],
+          "note": "Rust's incremental caches: only the next build of your own crates is slower",
+          "action": {
+            "kind": "delete",
+            "label": "Delete Incremental Caches",
+            "paths": [
+              "/Users/me/devel/app/src-tauri/target/debug/incremental"
+            ],
+            "confirm": "Delete the incremental caches in ~/devel/app/src-tauri/target/debug/incremental? 17.9 GB on disk. They're deleted, not moved to the Trash; only the next build of your own crates is slower.",
+            "done": null
+          },
+          "about": null
+        },
+        {
+          "path": "/Users/me/devel/app/.claude/worktrees/fix/target",
+          "name": "app/.claude/worktrees/fix/target",
+          "bytes": 4120000000,
+          "frees": 3998000000,
+          "age": 518400,
+          "last_used": null,
+          "flags": [
+            "build"
+          ],
+          "note": "Rust build output",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/devel/web/node_modules",
+          "name": "web/node_modules",
+          "bytes": 1210000000,
+          "frees": 1210000000,
+          "age": 7776000,
+          "last_used": null,
+          "flags": [
+            "build",
+            "kept"
+          ],
+          "note": "Packages npm installs again",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "appdata",
+      "title": "App data",
+      "bytes": 32018000000,
+      "frees": 31774000000,
+      "reclaimable": 2410000000,
+      "items": [
+        {
+          "path": "/Users/me/Library/Group Containers/UBF8T346G9.Office",
+          "name": "UBF8T346G9.Office",
+          "bytes": 5799000000,
+          "frees": 5799000000,
+          "age": 172800,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Metadata",
+          "name": "Metadata",
+          "bytes": 6362000000,
+          "frees": 6118000000,
+          "age": 86400,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Containers/com.apple.Safari",
+          "name": "com.apple.Safari",
+          "bytes": 3101000000,
+          "frees": 3101000000,
+          "age": 86400,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Application Support/Signal",
+          "name": "Signal",
+          "bytes": 1936000000,
+          "frees": 1936000000,
+          "age": 43200000,
+          "last_used": null,
+          "flags": [
+            "cold"
+          ],
+          "note": "Mostly unchanged since 2025",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "cloud",
+      "title": "Cloud copies",
+      "bytes": 21044000000,
+      "frees": 2062000000,
+      "reclaimable": 0,
+      "items": [
+        {
+          "path": "/Users/me/Library/CloudStorage/OneDrive-Personal",
+          "name": "OneDrive-Personal",
+          "bytes": 9602000000,
+          "frees": 24000000,
+          "age": 8640000,
+          "last_used": null,
+          "flags": [
+            "kept"
+          ],
+          "note": "Downloaded cloud files: Free Up Space keeps them in the cloud only",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Group Containers/UBF8T346G9.OneDriveSyncClientSuite",
+          "name": "OneDrive",
+          "bytes": 9655000000,
+          "frees": 251000000,
+          "age": 8640000,
+          "last_used": null,
+          "flags": [],
+          "note": "OneDrive's copy of what it keeps on this Mac",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Mobile Documents",
+          "name": "iCloud Drive",
+          "bytes": 1787000000,
+          "frees": 1787000000,
+          "age": 2592000,
+          "last_used": null,
+          "flags": [],
+          "note": "Downloaded iCloud files: Remove Download keeps them in iCloud only",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "vms",
+      "title": "Virtual machines",
+      "bytes": 20805000000,
+      "frees": 20805000000,
+      "reclaimable": 0,
+      "items": [
+        {
+          "path": "/Users/me/Virtual Machines.localized/Windows 11.vmwarevm",
+          "name": "Windows 11",
+          "bytes": 20805000000,
+          "frees": 20805000000,
+          "age": 1728000,
+          "last_used": null,
+          "flags": [
+            "kept"
+          ],
+          "note": "A virtual machine's disk: it grows as the guest writes",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "caches",
+      "title": "Caches",
+      "bytes": 13908000000,
+      "frees": 11648000000,
+      "reclaimable": 13908000000,
+      "items": [
+        {
+          "path": "/private/var/folders",
+          "name": "Temporary files",
+          "bytes": 6158000000,
+          "frees": 3898000000,
+          "age": 86400,
+          "last_used": null,
+          "flags": [
+            "cache",
+            "regrows"
+          ],
+          "note": "Apps' temporary files and caches",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Caches/com.example.agent",
+          "name": "com.example.agent",
+          "bytes": 2486000000,
+          "frees": 2486000000,
+          "age": 259200,
+          "last_used": null,
+          "flags": [
+            "cache",
+            "regrows"
+          ],
+          "note": "Apps fill it again as they run",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Caches/Google",
+          "name": "Google",
+          "bytes": 1421000000,
+          "frees": 1421000000,
+          "age": 86400,
+          "last_used": null,
+          "flags": [
+            "cache",
+            "regrows"
+          ],
+          "note": "Apps fill it again as they run",
+          "action": null,
+          "about": null
+        },
+        {
+          "path": "/Users/me/Library/Application Support/Claude/Cache",
+          "name": "Claude",
+          "bytes": 928000000,
+          "frees": 928000000,
+          "age": 86400,
+          "last_used": null,
+          "flags": [
+            "cache",
+            "regrows"
+          ],
+          "note": "Apps fill it again as they run",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "title": "Other",
+      "bytes": 13833000000,
+      "frees": 31000000,
+      "reclaimable": 0,
+      "items": [
+        {
+          "path": "",
+          "name": "Not measured",
+          "bytes": 13802000000,
+          "frees": 0,
+          "age": null,
+          "last_used": null,
+          "flags": [],
+          "note": "Files only macOS can read, and file-system metadata",
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "mail",
+      "title": "Mail and Messages",
+      "bytes": 3671000000,
+      "frees": 3414000000,
+      "reclaimable": 0,
+      "items": [
+        {
+          "path": "/Users/me/Library/Messages",
+          "name": "Messages",
+          "bytes": 2225000000,
+          "frees": 2119000000,
+          "age": 17280000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": {
+            "path": "/Users/me/Library/Messages/Attachments",
+            "bytes": 1780000000,
+            "title": "Messages' attachments",
+            "what": "Photos, videos and files from your conversations.",
+            "how": "System Settings → General → Storage → Messages lists the biggest to delete.",
+            "open": {
+              "label": "Open Storage Settings…",
+              "app": null,
+              "url": "x-apple.systempreferences:com.apple.settings.Storage"
+            },
+            "action": null
+          }
+        },
+        {
+          "path": "/Users/me/Library/Mail",
+          "name": "Mail",
+          "bytes": 1446000000,
+          "frees": 1295000000,
+          "age": 2592000,
+          "last_used": null,
+          "flags": [],
+          "note": null,
+          "action": null,
+          "about": null
+        }
+      ]
+    },
+    {
+      "id": "media",
+      "title": "Photos, music and video",
+      "bytes": 625000000,
+      "frees": 625000000,
+      "reclaimable": 601000000,
+      "items": [
+        {
+          "path": "/Users/me/Pictures/Photos Library.photoslibrary",
+          "name": "Photos Library",
+          "bytes": 625000000,
+          "frees": 625000000,
+          "age": 34560000,
+          "last_used": null,
+          "flags": [
+            "cold"
+          ],
+          "note": "Mostly unchanged since 2025",
+          "action": null,
+          "about": null
+        }
+      ]
+    }
+  ],
+  "old_files": [
+    {
+      "path": "/Users/me/Movies/Holiday 2019.mov",
+      "name": "Holiday 2019.mov",
+      "bytes": 4831000000,
+      "frees": 4831000000,
+      "accessed": 1745020800,
+      "modified": 1567296000,
+      "kept": false,
+      "action": {
+        "kind": "trash",
+        "label": "Move to Trash",
+        "paths": [
+          "/Users/me/Movies/Holiday 2019.mov"
+        ],
+        "confirm": null,
+        "done": null
+      }
+    },
+    {
+      "path": "/Users/me/Desktop/Archive/scans.zip",
+      "name": "scans.zip",
+      "bytes": 2147000000,
+      "frees": 2147000000,
+      "accessed": 1704067200,
+      "modified": 1640995200,
+      "kept": true,
+      "action": null
+    },
+    {
+      "path": "/Users/Shared/Installer.pkg",
+      "name": "Installer.pkg",
+      "bytes": 812000000,
+      "frees": 812000000,
+      "accessed": 1717200000,
+      "modified": 1717200000,
+      "kept": false,
+      "action": null
+    }
+  ]
+}

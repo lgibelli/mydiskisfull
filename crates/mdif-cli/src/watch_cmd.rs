@@ -1,13 +1,14 @@
 //! `mdif watch` (the sampler) and `mdif forecast` (what its history says).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
-use mdif_core::forecast::{self, DAY, Forecast, FullIn, HOUR, Params, Rate};
+use mdif_core::forecast::{self, DAY, Forecast, FullIn, HOUR, Method, Params, Rate};
 use mdif_core::owners::Rules;
-use mdif_core::store::Store;
+use mdif_core::store::{Cleanup, Store};
 use mdif_core::suggest;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
@@ -19,13 +20,16 @@ const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
 const BUDGET_WRITES_PER_HOUR: u64 = 1_000_000;
 
 pub fn default_db() -> PathBuf {
-    home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
 }
 
 /// Where the agent's errors go.
 pub fn log_path() -> PathBuf {
-    home().join("Library/Logs/MyDiskIsFull/watch.log")
+    data_home().join("Library/Logs/MyDiskIsFull/watch.log")
 }
+
+/// How long after it starts the watcher first looks at the tidy-ups.
+const TIDY_DELAY: i64 = 600;
 
 /// The log is started afresh, keeping one old copy, once it passes this.
 const LOG_MAX: u64 = 1_000_000;
@@ -47,6 +51,39 @@ fn open_log() -> Result<()> {
     Ok(())
 }
 
+/// When this command started: `main` sets it first thing.
+static STARTED: OnceLock<i64> = OnceLock::new();
+
+pub(crate) fn mark_started() {
+    STARTED.get_or_init(watch::unix_now);
+}
+
+/// Record a clean-up done through mdif, from `start` to now, so the forecast
+/// takes out what came back around it, however little (see
+/// mdif_core::forecast::forecast_with). Never fatal: the clean-up is done.
+pub(crate) fn record_cleanup(store: &Store, start: i64, freed: u64) {
+    let c = Cleanup {
+        start,
+        end: watch::unix_now(),
+        freed,
+    };
+    if let Err(e) = store.add_cleanup(&c) {
+        eprintln!("The clean-up isn't in the history, so the forecast may misread it: {e:#}");
+    }
+}
+
+/// [`record_cleanup`] for `mdif clean`: since the command started, in the
+/// history at `db` if there is one.
+pub(crate) fn record_clean(db: &Path, freed: u64) {
+    if !db.exists() {
+        return;
+    }
+    match Store::open(db) {
+        Ok(store) => record_cleanup(&store, *STARTED.get_or_init(watch::unix_now), freed),
+        Err(e) => eprintln!("The clean-up isn't in the history: {e:#}"),
+    }
+}
+
 /// History database, WAL and shared memory together.
 pub(crate) fn history_bytes(db: &Path) -> u64 {
     ["", "-wal", "-shm"]
@@ -62,6 +99,7 @@ pub struct WatchOptions {
     pub once: bool,
     pub quiet: bool,
     pub log: bool,
+    pub attached: bool,
 }
 
 pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
@@ -71,9 +109,13 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         once,
         quiet,
         log,
+        attached,
     } = o;
     if log {
         open_log()?;
+    }
+    if attached {
+        exit_when_stdin_closes();
     }
     let store = Store::open(db)?;
     let mut w =
@@ -94,6 +136,13 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         );
     }
     let home = home();
+    // Tidy-ups (`mdif tidy`) are looked at once an hour, after a sample, and
+    // run when one that's on hasn't for a day; not in the first minutes,
+    // while what starts at login settles.
+    let tidy_store = Store::open(db)
+        .inspect_err(|e| eprintln!("No tidy-ups: {e:#}"))
+        .ok();
+    let mut tidy_next = watch::unix_now() + TIDY_DELAY;
     watch::run(
         &mut w,
         interval,
@@ -109,14 +158,36 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
                         "{} incident: {} Fix: {}",
                         local(s.point.ts).format("%F %H:%M"),
                         i.sentence(Some(&home)),
-                        crate::tweaks_cmd::fix_line(&suggest::for_incident(i, &home))
+                        crate::tweaks_cmd::fix_line(&suggest::for_incident(
+                            i,
+                            &home,
+                            &crate::keep_cmd::load_or_warn(db)
+                        ))
                     );
+                }
+                if let Some(store) = &tidy_store
+                    && s.point.ts >= tidy_next
+                {
+                    tidy_next = s.point.ts + HOUR;
+                    crate::tidy_cmd::run_due(store, db, s.point.ts);
                 }
             }
             Err(e) => eprintln!("{} sample failed: {e:#}", local_now().format("%F %T")),
         },
     );
     Ok(())
+}
+
+/// The App Store edition's app runs the watcher while it's open, with a pipe
+/// for standard input: when the app quits, or crashes, the pipe closes and
+/// the watcher goes too, even in the middle of its sleep.
+fn exit_when_stdin_closes() {
+    std::thread::spawn(|| {
+        let mut sink = [0u8; 64];
+        let mut stdin = std::io::stdin().lock();
+        while std::io::Read::read(&mut stdin, &mut sink).is_ok_and(|n| n > 0) {}
+        std::process::exit(0);
+    });
 }
 
 fn print_sample(s: &watch::Sample) {
@@ -163,8 +234,28 @@ fn print_sample(s: &watch::Sample) {
     }
 }
 
+/// The home folder whose folders are watched and shown: `$HOME`, except in
+/// the App Sandbox, where `$HOME` is the app's container and this is the
+/// account's own.
 pub(crate) fn home() -> PathBuf {
+    if sandboxed()
+        && let Some(home) = mdif_macos::sys::account_home()
+    {
+        return home;
+    }
+    data_home()
+}
+
+/// Where the history and the log are kept: `$HOME`, which in the App Sandbox
+/// is the app's container.
+fn data_home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+}
+
+/// Running in the App Sandbox (the App Store edition), which names the
+/// container it gives the process.
+pub(crate) fn sandboxed() -> bool {
+    std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
 }
 
 /// `/Users/me/x` as `~/x`.
@@ -189,6 +280,8 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
             "watcher_cost": null,
             "last_period": null,
             "series": [],
+            "writes_daily": [],
+            "strata": [],
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -205,7 +298,8 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         .mount_point;
     let now = watch::unix_now();
     let pts = store.space_since(&key, now - 400 * DAY)?;
-    let f = forecast::forecast(&pts, &Params::default());
+    let cleanups = store.cleanups_since(pts.first().map_or(now, |p| p.ts))?;
+    let f = forecast::forecast_with(&pts, &cleanups, &Params::default());
     let writers = store.writes_since(now - DAY)?;
     let cost = watch::recorded_cost(&store)?;
     let last_period = watch::recorded_period(&store)?;
@@ -224,6 +318,27 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         if series {
             // [unix seconds, bytes free], at the resolution the store keeps.
             out["series"] = pts.iter().map(|p| json!([p.ts, p.avail])).collect();
+            out["writes_daily"] = store
+                .writes_daily(now - 400 * DAY, &mdif_macos::sys::utc_offset, 8)?
+                .iter()
+                .map(|d| {
+                    json!({
+                        "day": d.day,
+                        "bytes": d.bytes,
+                        "top": d.top.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            // What the disk was made of at each whole measurement.
+            out["strata"] = store
+                .strata_since(now - 400 * DAY)?
+                .iter()
+                .map(|(ts, layers)| {
+                    let l: serde_json::Map<String, serde_json::Value> =
+                        layers.iter().map(|(k, b)| (k.clone(), json!(b))).collect();
+                    json!({"ts": ts, "layers": l})
+                })
+                .collect();
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -233,6 +348,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         println!("No samples for {key} yet. Is the watcher running? (`mdif agent status`)");
         return Ok(());
     };
+    let keep = crate::keep_cmd::load_or_warn(db);
     let open: Vec<_> = store
         .incidents_since(now)?
         .into_iter()
@@ -240,7 +356,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         .collect();
     for e in &open {
         println!("Runaway: {}", e.incident.sentence(Some(&home())));
-        let fix = suggest::for_incident(&e.incident, &home());
+        let fix = suggest::for_incident(&e.incident, &home(), &keep);
         println!("  Fix: {}", crate::tweaks_cmd::fix_line(&fix));
     }
     if !open.is_empty() {
@@ -275,24 +391,45 @@ fn print_forecast(key: &str, f: &Forecast, samples: usize, since: Option<i64>) {
         );
         return;
     };
+    let range = format!("plausibly {} to {} a day", signed(r.low), signed(r.high));
     if r.per_day <= 0.0 {
         println!(
-            "Not filling: free space is stable or growing ({} a day over {}).",
+            "Not filling: free space is stable or growing ({} a day, {}; {range}).",
             bytes(r.per_day.abs() as u64),
-            window(&r)
+            basis(f, &r)
         );
     } else {
         println!(
-            "Filling at {} a day ({} trend from {}, plausibly {}–{} a day).",
+            "Filling at about {} a day ({}; {range}).",
             bytes(r.per_day as u64),
-            window(&r),
-            plural(r.points, "sample"),
-            bytes(r.low.max(0.0) as u64),
-            bytes(r.high.max(0.0) as u64)
+            basis(f, &r)
         );
-        if let Some(full) = f.full_in {
-            println!("{}", full_sentence(f.at, &full));
-        }
+    }
+    match (f.full_in, f.method) {
+        (Some(full), _) => println!("{}", full_sentence(f.at, &full)),
+        (None, Method::Simulation) if r.per_day > 0.0 => println!(
+            "Not full within {} days in most of the simulated futures.",
+            Params::default().horizon_days
+        ),
+        _ => {}
+    }
+    if let Some(by) = f.full_by {
+        println!(
+            "Chance of being full: {} within a day, {} within 3 days, {} within 14 days.",
+            percent(by.d1),
+            percent(by.d3),
+            percent(by.d14)
+        );
+    }
+    println!("{}", paces_sentence(&f.paces));
+    if f.method == Method::Simulation
+        && let Some(t) = f.trend
+    {
+        println!(
+            "For comparison, the {} trend (Theil–Sen): {} a day.",
+            window(&t),
+            signed(t.per_day)
+        );
     }
     if let (Some(rc), Some(soon)) = (f.recent, f.recent_full_in) {
         println!(
@@ -305,9 +442,9 @@ fn print_forecast(key: &str, f: &Forecast, samples: usize, since: Option<i64>) {
     }
     if !f.steps.is_empty() {
         let how = if r.steps_removed > 0 {
-            "taken out of the trend (one-off)"
+            "taken out of the forecast (one-off)"
         } else {
-            "kept in the trend (they recur)"
+            "kept in the forecast (they recur)"
         };
         let list: Vec<String> = f
             .steps
@@ -329,23 +466,66 @@ fn print_forecast(key: &str, f: &Forecast, samples: usize, since: Option<i64>) {
     }
 }
 
+/// Where the forecast rate comes from.
+pub(crate) fn basis(f: &Forecast, r: &Rate) -> String {
+    match f.method {
+        Method::Simulation => format!(
+            "{} futures drawn from the last {}",
+            Params::default().paths,
+            duration(r.window)
+        ),
+        Method::Trend => format!("the {} trend, until there's a day of history", window(r)),
+    }
+}
+
+pub(crate) fn percent(p: f64) -> String {
+    format!("{:.0}%", p * 100.0)
+}
+
+/// Bytes a day, with a minus sign when space comes back.
+fn signed(per_day: f64) -> String {
+    if per_day < 0.0 {
+        format!("-{}", bytes(per_day.abs() as u64))
+    } else {
+        bytes(per_day as u64)
+    }
+}
+
+pub(crate) fn paces_sentence(p: &forecast::Paces) -> String {
+    let one = |v: Option<f64>, over: &str| match v {
+        Some(v) => format!("{} a day over the last {over}", signed(v)),
+        None => format!("not enough samples for the last {over}"),
+    };
+    format!(
+        "Pace: {}; {}; {}.",
+        one(p.hour, "hour"),
+        one(p.day, "24 hours"),
+        one(p.week, "7 days")
+    )
+}
+
+/// "Full in about 6 days, around Oct 27 (likely between Oct 23 and Nov 12)."
 fn full_sentence(at: i64, full: &FullIn) -> String {
-    let range = match full.latest {
+    format!(
+        "Full in about {}, around {} ({}).",
+        days(full.days),
+        date(at, full.days),
+        full_range(at, full)
+    )
+}
+
+pub(crate) fn full_range(at: i64, full: &FullIn) -> String {
+    match full.latest {
         Some(latest) => format!(
-            "between {} and {}",
+            "likely between {} and {}",
             date(at, full.earliest),
             date(at, latest)
         ),
         None => format!(
-            "as early as {}, or never at the slowest plausible rate",
+            "as early as {}, or not for a long time",
             date(at, full.earliest)
         ),
-    };
-    format!(
-        "Full in about {}, around {} ({range}).",
-        days(full.days),
-        date(at, full.days)
-    )
+    }
 }
 
 fn print_growth(growth: &[(String, i64)]) {

@@ -5,13 +5,18 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
+use mdif_macos::fs::{self, FsStats};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Container {
     pub container_reference: String,
+    // In the App Sandbox `diskutil` leaves the sizes out: see
+    // `fill_missing_sizes`.
+    #[serde(default)]
     pub capacity_ceiling: u64,
+    #[serde(default)]
     pub capacity_free: u64,
     pub volumes: Vec<Volume>,
 }
@@ -23,6 +28,7 @@ pub struct Volume {
     pub device_identifier: String,
     #[serde(default)]
     pub roles: Vec<String>,
+    #[serde(default)]
     pub capacity_in_use: u64,
 }
 
@@ -79,6 +85,40 @@ pub fn find_volume(containers: Vec<Container>, device: &str) -> Result<(Containe
     bail!("no APFS volume {id}")
 }
 
+/// In the App Sandbox `diskutil` lists the containers and their volumes but
+/// not their sizes. Take the container's from `statfs` of a volume in it
+/// (`st`), and each mounted volume's from the volume itself; one that isn't
+/// mounted (Recovery) stays at 0.
+pub fn fill_missing_sizes(c: &mut Container, st: &FsStats) {
+    if c.capacity_ceiling == 0 {
+        c.capacity_ceiling = st.total;
+        c.capacity_free = st.free;
+    }
+    let mounts = fs::mounts().unwrap_or_default();
+    for v in c.volumes.iter_mut().filter(|v| v.capacity_in_use == 0) {
+        if let Some(m) = mount_of(&mounts, &v.device_identifier) {
+            v.capacity_in_use = fs::space_used(Path::new(m)).unwrap_or(0);
+        }
+    }
+}
+
+/// Where the volume `id` (`disk3s1`) is mounted: from itself, or from one of
+/// its snapshots (the system volume boots from `disk3s1s1`).
+fn mount_of<'a>(mounts: &'a [(String, String)], id: &str) -> Option<&'a str> {
+    let of = |want: fn(&str) -> bool| {
+        mounts.iter().find_map(|(dev, m)| {
+            let rest = dev.strip_prefix("/dev/")?.strip_prefix(id)?;
+            want(rest).then_some(m.as_str())
+        })
+    };
+    of(str::is_empty).or_else(|| {
+        of(|r| {
+            r.strip_prefix('s')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
+}
+
 /// Names of local Time Machine snapshots on the volume mounted at `mount`.
 /// They keep deleted files' blocks allocated until they expire.
 pub fn local_snapshots(mount: &Path) -> Result<Vec<String>> {
@@ -106,6 +146,41 @@ fn parse_snapshots(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_a_volume_mounted_from_itself_or_a_snapshot() {
+        let mounts = [
+            ("/dev/disk3s1s1", "/"),
+            ("/dev/disk3s5", "/System/Volumes/Data"),
+            ("/dev/disk3s10", "/Volumes/Other"),
+        ]
+        .map(|(d, m)| (d.to_string(), m.to_string()));
+        assert_eq!(mount_of(&mounts, "disk3s1"), Some("/"));
+        assert_eq!(mount_of(&mounts, "disk3s5"), Some("/System/Volumes/Data"));
+        assert_eq!(mount_of(&mounts, "disk3s10"), Some("/Volumes/Other"));
+        assert_eq!(mount_of(&mounts, "disk3s3"), None);
+    }
+
+    #[test]
+    fn sizes_left_out_are_filled_in() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Containers</key><array><dict>
+<key>ContainerReference</key><string>disk3</string>
+<key>Volumes</key><array><dict><key>Name</key><string>Data</string>
+<key>DeviceIdentifier</key><string>disk3s5</string><key>Roles</key><array><string>Data</string></array>
+</dict></array></dict></array></dict></plist>"#;
+        let mut c = plist::from_bytes::<ApfsList>(xml.as_bytes())
+            .unwrap()
+            .containers
+            .remove(0);
+        assert_eq!((c.capacity_ceiling, c.volumes[0].capacity_in_use), (0, 0));
+        let st = fs::statfs(Path::new("/System/Volumes/Data")).unwrap();
+        // This Mac's own Data volume stands in for the one in the listing.
+        c.volumes[0].device_identifier = st.device.trim_start_matches("/dev/").into();
+        fill_missing_sizes(&mut c, &st);
+        assert_eq!(c.capacity_ceiling, st.total);
+        assert!(c.volumes[0].capacity_in_use > 0);
+    }
 
     #[test]
     fn parses_tmutil_output() {

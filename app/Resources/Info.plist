@@ -19,6 +19,8 @@
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>100</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<!-- A menu bar app: no Dock icon. -->
@@ -48,5 +50,7 @@
 	<integer>86400</integer>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>MyDiskIsFull asks Finder to move what macOS updates left behind to the Trash. Finder asks for your password, since those folders belong to the system.</string>
 </dict>
 </plist>

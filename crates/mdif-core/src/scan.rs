@@ -53,7 +53,22 @@ pub struct Totals {
     /// Private bytes of hard-linked files that also have links outside this
     /// folder: deleting the folder doesn't free them.
     pub linked_elsewhere: u64,
+    /// Allocated bytes times their file's modification time, summed: see
+    /// [`Totals::mean_mtime`].
+    #[serde(skip)]
+    pub mtime_weighted: i128,
+    /// Allocated bytes of files last modified more than [`COLD_AGE`] before
+    /// the scan started.
+    #[serde(skip)]
+    pub cold: u64,
+    /// Shared bytes (allocated less private) of files that may share blocks
+    /// with a clone: where `allocated` may count the same blocks twice.
+    #[serde(skip)]
+    pub cloned: u64,
 }
+
+/// How long a file goes unmodified before its bytes count as cold.
+pub const COLD_AGE: i64 = 365 * 86_400;
 
 impl Totals {
     fn add(&mut self, o: &Totals) {
@@ -68,19 +83,36 @@ impl Totals {
         self.unreadable_dirs += o.unreadable_dirs;
         self.other_volumes += o.other_volumes;
         self.linked_elsewhere += o.linked_elsewhere;
+        self.mtime_weighted += o.mtime_weighted;
+        self.cold += o.cold;
+        self.cloned += o.cloned;
     }
 
-    /// One file, all of whose links are in this folder.
-    fn add_file(&mut self, e: &Entry) {
-        self.add_linked(e);
+    /// When the bytes here were last modified, on average (each file
+    /// weighted by its allocated size); `None` when nothing is allocated.
+    pub fn mean_mtime(&self) -> Option<i64> {
+        (self.allocated > 0).then(|| (self.mtime_weighted / self.allocated as i128) as i64)
+    }
+
+    /// One file, all of whose links are in this folder. Modified before
+    /// `cold_before`, its bytes are cold.
+    fn add_file(&mut self, e: &Entry, cold_before: i64) {
+        self.add_linked(e, cold_before);
         self.private += e.private;
     }
 
     /// One file, counted without its private bytes being reclaimable.
-    fn add_linked(&mut self, e: &Entry) {
+    fn add_linked(&mut self, e: &Entry, cold_before: i64) {
         self.files += 1;
         self.logical += e.logical;
         self.allocated += e.allocated;
+        self.mtime_weighted += e.allocated as i128 * e.mtime as i128;
+        if e.mtime < cold_before {
+            self.cold += e.allocated;
+        }
+        if e.ext_flags & EF_MAY_SHARE_BLOCKS != 0 {
+            self.cloned += e.shared();
+        }
         if e.is_dataless() {
             self.dataless_files += 1;
             self.dataless_logical += e.logical;
@@ -105,6 +137,9 @@ pub struct Node {
 pub struct Options {
     pub max_depth: usize,
     pub min_node: u64,
+    /// Also list each file of at least this many allocated bytes
+    /// ([`Scan::big_files`]); none when `None`.
+    pub big_files: Option<u64>,
 }
 
 impl Default for Options {
@@ -112,8 +147,23 @@ impl Default for Options {
         Options {
             max_depth: 6,
             min_node: 50_000_000,
+            big_files: None,
         }
     }
+}
+
+/// A file at least [`Options::big_files`] big. Only files with one name: a
+/// hard-linked file isn't freed by deleting one of its names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BigFile {
+    pub path: PathBuf,
+    pub allocated: u64,
+    /// Freed if it were deleted.
+    pub private: u64,
+    /// Last accessed and modified (Unix seconds), as the file system keeps
+    /// them; the scan reads neither the file nor its access time's update.
+    pub atime: i64,
+    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +181,9 @@ pub struct Scan {
     pub shared_uncertain: u64,
     /// Sample of directories we could not read (permissions).
     pub unreadable: Vec<PathBuf>,
+    /// With [`Options::big_files`]: the files that big, in no order.
+    #[serde(skip)]
+    pub big_files: Vec<BigFile>,
 }
 
 const UNREADABLE_SAMPLE: usize = 50;
@@ -148,9 +201,13 @@ type Links = HashMap<(i32, u64), Link>;
 struct Ctx<'a> {
     dev: i32,
     opts: &'a Options,
+    /// Files modified before this (Unix seconds) are cold.
+    cold_before: i64,
     /// Blocks of files that share nothing with other live files.
     plain: AtomicU64,
     clones: Mutex<Clones>,
+    /// Files of at least [`Options::big_files`] bytes: few, so one list.
+    big: Mutex<Vec<BigFile>>,
 }
 
 #[derive(Default)]
@@ -162,6 +219,23 @@ struct Clones {
 }
 
 impl Ctx<'_> {
+    /// Lists a file with one name if it's big enough.
+    fn note_big(&self, path: &Path, e: &Entry) {
+        if e.kind == Kind::File
+            && e.nlink <= 1
+            && !e.is_dataless()
+            && self.opts.big_files.is_some_and(|min| e.allocated >= min)
+        {
+            self.big.lock().unwrap().push(BigFile {
+                path: path.to_path_buf(),
+                allocated: e.allocated,
+                private: e.private,
+                atime: e.atime,
+                mtime: e.mtime,
+            });
+        }
+    }
+
     /// Count the blocks of one file (once per inode).
     fn account(&self, path: &Path, e: &Entry) {
         if e.is_dataless() {
@@ -213,6 +287,7 @@ pub fn size_of(path: &Path) -> Option<u64> {
             let opts = Options {
                 max_depth: 0,
                 min_node: u64::MAX,
+                big_files: None,
             };
             scan(path, &opts).ok().map(|s| s.root.totals.allocated)
         }
@@ -229,11 +304,16 @@ pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
     let dev = mdif_macos::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
     bulk::open_dir(root)?;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     let ctx = Ctx {
         dev,
         opts,
+        cold_before: started - COLD_AGE,
         plain: AtomicU64::new(0),
         clones: Mutex::new(Clones::default()),
+        big: Mutex::new(Vec::new()),
     };
     let w = walk(root, 0, &ctx);
     // Links to these files live outside the scanned tree (or in folders we
@@ -250,6 +330,7 @@ pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
         shared_uncertain: clones.uncertain,
         root: w.node,
         unreadable: w.unreadable,
+        big_files: ctx.big.into_inner().unwrap(),
     })
 }
 
@@ -302,8 +383,10 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
                     });
             }
             _ => {
-                base.add_file(&e);
-                ctx.account(&dir.join(&e.name), &e);
+                base.add_file(&e, ctx.cold_before);
+                let path = dir.join(&e.name);
+                ctx.account(&path, &e);
+                ctx.note_big(&path, &e);
             }
         }
     }
@@ -330,13 +413,13 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         if l.seen < l.entry.nlink {
             return true;
         }
-        base.add_file(&l.entry);
+        base.add_file(&l.entry, ctx.cold_before);
         ctx.account(&l.path, &l.entry);
         false
     });
     let mut totals = base;
     for l in links.values() {
-        totals.add_linked(&l.entry);
+        totals.add_linked(&l.entry, ctx.cold_before);
         totals.linked_elsewhere += l.entry.private;
     }
     children.sort_by_key(|n| std::cmp::Reverse(n.totals.allocated));
@@ -388,6 +471,7 @@ mod tests {
         Options {
             max_depth: 6,
             min_node: min,
+            big_files: None,
         }
     }
 
@@ -555,5 +639,123 @@ mod tests {
         let s = scan(t.path(), &opts(0)).unwrap();
         assert_eq!(s.root.totals.files, 2, "data.bin + the symlink itself");
         assert!(s.root.totals.allocated < 5_000_000);
+    }
+
+    #[test]
+    fn the_mean_age_weighs_files_by_size() {
+        let t = tempfile::tempdir().unwrap();
+        let day = 86_400;
+        let at = |rel: &str, len: usize, days: u64| {
+            let p = t.path().join(rel);
+            write(&p, len);
+            let when =
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 - days * day);
+            fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        };
+        // Three quarters of the bytes 40 days old, a quarter 0 days old.
+        at("old/a.bin", 3_000_000, 40);
+        at("new/b.bin", 1_000_000, 0);
+        let tot = scan(t.path(), &opts(0)).unwrap().root.totals;
+        let age = (1_700_000_000 - tot.mean_mtime().unwrap()) / day as i64;
+        assert!((29..=31).contains(&age), "{age} days, {tot:?}");
+        assert_eq!(Totals::default().mean_mtime(), None);
+    }
+
+    #[test]
+    fn bytes_unmodified_for_a_year_are_cold() {
+        let t = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let aged = |rel: &str, len: usize, days: u64| {
+            let p = t.path().join(rel);
+            write(&p, len);
+            fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(now - std::time::Duration::from_secs(days * 86_400))
+                .unwrap();
+            fs::metadata(&p).unwrap().blocks() * 512
+        };
+        use std::os::unix::fs::MetadataExt;
+        let old = aged("old/a.bin", 3_000_000, 400);
+        let older = aged("mixed/b.bin", 1_000_000, 900);
+        aged("mixed/c.bin", 2_000_000, 300);
+        aged("new.bin", 500_000, 0);
+        let s = scan(t.path(), &opts(0)).unwrap();
+        assert_eq!(s.root.totals.cold, old + older);
+        let cold_of = |name: &str| {
+            s.root
+                .children
+                .iter()
+                .find(|n| n.path.ends_with(name))
+                .unwrap()
+                .totals
+                .cold
+        };
+        assert_eq!(cold_of("old"), old);
+        assert_eq!(cold_of("mixed"), older);
+    }
+
+    #[test]
+    fn big_files_are_listed_only_when_asked() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let big = t.path().join("a/b/big.bin");
+        write(&big, 3 * MIB as usize);
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        fs::File::options()
+            .write(true)
+            .open(&big)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(at(1_600_000_000))
+                    .set_modified(at(1_500_000_000)),
+            )
+            .unwrap();
+        write(&t.path().join("a/small.bin"), MIB as usize);
+        // A hard-linked file: deleting one name frees nothing.
+        write(&t.path().join("c/linked.bin"), 3 * MIB as usize);
+        fs::hard_link(t.path().join("c/linked.bin"), t.path().join("c/again.bin")).unwrap();
+
+        let none = scan(t.path(), &opts(0)).unwrap();
+        assert!(none.big_files.is_empty());
+        let o = Options {
+            big_files: Some(2 * MIB),
+            ..opts(0)
+        };
+        let s = scan(t.path(), &o).unwrap();
+        let allocated = fs::metadata(&big).unwrap().blocks() * 512;
+        assert_eq!(
+            s.big_files,
+            [BigFile {
+                path: big.clone(),
+                allocated,
+                private: allocated,
+                atime: 1_600_000_000,
+                mtime: 1_500_000_000,
+            }]
+        );
+        // Listing them changes nothing else.
+        assert_eq!(s.root.totals, none.root.totals);
+        // And reads no file: its access time is as it was.
+        assert_eq!(fs::metadata(&big).unwrap().atime(), 1_600_000_000);
+    }
+
+    #[test]
+    fn shared_bytes_of_clones_are_told_apart() {
+        let t = tempfile::tempdir().unwrap();
+        write(&t.path().join("a/orig.bin"), 4 * MIB as usize);
+        clone(&t.path().join("a/orig.bin"), &t.path().join("b/copy.bin"));
+        write(&t.path().join("c/own.bin"), MIB as usize);
+        let tot = scan(t.path(), &opts(0)).unwrap().root.totals;
+        // Both sides of the clone pair share all of their blocks.
+        assert_eq!(tot.cloned, 8 * MIB, "{tot:?}");
+        assert_eq!(tot.allocated - tot.private, tot.cloned);
     }
 }

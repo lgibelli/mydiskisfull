@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use mdif_macos::fsevents::{self, Stream, flag};
 use mdif_macos::{fs, proc};
 
+use crate::alerts;
 use crate::forecast::{DAY, HOUR};
 use crate::incidents::{self, ChurnParams, GrowthParams, Incident};
 use crate::map::DATA_ROOT;
@@ -43,6 +44,9 @@ pub struct Watcher {
     cost: Cost,
     owners: Option<Owners>,
     detect: Detect,
+    /// The thresholds the user set (`mdif alerts`), read again before each
+    /// owners period, so a change applies within one without a restart.
+    user: alerts::Settings,
     /// Sizes of owners measured for the growth clauses, and when.
     sizes: HashMap<String, (i64, Option<u64>)>,
     /// Bytes each process wrote since the last owners period.
@@ -58,6 +62,21 @@ pub struct Watcher {
 pub struct Detect {
     pub growth: GrowthParams,
     pub churn: ChurnParams,
+}
+
+impl Detect {
+    /// With the sizes the user set instead of these (see [`alerts`]); the
+    /// clauses stay.
+    pub fn with_user(&self, s: &alerts::Settings) -> Detect {
+        let mut d = self.clone();
+        if let Some(b) = s.growth_min {
+            d.growth.min_growth = b;
+        }
+        if let Some(b) = s.churn_per_hour {
+            d.churn.min_written = (b as i128 * d.churn.window as i128 / HOUR as i128) as u64;
+        }
+        d
+    }
 }
 
 /// How long a measured owner size is reused.
@@ -226,6 +245,7 @@ impl Watcher {
             cost: Cost::default(),
             owners: None,
             detect: Detect::default(),
+            user: alerts::Settings::default(),
             sizes: HashMap::new(),
             period_writes: HashMap::new(),
             access_probes: Vec::new(),
@@ -249,7 +269,7 @@ impl Watcher {
     /// A folder that changes by less than a fifth of the slowest growth an
     /// incident can have is steady, and is listed less often.
     fn set_steady(&mut self) {
-        let g = &self.detect.growth;
+        let g = self.detect.with_user(&self.user).growth;
         if let Some(o) = &mut self.owners {
             let per_period = g.min_growth as i128 * o.every as i128 / g.sustain.max(1) as i128;
             o.tracker.steady_below((per_period / 5) as u64);
@@ -277,6 +297,7 @@ impl Watcher {
         } else {
             PathBuf::from(&self.key)
         };
+        self.user = alerts::Settings::load(&self.store)?;
         self.owners = Some(Owners {
             tracker: Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1)),
             root,
@@ -329,6 +350,13 @@ impl Watcher {
                 })
             }
         };
+        if self.owners.as_ref().is_some_and(|o| o.due(now)) {
+            let user = alerts::Settings::load(&self.store)?;
+            if user != self.user {
+                self.user = user;
+                self.set_steady();
+            }
+        }
         let (growth, period) = match self.owners.as_mut() {
             Some(o) if o.due(now) => {
                 let heavy: Vec<i32> = self
@@ -422,7 +450,7 @@ impl Watcher {
         avail: u64,
         grace: i64,
     ) -> Result<(Vec<Incident>, Vec<Incident>)> {
-        let Detect { growth, churn } = &self.detect;
+        let Detect { growth, churn } = &self.detect.with_user(&self.user);
         let series = self.store.growth_series(now - growth.sustain - HOUR)?;
         let sizes = &mut self.sizes;
         let mut found = incidents::growth(
@@ -443,6 +471,7 @@ impl Watcher {
                 let opts = scan::Options {
                     max_depth: 0,
                     min_node: u64::MAX,
+                    big_files: None,
                 };
                 let size = scan::scan(Path::new(owner), &opts)
                     .ok()
@@ -756,6 +785,40 @@ mod tests {
         let old = parse_cost("2 1000 10").unwrap();
         assert_eq!(old.per_sample().0, Duration::from_micros(500));
         assert!(parse_cost("garbage").is_none());
+    }
+
+    #[test]
+    fn the_users_sizes_replace_the_defaults_and_nothing_else() {
+        let d = Detect::default();
+        assert_eq!(
+            d.with_user(&alerts::Settings::default()).growth.min_growth,
+            incidents::MIN_GROWTH
+        );
+        let s = alerts::Settings {
+            growth_min: Some(5_000_000_000),
+            churn_per_hour: Some(2_000_000_000),
+            ..alerts::Settings::default()
+        };
+        let u = d.with_user(&s);
+        assert_eq!(u.growth.min_growth, 5_000_000_000);
+        assert_eq!(u.churn.min_written, 2_000_000_000);
+        assert_eq!(
+            (u.growth.min_r2, u.growth.min_share, u.growth.horizon),
+            (d.growth.min_r2, d.growth.min_share, d.growth.horizon)
+        );
+        assert_eq!(
+            (u.churn.min_quarters, u.churn.max_kept),
+            (d.churn.min_quarters, d.churn.max_kept)
+        );
+        // Per hour: a half-hour window needs half as much.
+        let half = Detect {
+            churn: ChurnParams {
+                window: HOUR / 2,
+                ..ChurnParams::default()
+            },
+            ..Detect::default()
+        };
+        assert_eq!(half.with_user(&s).churn.min_written, 1_000_000_000);
     }
 
     #[test]

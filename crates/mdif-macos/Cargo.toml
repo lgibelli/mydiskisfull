@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 libc.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

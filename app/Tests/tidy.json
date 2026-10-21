@@ -1,0 +1,61 @@
+{
+  "tidies": [
+    {
+      "id": "simulators",
+      "title": "Old simulators",
+      "detail": "Simulator runtimes not used in 60 days, and the simulators left without one. Xcode downloads a runtime again when you need it.",
+      "on": false,
+      "available": false,
+      "unavailable_why": "Needs Xcode, which isn't installed.",
+      "last": null
+    },
+    {
+      "id": "builds",
+      "title": "Old build folders",
+      "detail": "A project's build output (Rust's target, Flutter's and Gradle's build, Swift's .build, .next, dist) that nothing has built into or run from for 14 days. Its next build makes it again, from scratch.",
+      "on": false,
+      "available": true,
+      "unavailable_why": null,
+      "last": null
+    },
+    {
+      "id": "node-modules",
+      "title": "Old node_modules",
+      "detail": "A project's node_modules that nothing has installed into or run from for 14 days. npm, yarn, pnpm or bun puts it back from the lockfile, downloading what isn't in its cache.",
+      "on": false,
+      "available": true,
+      "unavailable_why": null,
+      "last": null
+    },
+    {
+      "id": "incremental",
+      "title": "Old Rust build caches",
+      "detail": "A Rust build's incremental caches no build has used for 30 days: the next build of that project's own crates is slower, nothing else.",
+      "on": true,
+      "available": true,
+      "unavailable_why": null,
+      "last": {
+        "at": 1792600000,
+        "freed": 3200000000,
+        "done": 2,
+        "failed": 0,
+        "note": "Deleted the old incremental caches of 2 Rust projects"
+      }
+    },
+    {
+      "id": "caches",
+      "title": "Caches apps stopped using",
+      "detail": "App and tool caches nothing has written to for 30 days, emptied while their app is closed; the app makes what it needs again.",
+      "on": true,
+      "available": true,
+      "unavailable_why": null,
+      "last": {
+        "at": 1792603600,
+        "freed": 0,
+        "done": 0,
+        "failed": 1,
+        "note": null
+      }
+    }
+  ]
+}

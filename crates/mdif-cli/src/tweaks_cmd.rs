@@ -391,7 +391,8 @@ fn value_text(s: &Setting, v: Option<&Value>) -> String {
 pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     let home = home();
     let store = store(db)?;
-    let list = suggest::gather(&home, volume, store.as_ref(), unix_now())?;
+    let keep = crate::keep_cmd::load(db)?;
+    let list = suggest::gather(&home, volume, store.as_ref(), &keep, unix_now())?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
@@ -424,8 +425,20 @@ pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
             _ => "Fix",
         };
         println!("    {label}: {}", fix_line(&s.fix));
+        if let Some(a) = &s.action {
+            let paths: Vec<String> = a.paths.iter().map(|p| shell_quote(p)).collect();
+            println!(
+                "    Or `mdif clean {}`: {}, after checking again.",
+                paths.join(" "),
+                a.label.to_lowercase()
+            );
+        }
     }
     Ok(())
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A fix as printed: commands' paths already quoted, but control characters

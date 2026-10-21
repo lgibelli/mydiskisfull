@@ -1,5 +1,5 @@
 //! System-wide facts: when the Mac last started, how much swap it holds, and
-//! whether this process may look everywhere.
+//! whether this process may look everywhere; and running in the background.
 
 use std::ffi::CString;
 use std::fs::File;
@@ -33,6 +33,32 @@ pub fn full_disk_access(probes: &[PathBuf]) -> Option<bool> {
     refused.then_some(false)
 }
 
+/// The home folder of the account this process runs as, from the user
+/// database rather than `$HOME` (which, in the App Sandbox, is the app's
+/// container).
+pub fn account_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut pw = MaybeUninit::<libc::passwd>::uninit();
+    let mut found = std::ptr::null_mut();
+    let mut buf = vec![0 as libc::c_char; 4096];
+    // SAFETY: getpwuid_r writes `pw` and strings into `buf`, and sets
+    // `found` to `pw` on success.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            pw.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut found,
+        )
+    };
+    if rc != 0 || found.is_null() {
+        return None;
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(pw.assume_init().pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
 /// Send this process's standard error to `file`. A LaunchAgent inside an app
 /// can't name a log in the user's home folder, so the watcher opens its own.
 pub fn redirect_stderr(file: &File) -> io::Result<()> {
@@ -58,6 +84,61 @@ pub fn swap_used() -> io::Result<u64> {
     // SAFETY: `xsw_usage` is plain data, and `vm.swapusage` is one of them.
     let x: libc::xsw_usage = unsafe { sysctl("vm.swapusage")? };
     Ok(x.xsu_used)
+}
+
+/// Seconds the local time zone is ahead of UTC at unix time `ts` (summer
+/// time included); 0 if it can't be told.
+pub fn utc_offset(ts: i64) -> i64 {
+    let t: libc::time_t = ts;
+    let mut tm = MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: `localtime_r` writes one `tm` into the buffer it's given, and
+    // returns null (leaving it unset) only on failure.
+    let ok = unsafe { !libc::localtime_r(&t, tm.as_mut_ptr()).is_null() };
+    if ok {
+        // SAFETY: set by the successful call above.
+        unsafe { tm.assume_init() }.tm_gmtoff
+    } else {
+        0
+    }
+}
+
+/// While it lives, this process runs in the background state: the lowest
+/// scheduling priority, throttled disk I/O. Dropping it puts the process
+/// back as it was (a LaunchAgent with `ProcessType` Background stays there).
+pub struct Background {
+    was: bool,
+}
+
+/// Puts this process in the background state ([`Background`]).
+pub fn background() -> io::Result<Background> {
+    let was = in_background();
+    if !was {
+        set_background(true)?;
+    }
+    Ok(Background { was })
+}
+
+/// Whether this process is in the background state.
+pub fn in_background() -> bool {
+    // SAFETY: plain call; `who` 0 is this process. It returns 0 or 1.
+    unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) == 1 }
+}
+
+fn set_background(on: bool) -> io::Result<()> {
+    let prio = if on { libc::PRIO_DARWIN_BG } else { 0 };
+    // SAFETY: plain call; `who` 0 is this process.
+    if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, prio) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        if !self.was {
+            let _ = set_background(false);
+        }
+    }
 }
 
 /// # Safety
@@ -92,6 +173,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_local_offset_is_a_real_one() {
+        let off = utc_offset(1_792_600_000);
+        assert!(off.abs() <= 14 * 3600 && off % 900 == 0, "{off}");
+    }
+
+    #[test]
     fn booted_in_the_past() {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -112,6 +199,22 @@ mod tests {
         // The real probes exist on every Mac, so the answer is known.
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
         assert!(full_disk_access(&access_probes(&home)).is_some());
+    }
+
+    #[test]
+    fn background_while_the_guard_lives() {
+        let before = in_background();
+        {
+            let _bg = background().unwrap();
+            assert!(in_background());
+        }
+        assert_eq!(in_background(), before);
+    }
+
+    #[test]
+    fn account_home_is_a_folder() {
+        let home = account_home().unwrap();
+        assert!(home.is_absolute() && home.is_dir(), "{}", home.display());
     }
 
     #[test]

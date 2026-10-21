@@ -1,11 +1,13 @@
 // The watcher: `mdif watch` as a LaunchAgent that the app registers with
 // SMAppService. Its plist is in Contents/Library/LaunchAgents and runs the
 // mdif next to the app, so it moves and updates with the app, and shows in
-// System Settings → Login Items under the app's name.
+// System Settings → Login Items under the app's name. The App Store edition
+// runs it as a child of the app instead (Sandboxed.swift).
 
 import AppKit
 import ServiceManagement
 
+#if !APP_STORE
 @MainActor
 final class WatcherService: ObservableObject {
     static let label = "io.github.lgibelli.mydiskisfull.watcher"
@@ -105,6 +107,7 @@ final class WatcherService: ObservableObject {
         }
     }
 }
+#endif
 
 /// Full Disk Access: without it macOS keeps the watcher out of other apps'
 /// folders, so their growth goes unseen.

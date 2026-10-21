@@ -19,9 +19,33 @@ final class Monitor: ObservableObject {
     @Published private(set) var detail: ForecastDetail?
     @Published private(set) var suggestions: [Suggestion]?
     @Published private(set) var tweaks: [TweakInfo]?
+    /// What is never suggested for deleting, cleaning or moving.
+    @Published private(set) var kept: [Kept]?
+    /// Clean-ups under way, by their first path.
+    @Published private(set) var cleaning: Set<String> = []
     @Published private(set) var measuring = false
+    /// Clean-ups the watcher does once a day, when they're on.
+    @Published private(set) var tidies: [Tidy]?
+    /// Being switched or run, by id.
+    @Published private(set) var tidyBusy: Set<String> = []
+    /// Where the space goes, from a whole-disk scan `mdif` caches.
+    @Published private(set) var space: SpaceReport?
+    @Published private(set) var spaceMeasuring = false
+    @Published private(set) var spaceError: String?
+    #if !APP_STORE
+    /// Tweaks applied or undone here that no measurement has read since: the
+    /// switch shows the new state meanwhile.
+    @Published private(set) var tweaksChanging: [String: Bool] = [:]
+    /// When one was last applied or undone here.
+    private var tweakChanged = Date.distantPast
+    #endif
+    private var measureAgain = false
     @Published private(set) var lastRefresh: Date?
 
+    #if APP_STORE
+    /// Taken up first: every `mdif`, the watcher's too, inherits it.
+    let access = DiskAccess()
+    #endif
     let watcher = WatcherService()
     let settings = AppSettings()
     #if !APP_STORE
@@ -67,7 +91,11 @@ final class Monitor: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.wokeAt = Date() }
         }
+        #if APP_STORE
+        watcher.resume()
+        #else
         watcher.restartIfUpdated()
+        #endif
         #if !APP_STORE
         // Sparkle's daily schedule starts with it, not when a window asks.
         _ = updates
@@ -101,6 +129,18 @@ final class Monitor: ObservableObject {
         watcher.refresh()
     }
 
+    /// Everything read again now, the whole-disk measure too: Refresh (⌘R).
+    func refreshAll() {
+        Task {
+            measuredAt = nil
+            await refresh()
+            await loadDetail()
+            await measure()
+            await loadTidies()
+            await loadSpace(refresh: true)
+        }
+    }
+
     /// Someone is looking: make what they see current.
     func viewed() {
         if lastRefresh.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
@@ -125,15 +165,210 @@ final class Monitor: ObservableObject {
 
     /// Suggestions and tweaks, which size the folders they're about.
     func measure() async {
-        guard !measuring else { return }
+        // Asked for while one runs, which may have started before a change:
+        // it runs again once that one is done.
+        guard !measuring else {
+            measureAgain = true
+            return
+        }
         measuring = true
         defer { measuring = false }
-        async let t = try? Core.json([TweakInfo].self, ["tweaks"])
-        async let s = try? Core.json([Suggestion].self, ["suggest"])
-        let (tw, sg) = await (t, s)
-        if let tw { tweaks = tw }
-        if let sg { suggestions = sg }
-        measuredAt = Date()
+        repeat {
+            measureAgain = false
+            #if APP_STORE
+            // Its tweaks are only advice: no need to read other apps' settings.
+            if let sg = try? await Core.json([Suggestion].self, ["suggest"]) { suggestions = notKept(sg) }
+            #else
+            let started = Date()
+            async let t = try? Core.json([TweakInfo].self, ["tweaks"])
+            async let s = try? Core.json([Suggestion].self, ["suggest"])
+            let (tw, sg) = await (t, s)
+            // Read before a tweak changed, it would put back the old state.
+            if let tw, started > tweakChanged {
+                tweaks = tw
+                tweaksChanging = [:]
+            }
+            if let sg { suggestions = notKept(sg) }
+            #endif
+            measuredAt = Date()
+        } while measureAgain
+    }
+
+    // MARK: - Where the space goes
+
+    /// A scan younger than this is shown as it is.
+    static let spaceMaxAge: Int = 6 * 3600
+
+    /// The breakdown, from the cache when it's recent; `refresh` measures
+    /// again (about a minute for a full disk).
+    func loadSpace(refresh: Bool = false) async {
+        guard !spaceMeasuring, spaceReadable else { return }
+        spaceMeasuring = true
+        defer { spaceMeasuring = false }
+        let args = ["space"] + (refresh ? ["--refresh"] : ["--max-age", "\(Self.spaceMaxAge)"])
+        do {
+            space = try await Core.json(SpaceReport.self, args, timeout: 900)
+            spaceError = nil
+        } catch {
+            spaceError = error.localizedDescription
+        }
+    }
+
+    /// Changes what raises a notification (`mdif alerts set`), then reads
+    /// the status, which carries it.
+    func setAlert(_ key: String, _ value: String) {
+        Task {
+            do {
+                _ = try await Core.json(AlertSettings.self, ["alerts", "set", key, value], timeout: 30)
+            } catch {
+                log.error("alerts set \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+            await refresh()
+        }
+    }
+
+    func loadTidies() async {
+        if let list = try? await Core.json(TidyList.self, ["tidy"], timeout: 30) {
+            tidies = list.tidies
+        }
+    }
+
+    #if !APP_STORE
+    /// Turns one on or off; `mdif tidy` prints the list as it is then.
+    func setTidy(_ id: String, on: Bool) {
+        guard !tidyBusy.contains(id) else { return }
+        tidyBusy.insert(id)
+        Task {
+            defer { tidyBusy.remove(id) }
+            do {
+                tidies = try await Core.json(TidyList.self, ["tidy", on ? "on" : "off", id], timeout: 30).tidies
+            } catch {
+                TweakFlow.show(.warning, "Couldn't change it", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Runs one now, instead of waiting for the watcher's daily turn.
+    func tidyNow(_ id: String) {
+        guard !tidyBusy.contains(id) else { return }
+        tidyBusy.insert(id)
+        Task {
+            defer { tidyBusy.remove(id) }
+            let r: TidyRun
+            do {
+                r = try await Core.json(TidyRun.self, ["tidy", "run", id], timeout: 1800)
+            } catch {
+                TweakFlow.show(.warning, "Nothing was tidied", error.localizedDescription)
+                return
+            }
+            var lines: [String] = []
+            lines.append(r.done.isEmpty ? "Nothing needed tidying." : "The disk has \(Format.bytes(r.freed)) more free.")
+            if !r.failed.isEmpty {
+                lines.append("Not done:\n" + r.failed.map { "• \($0.why)" }.joined(separator: "\n"))
+            }
+            TweakFlow.show(.informational, r.done.isEmpty ? "All tidy" : "Tidied", lines.joined(separator: "\n\n"))
+            await loadTidies()
+            if !r.done.isEmpty {
+                measuredAt = nil
+                await refresh()
+                await loadSpace()
+            }
+        }
+    }
+    #endif
+
+    /// Whether `mdif space` can see the disk. In the App Sandbox, only when
+    /// the whole disk was chosen, not one folder.
+    var spaceReadable: Bool {
+        #if APP_STORE
+        access.wholeDisk
+        #else
+        true
+        #endif
+    }
+
+    /// Each suggestion goes with the first item it's about (its folder, or
+    /// one in it or around it), biggest kinds first, and shows there.
+    var placements: [String: Suggestion] {
+        guard let r = space, let list = suggestions else { return [:] }
+        var out: [String: Suggestion] = [:]
+        var placed = Set<String>()
+        for k in r.kinds {
+            // "Not measured" has no path: it's about nothing.
+            for i in k.items where !i.path.isEmpty {
+                let p = Self.dataless(i.path)
+                if let s = list.first(where: { s in
+                    guard let sp = s.path.map(Self.dataless), !placed.contains(s.cause) else { return false }
+                    return sp == p || p.hasPrefix(sp + "/") || sp.hasPrefix(p + "/")
+                }) {
+                    out[i.path] = s
+                    placed.insert(s.cause)
+                }
+            }
+        }
+        return out
+    }
+
+    func suggestion(about item: SpaceReport.Item) -> Suggestion? { placements[item.path] }
+
+    /// The suggestion made from an incident: it carries the incident's
+    /// button (Restart, Delete).
+    func suggestion(for e: Episode) -> Suggestion? {
+        suggestions?.first { $0.cause == e.sentence }
+    }
+
+    /// Suggestions shown neither with an item nor under Needs Attention.
+    var unplacedSuggestions: [Suggestion] {
+        let placed = Set(placements.values.map(\.cause))
+        let incidents = Set((status?.incidents ?? []).map(\.sentence))
+        return (suggestions ?? []).filter { !placed.contains($0.cause) && !incidents.contains($0.cause) }
+    }
+
+    /// A path as the home folder sees it: the Data volume's firmlink prefix off.
+    private static func dataless(_ p: String) -> String {
+        let data = "/System/Volumes/Data"
+        return p.hasPrefix(data + "/") ? String(p.dropFirst(data.count)) : p
+    }
+
+    // MARK: - What you keep
+
+    /// Kept since the app started: a measurement under way when it was
+    /// kept doesn't know yet, so its suggestions are left out here.
+    private var keptNow: [String] = []
+
+    private func notKept(_ list: [Suggestion]) -> [Suggestion] {
+        list.filter { s in
+            !keptNow.contains { k in s.path == k || s.path?.hasPrefix(k + "/") == true }
+        }
+    }
+
+    func loadKept() async {
+        if let k = try? await Core.json([Kept].self, ["keep"]) { kept = k }
+    }
+
+    /// Never suggest deleting, cleaning or moving these again.
+    func keep(_ paths: [String]) {
+        keptNow += paths
+        suggestions = suggestions.map(notKept)
+        Task {
+            do {
+                kept = try await Core.json([Kept].self, ["keep", "add"] + paths)
+            } catch {
+                keptNow.removeAll { paths.contains($0) }
+                log.error("keep: \(error.localizedDescription, privacy: .public)")
+            }
+            measuredAt = nil
+            await measure()
+        }
+    }
+
+    func unkeep(_ k: Kept) {
+        keptNow.removeAll { $0 == k.path }
+        Task {
+            if let list = try? await Core.json([Kept].self, ["keep", "remove", k.entry]) { kept = list }
+            measuredAt = nil
+            await measure()
+        }
     }
 
     func tweak(_ id: String) -> TweakInfo? { tweaks?.first { $0.id == id } }
@@ -161,7 +396,28 @@ final class Monitor: ObservableObject {
         return nil
     }
 
+    #if APP_STORE
+    /// In the App Sandbox: no disk chosen yet, so only free space is watched.
+    var lacksFullDiskAccess: Bool { !access.granted }
+
+    /// The disk (or a folder) was chosen: everything that reads it starts
+    /// again to see it.
+    func chooseDisk() {
+        guard access.choose() else { return }
+        objectWillChange.send()
+        watcher.restart()
+        measuredAt = nil
+        space = nil
+        Task {
+            await refresh()
+            await measure()
+            await MapModel.shared.measure()
+            await loadSpace(refresh: true)
+        }
+    }
+    #else
     var lacksFullDiskAccess: Bool { status?.access?.fullDiskAccess == false }
+    #endif
 
     /// Something a person should look at.
     var needsAttention: Bool {
@@ -190,7 +446,12 @@ final class Monitor: ObservableObject {
         // Incidents.
         let known = Set(d.stringArray(forKey: Keys.incidents) ?? [])
         let open = Set(s.incidents.map(\.id))
-        for e in s.incidents where !known.contains(e.id) {
+        // What Settings → Notifications turned off is still shown, not
+        // announced.
+        let wanted: (Episode) -> Bool = { e in
+            e.incident.kind == .growth ? (s.alerts?.notifyGrowth ?? true) : (s.alerts?.notifyChurn ?? true)
+        }
+        for e in s.incidents where !known.contains(e.id) && wanted(e) {
             let title: String? = if case .tweak(let id) = e.fix { tweak(id)?.title } else { nil }
             Notifier.incident(e, tweakTitle: title)
         }
@@ -202,7 +463,10 @@ final class Monitor: ObservableObject {
         let notified = Alert(rank: d.integer(forKey: Keys.level))
         let now = Date().timeIntervalSince1970
         if s.alert > notified {
-            Notifier.alert(s)
+            // Almost full is always said; the forecast only if wanted.
+            if s.alert == .low || (s.alerts?.notifyForecast ?? true) {
+                Notifier.alert(s)
+            }
             d.set(s.alert.rank, forKey: Keys.level)
             d.removeObject(forKey: Keys.lowerSince)
         } else if s.alert < notified {
@@ -245,18 +509,38 @@ final class Monitor: ObservableObject {
 
     #if !APP_STORE
     func apply(_ id: String) {
-        Task {
-            if await TweakFlow.apply(id) { await afterTweak() }
-        }
+        Task { await afterTweak(id, await TweakFlow.apply(id), on: true) }
     }
 
     func revert(_ id: String) {
+        Task { await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false) }
+    }
+
+    /// Does a suggestion's clean-up, then measures again.
+    func clean(_ a: CleanAction) {
+        guard !a.paths.isEmpty, cleaning.isDisjoint(with: a.paths) else { return }
+        cleaning.formUnion(a.paths)
         Task {
-            if await TweakFlow.revert(id, title: tweak(id)?.title ?? id) { await afterTweak() }
+            let done = await CleanFlow.run(a)
+            cleaning.subtract(a.paths)
+            if done {
+                suggestions = suggestions?.filter { $0.action?.paths != a.paths }
+                measuredAt = nil
+                await refresh()
+                await measure()
+                // `mdif clean` measured again what it changed: the breakdown
+                // follows at once, without a whole-disk scan.
+                await loadSpace()
+            }
         }
     }
 
-    private func afterTweak() async {
+    /// The switch shows the new state at once; the measurement that follows
+    /// says how it really is.
+    private func afterTweak(_ id: String, _ outcome: TweakFlow.Outcome, on: Bool) async {
+        guard outcome != .unchanged else { return }
+        tweakChanged = Date()
+        if outcome == .done { tweaksChanging[id] = on }
         measuredAt = nil
         await refresh()
         await measure()

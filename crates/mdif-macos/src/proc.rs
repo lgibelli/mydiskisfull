@@ -150,6 +150,98 @@ fn all_pids() -> Vec<i32> {
     pids
 }
 
+/// An app, by its bundle on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct App {
+    pub pid: i32,
+    /// The bundle's name, "Safari" for Safari.app.
+    pub name: String,
+    pub bundle: std::path::PathBuf,
+}
+
+/// The app `pid` works for: the process macOS holds responsible for it
+/// (Activity Monitor's account), which for an app's helper, such as
+/// WebKit's networking process, is the app that started it. `None` when
+/// that isn't an app.
+pub fn responsible_app(pid: i32) -> Option<App> {
+    let r = responsible(pid).unwrap_or(pid);
+    let bundle = outermost_app(&path(r)?)?;
+    Some(App {
+        pid: r,
+        name: bundle.file_stem()?.to_string_lossy().into_owned(),
+        bundle,
+    })
+}
+
+/// Private, but what Activity Monitor uses; looked up when needed, so a
+/// macOS without it only loses the app's name.
+fn responsible(pid: i32) -> Option<i32> {
+    type Responsible = unsafe extern "C" fn(libc::pid_t) -> libc::pid_t;
+    static FOUND: std::sync::OnceLock<Option<Responsible>> = std::sync::OnceLock::new();
+    let f = (*FOUND.get_or_init(|| {
+        let sym = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"responsibility_get_pid_responsible_for_pid".as_ptr(),
+            )
+        };
+        (!sym.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, Responsible>(sym) })
+    }))?;
+    let r = unsafe { f(pid) };
+    (r > 0).then_some(r)
+}
+
+/// Asks `pid` to end (SIGTERM), as Activity Monitor's Quit does to a
+/// process without windows.
+pub fn terminate(pid: i32) -> std::io::Result<()> {
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Ends `pid` at once (SIGKILL), as Activity Monitor's Force Quit does: for
+/// a process that doesn't end when asked.
+pub fn force_quit(pid: i32) -> std::io::Result<()> {
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Whether `pid` is still running.
+pub fn alive(pid: i32) -> bool {
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The executable `pid` runs.
+pub fn path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(std::ffi::OsString::from_vec(buf).into())
+}
+
+/// The outermost `.app` an executable is in: a helper app inside an app's
+/// bundle belongs to that app.
+fn outermost_app(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut at = std::path::PathBuf::new();
+    for c in exe.components() {
+        at.push(c);
+        if at.extension().is_some_and(|e| e == "app") {
+            return Some(at);
+        }
+    }
+    None
+}
+
 fn owner(pid: i32) -> Option<u32> {
     let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
     let size = size_of::<libc::proc_bsdshortinfo>() as c_int;
@@ -196,6 +288,26 @@ mod tests {
         let after = own_processes().into_iter().find(|p| p.pid == me).unwrap();
         assert!(after.bytes_written >= before.bytes_written);
         assert!(!after.name.is_empty());
+    }
+
+    #[test]
+    fn an_apps_helper_belongs_to_the_outermost_app() {
+        let p = std::path::Path::new(
+            "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/\
+             Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper",
+        );
+        assert_eq!(
+            outermost_app(p).as_deref(),
+            Some(std::path::Path::new("/Applications/Google Chrome.app"))
+        );
+        assert_eq!(
+            outermost_app(std::path::Path::new("/usr/libexec/cfprefsd")),
+            None
+        );
+        // Some process is responsible for this one (a terminal, say).
+        let me = std::process::id() as i32;
+        assert!(responsible(me).is_some_and(|r| r > 0));
+        assert!(path(me).is_some_and(|p| p.is_absolute()));
     }
 
     #[test]
