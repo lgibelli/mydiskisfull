@@ -160,7 +160,7 @@ is kept in the history's `meta` table with its switch; what it deleted goes to t
 **What apps keep** (`handlers.rs`): a catalogue of folders by their place under the home folder
 (`*` for one name), each with what it is, how to make it smaller in its app or in macOS, and the
 app or Settings page to open. `mdif space` gives an item the biggest one found in it (`about`),
-and the Space page lists the biggest under Inside Your Apps. A handler can also say the folder
+and the Space page shows it with the item when its kind is opened on the bar. A handler can also say the folder
 itself can go to the Trash (`trash`: a cloud folder left behind), which `mdif clean` then takes. Only ways known to work are given; a
 handler that can do it safely itself becomes a clean kind instead.
 

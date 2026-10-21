@@ -50,7 +50,9 @@ All notable changes to this project are documented here. The format is based on
   mailboxes, iPhone backups, the old Outlook's mailbox, Teams' web cache, Telegram's media,
   Spotify's cache, Slack, Spotlight's processing, Android emulators and the Photos library are
   recognised in an item, each with what it is, how to make it smaller in the app or in macOS,
-  and a button to open the place. The biggest are under Inside Your Apps, at the top.
+  and a button to open the place. It shows with the item when you click its kind on the Space
+  bar (App data, Mail and Messages), past the first few if need be; Apps points to App data,
+  where what apps keep is. A folder you keep gets no advice to make it smaller.
 - Delete node_modules, for a project whose lockfile says what `npm install` puts back; the
   button says it downloads what isn't in npm's cache.
 - Empty Trash: the Trash shows apart from what comes back by itself (it doesn't), measured

@@ -112,8 +112,9 @@ struct MainWindow: View {
             .navigationTitle(nav.pane.title)
             // On the page's side of the window, not over the sidebar.
             .toolbar {
-                // At the window's trailing edge, where a Mac app's Refresh goes.
-                ToolbarItem(placement: .primaryAction) {
+                // At the window's trailing edge, where a Mac app's Refresh
+                // goes (.primaryAction is the leading edge on the Mac).
+                ToolbarItem(placement: .automatic) {
                     if monitor.spaceMeasuring {
                         ProgressView().controlSize(.small)
                             .help("Measuring the whole disk…")
@@ -126,7 +127,7 @@ struct MainWindow: View {
                         .help("Measure everything again (⌘R)")
                     }
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItem(placement: .automatic) {
                     Button {
                         nav.openSettings()
                     } label: {

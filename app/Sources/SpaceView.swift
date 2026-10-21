@@ -1,10 +1,11 @@
 // Where the space goes: one bar for the whole disk, split by kind (apps,
 // build output, caches, macOS…); a click on a kind opens it under the bar,
-// its biggest items with what can be done; then what apps keep. What may
-// not be needed is marked on each: an app not opened in months, files
-// unchanged for a year, build output, caches. A suggestion about an item shows with it (its growth, its
-// button); the rest follow under More Fixes. What looks forgotten is on
-// Cruft. From `mdif space`, a whole-disk scan it caches.
+// its biggest items with what can be done, and what an app says about one
+// (Signal's attachments, Spotlight's index) with it. What may not be needed
+// is marked on each: an app not opened in months, files unchanged for a
+// year, build output, caches. A suggestion about an item shows with it (its
+// growth, its button); the rest follow under More Fixes. What looks
+// forgotten is on Cruft. From `mdif space`, a whole-disk scan it caches.
 
 import AppKit
 import SwiftUI
@@ -57,8 +58,10 @@ struct SpaceSection: View {
                     }
                     if let id = selected, let k = r.kinds.first(where: { $0.id == id }) {
                         Divider()
-                        KindInline(kind: k, monitor: monitor) {
-                            withAnimation(.snappy) { selected = nil }
+                        // What the apps keep isn't in them: it's under App data.
+                        let data = k.id == "apps" ? r.kinds.first { $0.id == "appdata" } : nil
+                        KindInline(kind: k, see: data, monitor: monitor) { id in
+                            withAnimation(.snappy) { selected = id }
                         }
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     } else {
@@ -69,14 +72,6 @@ struct SpaceSection: View {
                     }
                 }
                 .card(padding: 16)
-                // What looks forgotten is on Cruft, with its button.
-                let inside = SpaceText.insideApps(r, besides: SpaceText.forgotten(r))
-                if !inside.isEmpty {
-                    HighlightCard(title: "Inside your apps",
-                                  subtitle: "What apps keep on this Mac, and where each lets you make it smaller.",
-                                  symbol: "square.stack.3d.up.fill", tint: .blue,
-                                  items: inside, size: { $0.about?.bytes ?? $0.bytes }, monitor: monitor)
-                }
             } else if let e = monitor.spaceError, !monitor.spaceMeasuring {
                 Label(e, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -525,8 +520,11 @@ private struct AboutBox: View {
 /// you may not need, and its items, with ✕ to close it.
 private struct KindInline: View {
     let kind: SpaceReport.Kind
+    /// Another kind to point to (Apps: App data, where what they keep is).
+    let see: SpaceReport.Kind?
     @ObservedObject var monitor: Monitor
-    let close: () -> Void
+    /// Opens another kind, or closes this one with nil.
+    let select: (String?) -> Void
 
     var body: some View {
         let k = kind
@@ -543,12 +541,22 @@ private struct KindInline: View {
                 Text(Format.bytes(k.bytes))
                     .font(.system(.title3, design: .rounded).weight(.semibold))
                     .monospacedDigit()
-                Button(action: close) {
+                Button { select(nil) } label: {
                     Image(systemName: "xmark.circle.fill").font(.title3)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
                 .help("Close")
+            }
+            if let d = see {
+                Button { select(d.id) } label: {
+                    Label("What they keep (data, attachments, caches) is under \(d.title): \(Format.bytes(d.bytes))",
+                          systemImage: "arrow.right.circle.fill")
+                }
+                .buttonStyle(.link)
+                .font(.callout)
+                .padding(.top, 10)
+                .padding(.leading, 18)
             }
             KindCaches(kind: k, monitor: monitor)
             KindList(kind: k, monitor: monitor)
@@ -603,16 +611,19 @@ private struct KindList: View {
 
     var body: some View {
         let k = kind
-        let shown = all ? k.items : Array(k.items.prefix(Self.first))
+        // The first few, and any an app has something to say about.
+        let shown = all ? k.items : k.items.enumerated()
+            .filter { $0.offset < Self.first || SpaceText.advised($0.element) }.map(\.element)
+        let hidden = k.items.count - shown.count
         // What isn't listed, so the rows add up to the kind.
-        let rest = k.bytes - k.items.reduce(0) { $0 + $1.bytes }
+        let rest = k.bytes - shown.reduce(0) { $0 + $1.bytes }
         VStack(spacing: 0) {
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, item in
                 if i > 0 { Divider().padding(.leading, 18) }
                 ItemRow(item: item, suggestion: monitor.suggestion(about: item), monitor: monitor)
             }
-            if k.items.count > Self.first {
-                Button(all ? "Show Fewer" : "Show \(k.items.count - Self.first) More") {
+            if all || hidden > 0 {
+                Button(all ? "Show Fewer" : "Show \(hidden) More") {
                     withAnimation(.snappy) { all.toggle() }
                 }
                 .buttonStyle(.link)
@@ -625,15 +636,13 @@ private struct KindList: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Everything else").font(.callout.weight(.medium))
-                        Text(all || k.items.count <= Self.first
+                        Text(hidden == 0
                              ? "In folders too small to list on their own."
                              : "In the folders not shown above, and ones too small to list.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(Format.bytes(all || k.items.count <= Self.first
-                                      ? rest
-                                      : rest + k.items.dropFirst(Self.first).reduce(0) { $0 + $1.bytes }))
+                    Text(Format.bytes(rest))
                         .font(.system(.callout, design: .rounded).weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -716,7 +725,8 @@ struct ItemRow: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            if let about = i.about {
+            // Kept: no advice to make it smaller.
+            if let about = i.about, !i.has("kept") {
                 AboutBox(about: about, monitor: monitor)
             }
             if fix || keep {
@@ -869,14 +879,10 @@ enum SpaceText {
         return Array(all.prefix(limit))
     }
 
-    /// What apps keep that's worth a look, biggest first, without what's
-    /// on Cruft or what you keep (no advice to shrink it, either).
-    static func insideApps(_ r: SpaceReport, besides shown: [SpaceReport.Item]) -> [SpaceReport.Item] {
-        let ids = Set(shown.map(\.id))
-        let all = r.kinds.flatMap(\.items)
-            .filter { ($0.about?.bytes ?? 0) >= 500_000_000 && !ids.contains($0.id) && !$0.has("kept") }
-            .sorted { ($0.about?.bytes ?? 0) > ($1.about?.bytes ?? 0) }
-        return Array(all.prefix(6))
+    /// Whether an app says how to make it smaller, and it's worth a look:
+    /// listed with its kind even past the first few.
+    static func advised(_ i: SpaceReport.Item) -> Bool {
+        (i.about?.bytes ?? 0) >= 500_000_000 && !i.has("kept")
     }
 
     /// A kind's caches that can be emptied, biggest first.
