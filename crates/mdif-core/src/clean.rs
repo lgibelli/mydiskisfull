@@ -497,6 +497,12 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
             "{shown} isn't a file (a link to one isn't followed)."
         ));
     }
+    if let Some(link) = link_on_the_way(file, home) {
+        return Err(format!(
+            "{shown} is reached through a link ({}), which isn't followed.",
+            display(link, home)
+        ));
+    }
     if !file.starts_with(home) || !yours(file, home) {
         return Err(format!(
             "{shown}: MyDiskIsFull only moves your own files to the Trash, in your home \
@@ -847,11 +853,31 @@ fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
             "{shown}: MyDiskIsFull only deletes in your home folder."
         ));
     }
+    // Nor through a link on the way: `~/devel/link/target` with `link`
+    // pointing elsewhere is in the home folder by name only.
+    if let Some(link) = link_on_the_way(dir, home) {
+        return Err(format!(
+            "{shown} is reached through a link ({}), which isn't followed.",
+            display(link, home)
+        ));
+    }
     let same_volume = mdif_macos::fs::dev_of(dir).ok() == mdif_macos::fs::dev_of(home).ok();
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
     Ok(())
+}
+
+/// The first folder between `home` and `path` that is a link, if one is
+/// (none for a path outside `home`, which is refused for that).
+fn link_on_the_way<'p>(path: &'p Path, home: &Path) -> Option<&'p Path> {
+    if !path.starts_with(home) {
+        return None;
+    }
+    path.ancestors()
+        .skip(1)
+        .take_while(|a| *a != home)
+        .find(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
 }
 
 /// The app a process named `name` works for when it is an app's helper,
@@ -918,6 +944,26 @@ fn running(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_is_deleted_through_a_link_on_the_way() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let project = elsewhere.path().join("project");
+        std::fs::create_dir_all(project.join("target/debug")).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(h.join("devel")).unwrap();
+        std::os::unix::fs::symlink(&project, h.join("devel/link")).unwrap();
+        let through = h.join("devel/link/target");
+        let why = plan(&through, h, &Keep::default(), &[], &[]).unwrap_err();
+        assert!(why.contains("through a link"), "{why}");
+        assert!(deletable(&through, h).is_err());
+        // The same folder for real, in the home folder, is fine.
+        std::fs::create_dir_all(h.join("devel/real/target/debug")).unwrap();
+        std::fs::write(h.join("devel/real/Cargo.toml"), "").unwrap();
+        assert!(deletable(&h.join("devel/real/target"), h).is_ok());
+    }
 
     #[test]
     fn minecrafts_game_folder_goes_to_the_trash_with_its_worlds_named() {

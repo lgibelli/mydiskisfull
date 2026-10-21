@@ -209,6 +209,10 @@ All notable changes to this project are documented here. The format is based on
   before, only three within two weeks counted. Gaps in the samples are spread over their hours
   when they're up to two days long (a sleeping Mac consumes nothing) and unknown when longer.
 
+### Security
+- `mdif clean` and the app's buttons refuse a folder or file reached through a link on the way
+  (`~/devel/link/target` with `link` pointing elsewhere), as they already refused a link itself.
+
 ## [0.1.0] - 2026-10-20
 
 The first release.
