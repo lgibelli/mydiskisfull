@@ -27,6 +27,7 @@ const ATTR_CMN_DEVID: u32 = 0x0000_0002;
 const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
 const ATTR_CMN_CRTIME: u32 = 0x0000_0200;
 const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+const ATTR_CMN_ACCTIME: u32 = 0x0000_1000;
 const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const ATTR_CMN_FILEID: u32 = 0x0200_0000;
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
@@ -89,9 +90,11 @@ pub struct Entry {
     pub kind: Kind,
     /// Device the entry lives on; differs from its parent at a mount point.
     pub dev: i32,
-    /// Creation and modification time, seconds since the epoch.
+    /// Creation, modification and last access time, seconds since the
+    /// epoch. Reading them reads no file, so it changes no access time.
     pub crtime: i64,
     pub mtime: i64,
+    pub atime: i64,
     /// BSD `st_flags`.
     pub flags: u32,
     /// Inode number: the same for every hard link to a file.
@@ -182,6 +185,7 @@ pub fn read_dir_fd_with(fd: &OwnedFd, detail: Detail) -> io::Result<Vec<Entry>> 
             | ATTR_CMN_OBJTYPE
             | ATTR_CMN_CRTIME
             | ATTR_CMN_MODTIME
+            | ATTR_CMN_ACCTIME
             | ATTR_CMN_FLAGS
             | ATTR_CMN_FILEID,
         volattr: 0,
@@ -242,6 +246,10 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
     c.skip(8); // tv_nsec
     let mtime = c.i64()?;
     c.skip(8); // tv_nsec
+    // ATTR_CMN_ACCTIME comes after ATTR_CMN_MODTIME (and the change time,
+    // not asked for), in every record, folders' too.
+    let atime = c.i64()?;
+    c.skip(8); // tv_nsec
     let flags = c.u32()?;
     let inode = c.u64()?;
     let (nlink, logical, allocated) = if objtype == VDIR {
@@ -282,6 +290,7 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
         dev,
         crtime,
         mtime,
+        atime,
         flags,
         inode,
         nlink,
@@ -394,6 +403,7 @@ mod tests {
             let md = fs::symlink_metadata(p.join(&e.name)).unwrap();
             assert_eq!(e.dev as i64, md.dev() as i64, "{:?}", e.name);
             assert_eq!(e.mtime, md.mtime(), "{:?}", e.name);
+            assert_eq!(e.atime, md.atime(), "{:?}", e.name);
             assert_eq!(e.inode, md.ino(), "{:?}", e.name);
             if e.kind != Kind::Dir {
                 assert_eq!(e.nlink as u64, md.nlink(), "{:?}", e.name);
@@ -431,6 +441,35 @@ mod tests {
         assert_eq!(entry(&entries, "sub").kind, Kind::Dir);
         assert_eq!(entry(&entries, "link").kind, Kind::Symlink);
         assert!(entries.iter().all(|e| !e.is_dataless()));
+    }
+
+    #[test]
+    fn the_access_time_is_read_and_listing_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("old.bin");
+        fs::write(&p, b"data").unwrap();
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(at(1_500_000_000))
+                    .set_modified(at(1_400_000_000)),
+            )
+            .unwrap();
+        // A folder's record has no file attributes: what follows them must
+        // still line up.
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("z.bin"), b"after the folder").unwrap();
+        for _ in 0..2 {
+            let entries = read_dir(dir.path()).unwrap();
+            let e = entry(&entries, "old.bin");
+            assert_eq!((e.atime, e.mtime), (1_500_000_000, 1_400_000_000));
+            assert_eq!(entry(&entries, "sub").kind, Kind::Dir);
+            assert_eq!(entry(&entries, "z.bin").logical, 16);
+        }
     }
 
     #[test]

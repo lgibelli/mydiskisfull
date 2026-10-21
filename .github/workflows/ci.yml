@@ -123,19 +123,29 @@ jobs:
           test -n "$(plutil -extract SUPublicEDKey raw "$app/Info.plist")"
           codesign --verify --deep --strict build/MyDiskIsFull.app
       - run: app/check-contract.sh
-      - name: The App Store edition leaves the tweaks out and links the full version
+      - name: The App Store edition is sandboxed, leaves the tweaks out and links the full version
         run: |
           app/build.sh --app-store
-          codesign --verify --deep --strict build/AppStore/MyDiskIsFull.app
+          lite="build/AppStore/MyDiskIsFull Lite.app"
+          codesign --verify --deep --strict "$lite"
+          # The app and the mdif it runs, in the App Sandbox; mdif inherits it.
+          codesign -d --entitlements - --xml "$lite" | plutil -extract 'com\.apple\.security\.app-sandbox' raw - | grep -q true
+          codesign -d --entitlements - --xml "$lite/Contents/MacOS/mdif" | plutil -extract 'com\.apple\.security\.inherit' raw - | grep -q true
+          # The watcher runs inside the app: no LaunchAgent.
+          test ! -e "$lite/Contents/Library/LaunchAgents"
+          test "$(plutil -extract CFBundleName raw "$lite/Contents/Info.plist")" = "MyDiskIsFull Lite"
           full=build/MyDiskIsFull.app/Contents/MacOS/MyDiskIsFull
-          store=build/AppStore/MyDiskIsFull.app/Contents/MacOS/MyDiskIsFull
+          store="$lite/Contents/MacOS/MyDiskIsFull"
           # Text only the tweak flow has: in the full edition, not compiled into the other.
           strings "$full" | grep -q "so Undo puts it back"
           if strings "$store" | grep -q "so Undo puts it back"; then exit 1; fi
+          # The same for clean-ups: the store edition may only read the disk.
+          strings "$full" | grep -q "once you empty the Trash"
+          if strings "$store" | grep -q "once you empty the Trash"; then exit 1; fi
           strings "$store" | grep -q "Get the Full Version"
           # The App Store updates it: no Sparkle, no feed.
-          test ! -e build/AppStore/MyDiskIsFull.app/Contents/Frameworks/Sparkle.framework
-          if plutil -extract SUFeedURL raw build/AppStore/MyDiskIsFull.app/Contents/Info.plist 2>/dev/null; then exit 1; fi
+          test ! -e "$lite/Contents/Frameworks/Sparkle.framework"
+          if plutil -extract SUFeedURL raw "$lite/Contents/Info.plist" 2>/dev/null; then exit 1; fi
 
   intel:
     name: build (Intel)

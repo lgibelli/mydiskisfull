@@ -17,6 +17,10 @@
 //! sync client rewriting logs. Over the last hour it wrote at least 1 GB,
 //! steadily (in at least 3 of its 4 quarters), while the volume kept less
 //! than 10% of that, and its name is not on the allowlist.
+//!
+//! The sizes (1 GB grown, 1 GB written in an hour) are the defaults of what
+//! the user may set (`mdif alerts`, see [`crate::alerts`]); the clauses that
+//! keep false positives out are not settable.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,6 +30,11 @@ use serde::{Deserialize, Serialize};
 use crate::forecast::{DAY, HOUR};
 use crate::store::SpacePoint;
 use crate::units::bytes;
+
+/// What a folder must grow over the sustain window, by default.
+pub const MIN_GROWTH: u64 = 1_000_000_000;
+/// What a process must write in an hour, by default.
+pub const MIN_WRITTEN_PER_HOUR: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone)]
 pub struct GrowthParams {
@@ -50,7 +59,7 @@ impl Default for GrowthParams {
             grid: 1800,
             min_points: 8,
             min_r2: 0.85,
-            min_growth: 1_000_000_000,
+            min_growth: MIN_GROWTH,
             min_share: 0.05,
             peak_tolerance: 0.02,
             horizon: 7 * DAY,
@@ -83,7 +92,7 @@ impl Default for ChurnParams {
     fn default() -> Self {
         ChurnParams {
             window: HOUR,
-            min_written: 1_000_000_000,
+            min_written: MIN_WRITTEN_PER_HOUR,
             min_quarters: 3,
             max_kept: 0.10,
             allow: [

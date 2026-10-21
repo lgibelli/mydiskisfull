@@ -53,7 +53,7 @@ enum Notifier {
                     authorizationProblem = error.localizedDescription
                 } else {
                     log.notice("notification authorization granted=\(granted)")
-                    authorizationProblem = granted ? nil : "Notifications are turned off for MyDiskIsFull."
+                    authorizationProblem = granted ? nil : "Notifications are turned off for \(Edition.name)."
                 }
             }
         }
@@ -67,10 +67,7 @@ enum Notifier {
 
     static func incident(_ e: Episode, tweakTitle: String?) {
         let n = UNMutableNotificationContent()
-        let name = e.incident.kind == .growth
-            ? URL(fileURLWithPath: e.incident.subject).lastPathComponent
-            : e.incident.subject
-        n.title = e.incident.kind == .growth ? "\(name) keeps growing" : "\(name) keeps rewriting the disk"
+        n.title = e.title
         n.body = e.sentence
         n.userInfo = ["episode": e.id]
         switch e.fix {

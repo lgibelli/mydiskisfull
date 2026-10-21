@@ -4,25 +4,44 @@
   "avail": 21000000000,
   "floor": 10000000000,
   "alert": "3_days",
-  "alert_sentence": "At 7.5 GB a day (the 3-day trend), the disk is full in about 3 days, around Oct 22.",
+  "alert_sentence": "At about 7.5 GB a day, the disk is full in about 3 days, around Oct 22 (56% likely within 3 days).",
   "forecast": {
     "at": 1792405800,
     "avail": 21000000000,
+    "method": "simulation",
     "rate": {
       "window": 259200,
-      "points": 864,
+      "points": 72,
       "per_day": 7500000000.0,
-      "low": 6000000000.0,
-      "high": 9000000000.0,
+      "low": 5200000000.0,
+      "high": 10400000000.0,
+      "steps_removed": 1
+    },
+    "trend": {
+      "window": 259200,
+      "points": 72,
+      "per_day": 7100000000.0,
+      "low": -30000000000.0,
+      "high": 45000000000.0,
       "steps_removed": 1
     },
     "recent": null,
     "full_in": {
       "days": 2.8,
-      "earliest": 2.33,
-      "latest": 3.5
+      "earliest": 1.9,
+      "latest": 4.1
+    },
+    "full_by": {
+      "d1": 0.04,
+      "d3": 0.56,
+      "d14": 1.0
     },
     "recent_full_in": null,
+    "paces": {
+      "hour": 12000000000.0,
+      "day": 8100000000.0,
+      "week": null
+    },
     "steps": [
       {
         "ts": 1792300000,
@@ -54,11 +73,12 @@
         "full_in_days": 2.6
       },
       "sentence": "~/Library/Developer/Xcode/DerivedData grew 2.0 GB in 6 hours (8.0 GB a day, steadily, now 30.0 GB). At that rate the disk is full in 3 days.",
-      "fix_line": "Steps: In Xcode, Settings → Locations: delete Derived Data.",
+      "fix_line": "Steps: In Xcode, Settings \u2192 Locations: delete Derived Data.",
       "fix": {
         "kind": "steps",
-        "detail": "In Xcode, Settings → Locations: delete Derived Data."
-      }
+        "detail": "In Xcode, Settings \u2192 Locations: delete Derived Data."
+      },
+      "app": null
     },
     {
       "opened": 1792380000,
@@ -83,7 +103,8 @@
           "command": "osascript -e 'quit app \"SyncClient\"'",
           "note": "then open it again"
         }
-      }
+      },
+      "app": "Safari"
     },
     {
       "opened": 1792370000,
@@ -105,7 +126,8 @@
       "fix": {
         "kind": "tweak",
         "detail": "gradle-caches"
-      }
+      },
+      "app": null
     },
     {
       "opened": 1792360000,
@@ -127,7 +149,8 @@
       "fix": {
         "kind": "leave",
         "detail": "a cache refills by itself."
-      }
+      },
+      "app": null
     }
   ],
   "tweaks": [
@@ -154,5 +177,15 @@
     "periods": 143,
     "cpu_us_per_period": 300000,
     "catch_up_cpu_us": 1900000
+  },
+  "alerts": {
+    "low_free": null,
+    "low_free_auto": 10000000000,
+    "full_within_days": 14,
+    "growth_min": 1000000000,
+    "churn_per_hour": 1000000000,
+    "notify_forecast": true,
+    "notify_growth": true,
+    "notify_churn": true
   }
 }

@@ -56,14 +56,44 @@ nothing to warn about it.
 - Free space on every volume, sampled every few minutes from `statfs` (free, and essentially
   zero cost). History is decimated: 5-minute slices for a day, hourly for a month, daily for a
   year.
-- The forecast is a robust trend over several windows (6 h, 3 days, 14 days). Cleanups and purges
-  are detected as step changes and excluded, so freeing 20 GB doesn't read as "the disk is
-  shrinking". It reports "Full in about N days at the current rate", with a range, and says which
-  window it uses.
+- The forecast is a distribution, by simulation (`forecast.rs`, `forecast/sim.rs`). Free space
+  becomes net consumption per clock hour over the last 14 days. A thousand futures are drawn
+  from it in 6-hour blocks matched to the time of day (±1 hour; wider with fewer days, since one
+  day can't tell a rhythm from noise), so builds by day and idle nights keep their shape. Days
+  count less with age (half-life 5 days), and each future draws its own mix of days (a Bayesian
+  bootstrap: Dirichlet weights, tempered to a quarter of the effective number of days, because
+  habits change and days aren't independent), so the range covers how sure the rate is, not
+  only day-to-day noise. "Full in" is the median time to full, its range the 10th–90th
+  percentile, and `full_by` the chance within 1, 3 and 14 days; beyond 60 days is "not
+  filling". With less than a day of history, a Theil–Sen trend over 6 h / 3 / 14 days is the
+  forecast (`method: "trend"`); it's also reported beside the simulation for comparison.
+- Cleanups are step changes: one-off ones are interventions and come out, so the forecast says
+  what happens if nothing is done; recurring ones are how the disk behaves and stay in. Steps
+  recur when there are three or more in four weeks *and* the disk refills at least half of what
+  they free in between (a cache that's cleared refills; an afternoon of cleaning doesn't).
+  Clean-ups done through MyDiskIsFull (`mdif clean`, tidy-ups) are recorded in the history, and
+  every change one falls in is left out whatever its size (by the bucket: the hour it's in and
+  the next, since a compacted hour's level may come from before it), never counted as a
+  pattern. Gaps of up to two days have their net change spread over their hours (a sleeping Mac
+  consumes nothing, and nothing is invented); longer ones are unknown, not zero.
+- Paces beside it: the last hour (Theil–Sen over its 5-minute samples, steps among them judged
+  at their own scale too), the last 24 hours and the last 7 days (net), each in bytes a day,
+  each only when the samples cover it (hours left out as steps count as covered).
+- Chosen from a backtest (`forecast/backtest.rs`): from each hour of a history, forecast the next
+  24 and 72 hours with the old trend and the simulation, scored by absolute error, the share of
+  outcomes inside the 10–90 band and the interval score. On seven synthetic histories (steady,
+  daily rhythm, idle then bursts, a one-off cleanup, a weekly cleanup, sleep and a 3-day gap,
+  volatile regimes) the simulation wins on average at both horizons; whole-day blocks and short
+  half-lives (1–3 days) scored worse than 6-hour blocks and 5–7 days. A real history replays
+  with `MDIF_BACKTEST_DB` (a copy, opened read-only).
 - It's explained by owners: "of the 3.1 GB/day, 1.6 GB is one project's Rust build, 0.9 GB is
   WhatsApp backups, 0.6 GB is everything else".
 - Warnings come at escalating horizons (14 days, 3 days, 24 h), plus an alert when free space
-  drops below a floor. Like Idlewild, each episode alerts once.
+  drops below a floor. The floor, the furthest horizon, the growth and churn sizes, and whether
+  each kind notifies are the user's to set (`mdif alerts`, kept in the history's `meta`); the
+  clauses below are not. Like Idlewild, each episode alerts once. A horizon warns when the disk is
+  more likely than not full within it, with a day and a half of history at least, and still so
+  with any one day of the history left out (a jackknife): one heavy day never raises a warning.
 
 ### 2. Runaway fillers
 Two kinds, each with its own clauses.
@@ -92,6 +122,66 @@ Each cause maps to a fix that stops it from coming back (`mdif suggest`, and a "
 every incident). A fix is a **tweak** when a setting can stop it, otherwise a command to run once,
 steps to take in the app, or the advice to leave it alone because it refills by itself.
 
+**Clean-ups the app does** (`mdif clean`, a button on the suggestion; full edition only): a
+suggestion may carry an action, and `mdif clean` checks each path again before acting, refusing
+what you keep and anything it doesn't suggest now. Finished worktrees are removed with `git
+worktree remove` (asked first; not to the Trash, which would leave git a worktree without a
+folder). Chrome's model goes to the Trash once its policy is in and Chrome isn't running (the
+space comes back when the Trash is emptied). Build output (a `target` next to `Cargo.toml`,
+Flutter's `build`, and the like, with nothing in it that git tracks) is deleted, as `cargo clean`
+would. An app's or a tool's cache folder is emptied, the folder kept, unless the app is open
+(asked of Launch Services, `lsappinfo`) or a process runs from it; macOS's own caches and group
+containers' are left alone (a service may spend hours making one again: `mediaanalysisd` analyses
+the photo library anew). An app's helper that keeps rewriting the disk (Safari's WebKit
+networking process) is ended, and the app starts a fresh one. More kinds go there, never by running a printed command.
+
+**Keep tidy** (`mdif tidy`, switches under Prevent; full edition only, each off until turned
+on): clean-ups the watcher does by itself, once a day, at background priority, after a sample.
+Old simulators: the runtimes `simctl runtime delete --notUsedSinceDays 60` would delete, deleted
+one by one (`simctl` straight from the selected Xcode, never `xcrun`, which offers a dialog
+without it), then the simulators left without a runtime. Old build folders: a project's build
+output (what Delete Build Output takes: `target` next to `Cargo.toml`, `build` and `.dart_tool`
+next to `pubspec.yaml`, `.gradle`, `.build`, `.next`, `dist`…, nothing in it tracked by git)
+with nothing written in it, nor a file in it read, for 14 days, so a tool run from
+`target/release` stays; found by the same pruned walk. Old node_modules: the same for a
+project's `node_modules` next to `package.json` and a lockfile (what Delete node_modules takes),
+a switch of its own since it comes back by downloading. Old Rust build caches: a build's
+`incremental` folders that nothing changed for 30 days (the folder and two levels in), found by a
+pruned walk of the code folders (not into `.git`, `node_modules`, other build output or hidden
+folders but `.claude/worktrees`). Caches apps stopped using: the cache folders the Empty Cache
+button empties, 50 MB or more, with nothing written in them for 30 days, nor a file in them read
+(access times; a folder's are left out, since listing it sets them), and not tools' caches that
+hold what isn't fetched again by itself, or only as gigabytes (Playwright's and Puppeteer's
+browsers, LM Studio's and Hugging Face's models). Files go only through `clean::plan` and
+`clean::run`, so what you keep, links, other volumes and open apps are refused as with the
+button; a kept simulator stays too. What each did last (when, freed, done, failed, one sentence)
+is kept in the history's `meta` table with its switch; what it deleted goes to the watcher's log.
+
+**What apps keep** (`handlers.rs`): a catalogue of folders by their place under the home folder
+(`*` for one name), each with what it is, how to make it smaller in its app or in macOS, and the
+app or Settings page to open. `mdif space` gives an item the biggest one found in it (`about`),
+and the Space page lists the biggest under Inside Your Apps. A handler can also say the folder
+itself can go to the Trash (`trash`: a cloud folder left behind), which `mdif clean` then takes. Only ways known to work are given; a
+handler that can do it safely itself becomes a clean kind instead.
+
+**Showing, not telling**: each suggestion that cleans a folder says about how much it frees (its
+private size) and how old its files are on average (by size, from modification dates, which the
+scanner already reads), and a folder that keeps growing shows its size at the end of each of the
+last days as bars (the size measured now, less the growth the watcher recorded since). Folders
+are measured when suggested, cached for 30 minutes.
+
+**What you keep** (`mdif keep`, Keep It in the app, a text file next to the history): paths that
+are never suggested for deleting, cleaning or moving, `*` and `?` within a name, compared without
+case. A cleanup that would delete a kept path with the folder it cleans is dropped too. Incidents
+about a kept folder still open, since they explain the forecast, with "you keep it" as their fix.
+
+**Finished worktrees** (done): any git worktree of a project in the code folders whose HEAD is
+merged into main, master or origin's (contained, or a trial merge changes nothing: squashed),
+with nothing uncommitted, and nothing ignored but build output or what the main checkout has too
+(a file the same size). Quiet for an hour if it's an agent's (`.claude/worktrees`), a week if
+made by hand. Git only reads: status without optional locks, the trial merge's objects in a
+scratch folder. Sizes are cached in the history for a day, since a finished worktree is idle.
+
 Tweaks (`mdif tweaks`) are reversible. Applying one records every value it replaces before it
 changes anything, and a failure halfway undoes what was done. Reverting restores only the settings
 that still hold the tweak's value, so a change made since is kept. Each tweak is checked later:
@@ -104,7 +194,7 @@ than in the week before (from the watcher's history).
 | Chrome on-device AI model (4 GB) | stop it downloading | tweak: Chrome policy `GenAILocalFoundationalModelSettings = 1` in a user-scoped profile; once it's in effect, remove the copy | approve profile |
 | Browser cache growth | cap the cache | tweak: Chrome policy `DiskCacheSize` (500 MB) in a profile | approve profile |
 | Build output regrowth (`target/`, `node_modules`, `build/`) | clean it with its own tool; share one target dir between worktrees; auto-clean stale builds (M5); exclude from Time Machine | the command (`cargo clean --manifest-path …`, `flutter clean`), `build.target-dir` advice; rules in M5 | no |
-| Agent worktrees piling up | remove merged, clean worktrees | `git worktree remove` advice; automatic rule in M5 | no |
+| Agent worktrees piling up | remove merged, clean worktrees | finished ones found; Remove Worktrees (`mdif clean`, `git worktree remove` after a confirmation); automatic rule in M5 | no |
 | Homebrew, Gradle caches | retention settings | tweaks: `HOMEBREW_CLEANUP_MAX_AGE_DAYS=30` in `~/.homebrew/brew.env`; a Gradle init script (14 days, from Gradle 8.0). Cargo cleans its own cache since 1.88. | no |
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
 | Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
@@ -131,7 +221,19 @@ don't have to be deleted, only moved somewhere you can still reach.
 - **Ranked by space won × confidence:** "48 GB of videos in Desktop/Storage, none opened since
   2025-03".
 - **Excluded:** files that are cold by nature (app bundles, system assets, the Photos library
-  internals, mail stores).
+  internals, mail stores), and what you keep (`mdif keep`).
+
+**Built: Cruft (big old files).** The whole-disk scan behind `mdif space` also lists every file
+of 50 MB or more (`scan::Options::big_files`, with its access and modification times from the
+same `getattrlistbulk` call), and keeps the biggest 3,000 of yours (`clean::yours`: in the home
+folder or `/Users/Shared`, not in `~/Library`, `~/Applications`, a developer tool's folder, a
+hidden folder, a package, build output or `site-packages`, and not a library or `.jar`). The
+report's `old_files` are those neither read nor changed for 90 days, the later of atime and
+mtime being when a file was last used (macOS skips some atime updates); the app filters further
+by size and age. Move to Trash goes through `mdif clean`, which takes only such a file in the
+home folder, with one name, not kept, and checks it again right before; Put Back undoes it.
+Above the files, Forgotten Folders: the scan's items marked cold or unused (an app not opened),
+by the same size and age. Nothing is offloaded yet.
 
 **Offload strategies**, ordered by how well they keep files reachable:
 
@@ -237,11 +339,12 @@ mydiskisfull/
   (swiftc without an Xcode project, Developer ID, notarization, Sparkle) is reused as is.
 - **History:** SQLite, decimated, size-capped.
 - **Distribution:** Developer ID signed, notarized, stapled, with signed updates (Sparkle; see
-  M6 and `docs/RELEASING.md`). Not the Mac App
-  Store: its sandbox blocks `proc_pid_rusage` on other processes and reading other apps'
-  containers. A reduced App Store edition is possible (M7): `app/build.sh --app-store` compiles
-  the app with `APP_STORE`, which leaves out the tweaks and the per-app writes and shows a note
-  linking the full version where they would be (`app/Sources/Edition.swift`).
+  M6 and `docs/RELEASING.md`). The full version can't be on the Mac App Store: its sandbox
+  blocks `proc_pid_rusage` on other processes and changing other apps' settings. A reduced
+  edition, MyDiskIsFull Lite, is (M7): `app/build.sh --app-store` compiles the app with
+  `APP_STORE`, which leaves out the tweaks and the per-app writes and shows a note linking the
+  full version where they would be (`app/Sources/Edition.swift`), runs the watcher as the app's
+  child and asks for the disk in an Open dialog (`app/Sources/Sandboxed.swift`).
 - **Builds offline** from the local cargo cache. Everything the macOS layer needs is in
   `libc` 0.2.190.
 
@@ -304,23 +407,31 @@ mydiskisfull/
     (2 ms for 1,000 events); listing is the cost, and six folders of 6k–40k entries (a browser
     cache, Rust `deps`) were 80% of one listing.
 - **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
-  - A main window with a sidebar (the disk at a glance, the watcher's state) and four pages:
-    Overview (a capacity ring, the forecast in one sentence led by whatever fills the disk
-    soonest, what needs attention with its fix, the last days, the biggest fixes), Trends
-    (free-space chart with the forecast, its plausible range, the alert floor and the cleanups;
-    what grew and wrote most), Disk Map (a storage bar, then sunburst, treemap or list, click to
+  - A main window with a sidebar (the capacity ring, the forecast in one sentence led by
+    whatever fills the disk soonest, what comes back by itself, the Trash, the watcher's state)
+    and seven pages: Overview (what needs attention with its fix, then the top three from each
+    page with See All), Space (where the space goes: `mdif space`, a cached whole-disk scan
+    sorted into kinds, each with its biggest items and what may not be needed marked, a
+    suggestion shown with its item; patched in place after a clean-up), Cruft (forgotten folders
+    and big old files), Disk Usage
+    (% used over time with the forecast, its plausible range, the alert floor and the cleanups;
+    what grew most), Disk Map (a storage bar, then sunburst, treemap or list, click to
     zoom; coloured by folder or, like a market heatmap, by each folder's growth in the last 24
-    hours) and Fixes (`mdif suggest`, then the tweaks, each a switch that applies or undoes it
-    after showing what it changes and what you give up). One visual system (`Theme.swift`).
-  - The menu bar: a panel with a glance (ring, free space, forecast, three-day sparkline, what
-    needs attention) and the way into the window. The app joins the Dock while a window is open
-    and leaves it when the last one closes; opened by the login item it stays in the menu bar.
+    hours), Disk Wear (written each day, from `writes_daily`: the store's writes summed per local
+    day; and the biggest writers) and Prevent (keep tidy, and the tweaks, each a switch that applies or undoes it after showing what it
+    changes and what you give up). One visual system (`Theme.swift`).
+  - The sidebar groups the pages under Monitor and Clean, the Overview above both. The menu
+    bar: a plain menu (free space, forecast and the last day as text, what needs attention, Open,
+    Check for Updates, About, Settings, Quit). The app is in the Dock like any app; with Settings
+    → Show in the Dock off (or Hide from Dock in its Dock menu), it joins the Dock while a window
+    is open and leaves it when the last one closes. Opened by the login item, it opens no window.
   - Settings (a grouped form), a welcome for the first launch, and About with the watcher's
     measured cost.
   - Notifications: a new incident (with "Apply Fix…" or "Copy Command"), the forecast crossing
     14 days, 3 days and 1 day or free space under 10 GB (2% on big disks), and a tweak that was
-    undone; each once per episode, withdrawn when it's over. The forecast levels need the 3-day
-    trend, so an afternoon of builds can't raise one.
+    undone; each once per episode, withdrawn when it's over. The forecast levels need a day and
+    a half of history and must hold without any one day of it, so an afternoon of builds can't
+    raise one.
   - The watcher runs from the bundle as an SMAppService LaunchAgent and takes over from
     `mdif agent install` (same history); `mdif agent install` won't start a second one.
   - `mdif status --json` (everything the menu needs, read from the history only), `mdif forecast
@@ -403,8 +514,18 @@ mydiskisfull/
     workflow that published only the command line.
   - The download page is the GitHub release and the README's Install section; a site of its
     own isn't needed while the feed lives on the release.
-- **M7 – App Store edition.** Done: the build flag, the tweaks and per-app writes compiled
-  out, the notes, a CI check that the tweak flow isn't in that binary. To do:
+- **M7 – App Store edition (MyDiskIsFull Lite).** Done: the build flag, the tweaks and
+  per-app writes compiled out, the notes, a CI check that the tweak flow isn't in that binary.
+  Then (2026-10-20) the sandbox, checked on the development Mac with throwaway sandboxed
+  bundles: `statfs`, the history, FSEvents and the forecast work as they are; other
+  processes' I/O counters and the user's folders are refused; `diskutil apfs list` leaves out
+  every size (taken from `statfs` and `ATTR_VOL_SPACEUSED` instead). A folder granted at run
+  time reaches the `mdif` the app starts, and both `/Users/…` and `/System/Volumes/Data/…`
+  paths work under a grant of `/`. So: `mdif watch --attached` runs as the app's child while it
+  runs (nothing after it quits); the disk is picked in an Open dialog and kept as a
+  security-scoped bookmark; `$HOME` (the container) keeps the history while the account's own
+  home is what's watched. `app/app-store.sh` signs, packages, validates and uploads. The
+  original notes on it:
   - The App Sandbox (entitlements for the app and for `mdif`, which inherits it), and
     checking on a scratch Mac or CI runner what really works inside it.
   - The watcher: a sandboxed SMAppService agent gets a container of its own, apart from the
@@ -423,7 +544,9 @@ mydiskisfull/
 - Unit tests on synthetic fixtures: clones, sparse files, unreadable folders, symlinks, worktrees
   with symlinked `node_modules`.
 - Forecast tests on recorded and synthetic series: steady growth, sawtooth, cleanup steps,
-  plateau.
+  plateau, daily rhythm, idle then bursts, a weekly cleanup, sleep and gaps; a backtest of the
+  24- and 72-hour forecasts against what happened (synthetic in `cargo test`, a real history
+  with `MDIF_BACKTEST_DB`).
 - e2e: a real filler and churner, as Idlewild does with a real CPU burner and leak.
 - The budget is measured, not estimated: self CPU and writes per sample and per folder update
   (the first update after a start reported apart), checked in CI on a 2-minute run and scaled to

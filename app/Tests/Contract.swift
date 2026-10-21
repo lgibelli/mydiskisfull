@@ -29,12 +29,28 @@ enum Contract {
                     summary = "\(f.series?.count ?? 0) points"
                 case "suggest":
                     summary = "\(try check([Suggestion].self, path).count) suggestions"
+                case "clean":
+                    let c = try check(Cleaned.self, path)
+                    summary = "\(c.done.count) done, \(c.failed.count) refused"
+                case "keep":
+                    summary = "\(try check([Kept].self, path).count) kept"
                 case "tweaks":
                     summary = "\(try check([TweakInfo].self, path).count) tweaks"
                 case "apply":
                     summary = "\(try check(TweakApplied.self, path).changes.count) changes"
                 case "revert":
                     summary = "\(try check(TweakReverted.self, path).restored.count) restored"
+                case "space":
+                    let r = try check(SpaceReport.self, path)
+                    summary = "\(r.kinds.count) kinds, \(r.kinds.reduce(0) { $0 + $1.items.count }) items"
+                case "tidy":
+                    summary = "\(try check(TidyList.self, path).tidies.count) tidy-ups"
+                case "alerts":
+                    _ = try check(AlertSettings.self, path)
+                    summary = "alert settings"
+                case "tidyrun":
+                    let r = try check(TidyRun.self, path)
+                    summary = "\(r.done.count) done, \(r.failed.count) failed"
                 case "map":
                     let m = try check(DiskMap.self, path)
                     summary = "\(m.scan.root.children?.count ?? 0) top folders"

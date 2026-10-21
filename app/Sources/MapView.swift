@@ -35,7 +35,7 @@ final class MapModel: ObservableObject {
 
     /// Measures in the background if there's no map or it's older than `limit`.
     func refreshIfOld(_ limit: TimeInterval) {
-        guard !running else { return }
+        guard !running, Self.mayMeasure else { return }
         if let age = age(), age < limit { return }
         Task { await measure(automatic: true) }
     }
@@ -69,16 +69,31 @@ final class MapModel: ObservableObject {
         }
     }
 
+    /// In the App Sandbox there's nothing to measure until the disk is
+    /// chosen.
+    static var mayMeasure: Bool {
+        #if APP_STORE
+        AppDelegate.monitor?.access.granted == true
+        #else
+        true
+        #endif
+    }
+
     /// `automatic`: nobody pressed a button, so it runs at background
     /// priority, out of the way of whatever the Mac is doing.
     func measure(automatic: Bool = false) async {
-        guard !running else { return }
+        guard !running, Self.mayMeasure else { return }
         running = true
         started = Date()
         defer { running = false }
         await loadGrowth()
         do {
-            let data = try await Core.run(["map", "--depth", "6", "--min-mb", "200", "--json"], timeout: 900,
+            var args = ["map", "--depth", "6", "--min-mb", "200", "--json"]
+            #if APP_STORE
+            // A folder rather than the disk: map that.
+            if let root = AppDelegate.monitor?.access.mapRoot { args += ["--root", root] }
+            #endif
+            let data = try await Core.run(args, timeout: 900,
                                           qos: automatic ? .background : .userInitiated)
             let fresh = try Wire.decode(DiskMap.self, from: data)
             map = fresh
@@ -144,6 +159,14 @@ private struct EmptyMap: View {
                             .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
+            } else if !MapModel.mayMeasure {
+                #if APP_STORE
+                Text("First, let \(Edition.name) see \(DiskAccess.startupDisk): choose it in the dialog.")
+                    .font(.callout)
+                Button("Choose Disk…") { AppDelegate.monitor?.chooseDisk() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                #endif
             } else {
                 Button("Measure Now") { Task { await model.measure() } }
                     .buttonStyle(.borderedProminent)

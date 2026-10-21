@@ -88,22 +88,43 @@ The first launch starts the watcher (a LaunchAgent inside the app running the sa
 as below; one started with `mdif agent install` is stopped, and the history carries on), asks for
 Full Disk Access and for notifications.
 
-The app has a main window with four pages:
+The app has a main window with these pages:
 
-- **Overview**: how full the disk is and, in one sentence, where it's heading; anything that needs
-  attention (a runaway filler, a tweak something undid, the watcher stopped), each with what to
-  do; the last days at a glance; and the fixes that free the most.
-- **Trends**: free space over time with where the trend goes and how sure it is, the cleanups
-  left out of the trend, and what grew and what wrote the most in the last day.
+- **Overview**: anything that needs attention (a runaway filler, a tweak something undid, the
+  watcher stopped), each with what to do; then the top three from each page below, each with its
+  button. How full the disk is and where it's heading is in the sidebar, on every page, with what
+  comes back by itself (swap after a restart, what macOS frees when it needs room) and the Trash.
+- **Space**: where your space goes: one bar for the disk split by kind (apps, build output,
+  developer tools, cloud copies, app data, caches, media, Mail and Messages, virtual machines,
+  macOS, your files), each kind biggest first and opening to its biggest items, with what may not
+  be needed marked: apps not opened in months, files unchanged for a year, build output, caches.
+  A fix shows with what it's about (its growth as bars, how much it frees, its button).
+- **Cruft**: what nothing has opened or changed for a long time (you pick how big, from 50 MB,
+  and how long, from six months to five years): forgotten folders (apps not opened, folders
+  unchanged), then your big files, biggest first, each with Show in Finder, Keep It and Move to
+  Trash.
+- **Disk Usage**: how full the disk is over time (% used), in layers by kind (macOS, apps, build
+  output, caches, the Trash, snapshots…), where the trend goes and how sure it is, what the disk
+  filled or freed in the last hour, day and week, the cleanups left out of the trend, and what
+  grew the most in the last day.
+- **Disk Wear**: what was written each day, and which apps wrote the most in the last day,
+  against the disk's size: writing
+  doesn't fill the disk, but it wears an SSD out.
 - **Disk Map**: where the space is now, as a sunburst, as a treemap (tile size is space) or as a
   list, coloured by folder or, like a stock-market heatmap, by how much each folder grew or shrank
   in the last day; click a folder to zoom in. It measures while you look at it (when the page opens, if the
   last map is over 30 minutes old, and every hour while it stays open).
-- **Fixes**: suggestions, largest first, and the tweaks, which apply and undo with a switch after
-  saying what they change and what you give up.
+- **Prevent**: clean-ups the watcher can do once a day, each off until you turn it on (old
+  simulators, build folders and `node_modules` nothing has used for two weeks, old Rust build
+  caches, caches apps
+  stopped using), and the
+  tweaks, which apply and undo with a switch after saying what they change and what you give up.
 
-The menu bar keeps a glance (free space, the forecast, the last three days, what needs attention)
-and the way into the window. The app joins the Dock only while a window is open. Notifications
+The sidebar groups the pages: the Overview, then Monitor (Disk Usage, Disk Wear, Disk Map) and Clean
+(Space, Cruft, Prevent). The menu bar has a plain menu: free space, the forecast and the last day
+in a line each, what needs attention, then Open, Check for Updates, About, Settings and Quit. The
+app is in the Dock too, unless you turn that off in Settings or with Hide from Dock in its Dock
+menu. Notifications
 come once per episode: a runaway filler, the disk full within two weeks, three days or a day, and
 a tweak something undid.
 
@@ -124,6 +145,7 @@ cargo build --release
 ./target/release/mdif status           # free space, the forecast and what needs attention
 ./target/release/mdif map              # where the space is, reconciled with APFS
 ./target/release/mdif map --root ~     # just your home folder
+./target/release/mdif space            # where it goes by kind, with what you may not need
 ./target/release/mdif writers          # which processes are writing to disk right now
 
 ./target/release/mdif agent install    # start the watcher in the background (one sample / 5 min)
@@ -132,6 +154,9 @@ cargo build --release
 ./target/release/mdif incidents        # runaway fillers: folders that keep growing, churning writers
 ./target/release/mdif suggest          # what to do about each cause, so it stays fixed
 ./target/release/mdif tweaks           # settings that stop things coming back, applied and undone
+./target/release/mdif clean <path>     # do a clean-up a suggestion offers, checked again first
+./target/release/mdif keep add ~/VMs   # never suggest deleting, cleaning or moving it
+./target/release/mdif tidy             # clean-ups the watcher does once a day, once turned on
 ./target/release/mdif agent status
 ```
 
@@ -212,6 +237,17 @@ shows whether it worked: the setting still holds, the restart it needed happened
 shrank or grew slower than before. Commands such as `tmutil deletelocalsnapshots` are only ever
 printed for you to run.
 
+Worktrees that coding agents leave behind are found too: a git worktree whose work is merged
+into the main branch (or squashed into it), with nothing uncommitted and nothing ignored that a
+build doesn't make again, is suggested for removal with its size: a Remove Worktrees button in the app, or `mdif clean`
+(both check again first; the branches stay). An agent's counts once nothing happened in it for
+an hour, one you made by hand after a week.
+
+What you want to keep, however big or old, goes on the keep list: `mdif keep add <path>` (`*`
+matches within a name, as in `'~/Movies/Clip*'`), or Keep It on a suggestion in the
+app. Nothing then suggests deleting, cleaning or moving it, nor a cleanup that would take it
+with the folder it's in. If it grows fast you're still told, since that explains the forecast.
+
 Example output from `mdif map` (abridged):
 
 ```
@@ -244,10 +280,20 @@ The full version can't be there. App Store apps run in the App Sandbox, which bl
 other processes' I/O counters (which apps write the most, write churn) and changing other apps'
 settings (the tweaks). Releases are Developer ID signed and notarized, and update themselves.
 
-`app/build.sh --app-store` builds an App Store edition into `build/AppStore`: the same app
-without the tweaks and the per-app writes, whose code isn't compiled in, and with a note where
-they would be that links the full version. It isn't sandboxed or submitted yet; what's left is
-in [docs/PLAN.md](docs/PLAN.md) (M7).
+MyDiskIsFull Lite is the App Store edition. `app/build.sh --app-store` builds it into
+`build/AppStore`: the same app in the App Sandbox, without the tweaks and the per-app writes
+(their code isn't compiled in, and a note where they would be links the full version). The
+sandbox changes three more things:
+
+- **The watcher runs while the app does.** It's a child of the app rather than a LaunchAgent,
+  and it stops when the app quits. The app opens at login if you let it.
+- **It sees the disk once you choose it.** Instead of Full Disk Access, it asks you to pick the
+  startup disk in an Open dialog, and keeps that as a bookmark. Until then it watches free space
+  only.
+- **Its history is its own**, in its container, apart from the full version's.
+
+`app/app-store.sh` signs it for the store, packages it and has App Store Connect validate it;
+with `--upload` it sends it there (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Contributing
 

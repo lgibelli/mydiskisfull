@@ -1,6 +1,6 @@
-// The first launch: start the watcher, give it Full Disk Access, allow
-// notifications. Each step says what it's for and shows when it's done;
-// Get Started opens the main window.
+// The first launch: start the watcher, give it Full Disk Access (in the App
+// Store edition: choose the disk), allow notifications. Each step says what
+// it's for and shows when it's done; Get Started opens the main window.
 
 import ServiceManagement
 import SwiftUI
@@ -14,6 +14,8 @@ struct WelcomeView: View {
     @State private var notificationsAsked = false
     /// Turned off in System Settings: asking again shows nothing.
     @State private var notificationsDenied = false
+    /// Opening at login is asked, not assumed (App Review 2.4.5).
+    @State private var openAtLogin = true
 
     init(monitor: Monitor) {
         self.monitor = monitor
@@ -25,7 +27,7 @@ struct WelcomeView: View {
             hero
             VStack(alignment: .leading, spacing: 12) {
                 StepRow(number: 1, done: watcher.isOn, title: "Start the watcher",
-                        text: "A small background process that samples free space \(Edition.appStore ? "" : "and disk writes ")every 5 minutes, and which folders grew every 30. Its budget is a second of CPU an hour, and About shows what it really uses.") {
+                        text: watcherText) {
                     if watcher.status == .requiresApproval {
                         Button("Open Login Items…") { watcher.openLoginItems() }
                     } else {
@@ -37,15 +39,23 @@ struct WelcomeView: View {
                     }
                 }
 
+                #if APP_STORE
+                StepRow(number: 2, done: monitor.access.granted, title: "Let it see your disk",
+                        text: "Choose \(DiskAccess.startupDisk) in the dialog, so it can tell which folders grow and map the disk. Until then it watches free space only. It reads names, sizes and dates, never what's in a file, and nothing leaves your Mac.") {
+                    Button("Choose Disk…") { monitor.chooseDisk() }
+                        .buttonStyle(.borderedProminent)
+                }
+                #else
                 StepRow(number: 2, done: appAccess == true && watcherAccess != false,
                         title: "Give it Full Disk Access",
                         text: accessText) {
                     Button("Open Privacy Settings…") { Privacy.openSettings() }
                 }
+                #endif
 
                 StepRow(number: 3, done: notificationsAsked && !notificationsDenied, title: "Allow notifications",
                         text: notificationsDenied
-                            ? "They're turned off for MyDiskIsFull in System Settings, so macOS won't ask again. Turn on Allow Notifications there."
+                            ? "They're turned off for \(Edition.name) in System Settings, so macOS won't ask again. Turn on Allow Notifications there."
                             : "For a runaway filler, the disk filling within two weeks, or a fix something undid. Each is announced once.") {
                     if notificationsDenied {
                         Button("Open Notification Settings…") { Notifier.openSettings() }
@@ -60,8 +70,13 @@ struct WelcomeView: View {
 
                 HStack {
                     if SMAppService.mainApp.status != .enabled {
+                        #if APP_STORE
+                        Toggle("Open at login, so it keeps watching", isOn: $openAtLogin)
+                            .font(.callout)
+                        #else
                         Text("It opens at login, so the forecast stays in the menu bar.")
                             .font(.caption).foregroundStyle(.secondary)
+                        #endif
                     }
                     Spacer()
                     Button("Get Started") { finish() }
@@ -96,7 +111,7 @@ struct WelcomeView: View {
                 Image(nsImage: icon).resizable().frame(width: 96, height: 96)
                     .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
             }
-            Text("Welcome to MyDiskIsFull")
+            Text("Welcome to \(Edition.name)")
                 .font(.system(size: 28, weight: .bold))
             Text("Know when your disk will be full and what fills it, and keep it from filling again.")
                 .font(.title3)
@@ -128,6 +143,12 @@ struct WelcomeView: View {
         watcher.isOn ? monitor.status?.access?.fullDiskAccess : nil
     }
 
+    private var watcherText: String {
+        Edition.appStore
+            ? "It samples free space every 5 minutes while \(Edition.name) is open, and which folders grew every 30. Its budget is a second of CPU an hour, and About shows what it really uses."
+            : "A small background process that samples free space and disk writes every 5 minutes, and which folders grew every 30. Its budget is a second of CPU an hour, and About shows what it really uses."
+    }
+
     private var accessText: String {
         var t = "Without it, macOS keeps it out of other apps' folders, where caches and backups grow, and out of Desktop, Documents and Downloads. It reads sizes only, never what's in a file. Turn MyDiskIsFull on in the list (add it with + if it isn't there), then come back: that covers the watcher too."
         if appAccess == true && watcherAccess == false {
@@ -147,7 +168,7 @@ struct WelcomeView: View {
     private func finish() {
         monitor.settings.welcomed = true
         if !notificationsAsked && !notificationsDenied { Notifier.requestAuthorization() }
-        if SMAppService.mainApp.status != .enabled {
+        if openAtLogin, SMAppService.mainApp.status != .enabled {
             try? SMAppService.mainApp.register()
         }
         dismiss()

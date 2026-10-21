@@ -21,7 +21,7 @@ struct AboutView: View {
                 Image(nsImage: icon).resizable().frame(width: 96, height: 96)
                     .shadow(color: .black.opacity(0.25), radius: 10, y: 5)
             }
-            Text("MyDiskIsFull").font(.system(size: 24, weight: .bold))
+            Text(Edition.name).font(.system(size: 24, weight: .bold))
             Text("Version \(Self.version)").font(.callout).foregroundStyle(.secondary)
             #if !APP_STORE
             UpdateLine(updates: monitor.updates)

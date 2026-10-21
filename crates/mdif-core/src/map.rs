@@ -53,7 +53,11 @@ impl DiskMap {
 pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
     let st = fs::statfs(root).with_context(|| format!("statfs {}", root.display()))?;
-    let (container, volume) = apfs::find_volume(apfs::containers()?, &st.device)?;
+    let (mut container, mut volume) = apfs::find_volume(apfs::containers()?, &st.device)?;
+    if volume.capacity_in_use == 0 {
+        apfs::fill_missing_sizes(&mut container, &st);
+        volume = apfs::find_volume(vec![container.clone()], &st.device)?.1;
+    }
     let snapshots = apfs::local_snapshots(Path::new(&st.mount_point)).unwrap_or_default();
     let scan = scan::scan(root, opts).with_context(|| format!("scanning {}", root.display()))?;
     Ok(DiskMap {

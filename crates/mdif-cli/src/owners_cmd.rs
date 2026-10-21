@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use mdif_core::forecast::{DAY, HOUR};
+use mdif_core::keep::Keep;
 use mdif_core::owners;
 use mdif_core::store::{Episode, Store};
 use mdif_core::suggest;
@@ -114,8 +115,13 @@ pub fn owners(db: &Path, hours: i64, top: usize, json_out: bool) -> Result<()> {
 }
 
 /// An episode as `mdif incidents --json` and `mdif status --json` print it.
-pub(crate) fn episode_json(e: &Episode, home: &Path) -> Value {
-    let fix = suggest::for_incident(&e.incident, home);
+pub(crate) fn episode_json(e: &Episode, home: &Path, keep: &Keep) -> Value {
+    let fix = suggest::for_incident(&e.incident, home, keep);
+    // The app a churning helper works for ("Safari"), while it runs.
+    let app = (e.incident.kind == mdif_core::incidents::Kind::Churn && e.closed.is_none())
+        .then(|| mdif_core::clean::helper(&e.incident.subject))
+        .flatten()
+        .map(|a| a.name);
     json!({
         "opened": e.opened,
         "updated": e.updated,
@@ -124,6 +130,7 @@ pub(crate) fn episode_json(e: &Episode, home: &Path) -> Value {
         "sentence": e.incident.sentence(Some(home)),
         "fix_line": tweaks_cmd::fix_line(&fix),
         "fix": fix,
+        "app": app,
     })
 }
 
@@ -132,9 +139,13 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
         return Ok(());
     };
     let home = home();
+    let keep = crate::keep_cmd::load_or_warn(db);
     let episodes = store.incidents_since(unix_now() - days * DAY)?;
     if json_out {
-        let out: Vec<_> = episodes.iter().map(|e| episode_json(e, &home)).collect();
+        let out: Vec<_> = episodes
+            .iter()
+            .map(|e| episode_json(e, &home, &keep))
+            .collect();
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -156,7 +167,7 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
         };
         println!("[{}] {when}", e.incident.kind.as_str());
         println!("  {}", e.incident.sentence(Some(&home)));
-        let fix = suggest::for_incident(&e.incident, &home);
+        let fix = suggest::for_incident(&e.incident, &home, &keep);
         println!("  Fix: {}", tweaks_cmd::fix_line(&fix));
     }
     Ok(())

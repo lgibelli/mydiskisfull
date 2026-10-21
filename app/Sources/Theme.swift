@@ -389,9 +389,8 @@ enum Headline {
         // The disk as a whole isn't filling, but something on it is: that
         // leads, or the headline would contradict the card below it.
         if let e = worst(s) {
-            let name = subject(e.incident)
-            if let d = e.incident.fullInDays { return "\(name) could fill it in \(Format.days(d))" }
-            return e.incident.kind == .growth ? "\(name) keeps growing" : "\(name) keeps rewriting the disk"
+            if let d = e.incident.fullInDays { return "\(subject(e)) could fill it in \(Format.days(d))" }
+            return e.title
         }
         guard let f = s.forecast else { return "Waiting for the first sample" }
         guard let r = f.rate else { return "Getting to know your disk" }
@@ -421,14 +420,22 @@ enum Headline {
         }
         if let full = f.fullIn {
             var t = "Around \(Format.date(at: f.at, inDays: full.days)), at \(Format.bytes(r.perDay)) a day."
-            if let soon = f.recentFullIn {
+            // How sure: the nearest horizon with a real chance.
+            if let p = f.fullBy {
+                if p.d1 >= 0.1 {
+                    t += " \(Format.percent(p.d1)) likely within a day."
+                } else if p.d3 >= 0.1 {
+                    t += " \(Format.percent(p.d3)) likely within 3 days."
+                }
+            } else if let soon = f.recentFullIn {
                 t += " At the last few hours' pace, in \(Format.days(soon.days))."
             }
             return t
         }
         var t: String
+        // Free space that grew is clean-ups, not a pace to project.
         if r.perDay < 0 {
-            t = "Free space grew \(Format.bytes(-r.perDay)) a day over the \(Format.window(r.window)) trend."
+            t = "Free space hasn't been shrinking lately."
         } else if r.perDay == 0 {
             t = "Free space held steady over the \(Format.window(r.window)) trend."
         } else {
@@ -444,15 +451,16 @@ enum Headline {
     }
 
     /// A folder by its name, a process as it is.
-    static func subject(_ i: Incident) -> String {
-        i.kind == .growth ? URL(fileURLWithPath: i.subject).lastPathComponent : i.subject
+    static func subject(_ e: Episode) -> String {
+        let i = e.incident
+        return i.kind == .growth ? URL(fileURLWithPath: i.subject).lastPathComponent : e.app ?? i.subject
     }
 
-    /// The trend as a fact: ("Filling", "2.1 GB a day"), ("Freeing", …), ("Trend", "Steady").
+    /// The trend as a fact: ("Filling", "2.1 GB a day"), ("Trend", "Not filling").
+    /// Free space that grew is clean-ups, not a rate anyone keeps up.
     static func pace(_ s: Status) -> (label: String, value: String) {
         guard let r = s.forecast?.rate else { return ("Trend", "Learning") }
-        if abs(r.perDay) < 50_000_000 { return ("Trend", "Steady") }
-        return r.perDay > 0 ? ("Filling", "\(Format.bytes(r.perDay)) a day")
-                            : ("Freeing", "\(Format.bytes(-r.perDay)) a day")
+        if r.perDay < 50_000_000 { return ("Trend", "Not filling") }
+        return ("Filling", "\(Format.bytes(r.perDay)) a day")
     }
 }

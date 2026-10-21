@@ -51,6 +51,38 @@ enum Format {
         return "\(max(secs, 0)) s"
     }
 
+    /// `mdif`'s texts mark commands and names with backticks: shown as code.
+    static func inline(_ s: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: s, options: options)) ?? AttributedString(s)
+    }
+
+    /// "43%".
+    static func percent(_ p: Double) -> String {
+        "\(Int((p * 100).rounded()))%"
+    }
+
+    /// A net change in what's used: "Filled 3.4 GB", "Freed 2.9 GB", "Quiet"
+    /// under 50 MB.
+    static func change(_ bytes: Double) -> String {
+        if abs(bytes) < 50_000_000 { return "Quiet" }
+        return (bytes > 0 ? "Filled " : "Freed ") + Format.bytes(abs(bytes))
+    }
+
+    /// "13:40", in the person's format.
+    static func time(_ ts: Int64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(ts)).formatted(date: .omitted, time: .shortened)
+    }
+
+    /// How old: "5 hours", "12 days", "3 months", "2 years".
+    static func age(_ secs: Int64) -> String {
+        let days = secs / 86_400
+        if days >= 730 { return "\(days / 365) years" }
+        if days >= 60 { return "\(days / 30) months" }
+        if days >= 2 { return "\(days) days" }
+        return duration(secs)
+    }
+
     /// "just now", "4 min ago", "3 hours ago".
     static func ago(_ ts: Int64, now: Date = Date()) -> String {
         let secs = Int64(now.timeIntervalSince1970) - ts

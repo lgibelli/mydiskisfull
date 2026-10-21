@@ -10,21 +10,28 @@ import AppKit
 
 @MainActor
 enum TweakFlow {
-    /// Returns whether anything changed.
-    static func apply(_ id: String) async -> Bool {
+    enum Outcome {
+        /// Cancelled, or nothing to change.
+        case unchanged
+        case done
+        /// It failed; what it had changed was put back.
+        case failed
+    }
+
+    static func apply(_ id: String) async -> Outcome {
         let plan: TweakApplied
         do {
             plan = try await Core.json(TweakApplied.self, ["tweaks", "apply", id, "--dry-run"])
         } catch {
             show(.warning, "Can't apply this tweak", error.localizedDescription)
-            return false
+            return .unchanged
         }
         guard !plan.changes.isEmpty else {
             show(.informational, plan.title, "Already applied: there is nothing to change.")
-            return false
+            return .unchanged
         }
         if let profile = plan.profiles.first {
-            guard ProfileReviewPanel.run(plan, profile) else { return false }
+            guard ProfileReviewPanel.run(plan, profile) else { return .unchanged }
         } else {
             let text = """
                 \(plan.why)
@@ -36,7 +43,7 @@ enum TweakFlow {
 
                 MyDiskIsFull keeps what it replaces, so Undo puts it back.
                 """
-            guard ask(plan.title, text, button: "Apply") else { return false }
+            guard ask(plan.title, text, button: "Apply") else { return .unchanged }
         }
         do {
             let done = try await Core.json(TweakApplied.self, ["tweaks", "apply", id])
@@ -45,18 +52,18 @@ enum TweakFlow {
             if plan.profiles.isEmpty {
                 show(.informational, done.title, done.next ?? "Done.")
             }
-            return true
+            return .done
         } catch {
             show(.warning, "The tweak wasn't applied", error.localizedDescription
                  + "\n\nAnything it had changed was put back.")
-            return true
+            return .failed
         }
     }
 
-    static func revert(_ id: String, title: String) async -> Bool {
+    static func revert(_ id: String, title: String) async -> Outcome {
         guard ask("Undo “\(title)”?",
                   "MyDiskIsFull puts back the settings it replaced. A setting changed since then is left as it is.",
-                  button: "Undo") else { return false }
+                  button: "Undo") else { return .unchanged }
         do {
             let r = try await Core.json(TweakReverted.self, ["tweaks", "revert", id])
             var text = r.restored.isEmpty
@@ -68,14 +75,14 @@ enum TweakFlow {
             }
             if r.restart { text += "\n\nIt takes effect after a restart." }
             show(.informational, "Undone: \(r.title)", text)
-            return true
+            return .done
         } catch {
             show(.warning, "Couldn't undo it", error.localizedDescription)
-            return false
+            return .unchanged
         }
     }
 
-    private static func ask(_ title: String, _ text: String, button: String) -> Bool {
+    static func ask(_ title: String, _ text: String, button: String) -> Bool {
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text

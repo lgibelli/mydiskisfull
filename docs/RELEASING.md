@@ -61,6 +61,30 @@ Settings → Secrets and variables → Actions:
 The job runs in the `release` environment: add required reviewers there so a push alone can't
 sign anything. It, too, stops at a draft.
 
+## The App Store edition
+
+MyDiskIsFull Lite (`app/build.sh --app-store`) goes to the Mac App Store as an app of its own.
+Once:
+
+- Register its bundle id, and make a Mac App Store provisioning profile for it with the Apple
+  Distribution certificate (both work with an App Store Connect API key, or in the developer
+  portal).
+- Create the app in App Store Connect (Apps → New App, macOS). The API can't do this one.
+- In `release.env`: `APP_STORE_BUNDLE_ID`, `APP_STORE_PROFILE` and the API key
+  (`release.env.example` says how). The keychain needs the Apple Distribution and Mac Installer
+  Distribution identities.
+
+Each version:
+
+```sh
+app/app-store.sh             # universal, signed for the store, packaged, validated
+app/app-store.sh --upload    # and uploaded as a new build
+BUILD_NUMBER=10001 app/app-store.sh --upload   # the same version again
+```
+
+Then, in App Store Connect, pick the build for the version and submit it for review. Releasing
+it once it's approved is the author's call, like publishing a GitHub release.
+
 ## After publishing
 
 - Installed copies see the update within a day; "Check for Updates…" sees it at once.

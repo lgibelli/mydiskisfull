@@ -47,6 +47,14 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
+      # actool reads the icon's layers (an .icon) from Xcode 26; with an older
+      # one the app gets an .icns that macOS 26 shows in a grey frame.
+      - name: Use Xcode 26 or later if the runner has it
+        run: |
+          xcode=$(ls -d /Applications/Xcode_2[6-9]*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$xcode" ]; then sudo xcode-select -s "$xcode"; fi
+          xcodebuild -version
+
       - name: Import the signing identity into a throwaway keychain
         env:
           CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}

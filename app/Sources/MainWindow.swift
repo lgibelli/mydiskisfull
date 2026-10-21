@@ -1,41 +1,69 @@
 // The main window: a sidebar with the disk at a glance and the watcher's
-// state, and four pages. The menu bar keeps only a glance and a way here.
+// state, and the pages: the overview (what needs attention, and the top
+// few things to do from each page), where the space goes, cruft, how it
+// changes, what writes, the map, and what keeps it from filling again.
+// The menu bar keeps only a glance and a way here.
 
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case overview, trends, map, fixes
+    case overview, trends, wear, map, space, cruft, prevent
 
     var id: String { rawValue }
+
+    /// The sidebar's groups: watching the disk, and making room on it.
+    /// The overview stands above both.
+    enum Group: String, CaseIterable {
+        case monitor = "Monitor", clean = "Clean"
+
+        var panes: [Pane] { Pane.allCases.filter { $0.group == self } }
+    }
+
+    var group: Group? {
+        switch self {
+        case .overview: nil
+        case .trends, .wear, .map: .monitor
+        case .space, .cruft, .prevent: .clean
+        }
+    }
 
     var title: String {
         switch self {
         case .overview: "Overview"
-        case .trends: "Trends"
+        case .space: "Space"
+        case .trends: "Disk Usage"
+        case .wear: "Disk Wear"
+        case .cruft: "Cruft"
         case .map: "Disk Map"
-        case .fixes: "Fixes"
+        case .prevent: "Prevent"
         }
     }
 
     var symbol: String {
         switch self {
         case .overview: "gauge.with.dots.needle.67percent"
+        case .space: "internaldrive.fill"
         case .trends: "chart.xyaxis.line"
+        case .wear: "flame.fill"
+        case .cruft: "archivebox.fill"
         case .map: "chart.pie.fill"
-        case .fixes: "wand.and.stars"
+        case .prevent: "shield.lefthalf.filled"
         }
     }
 
     var color: Color {
         switch self {
         case .overview: .blue
+        case .space: .teal
         case .trends: .purple
+        case .wear: .red
+        case .cruft: .brown
         case .map: .orange
-        case .fixes: .green
+        case .prevent: .green
         }
     }
 
-    /// ⌘1 to ⌘4.
+    /// ⌘1 to ⌘7.
     var key: KeyEquivalent {
         KeyEquivalent(Character("\((Pane.allCases.firstIndex(of: self) ?? 0) + 1)"))
     }
@@ -47,6 +75,14 @@ enum Pane: String, CaseIterable, Identifiable {
 final class Navigator: ObservableObject {
     static let shared = Navigator()
     @Published var pane: Pane = .overview
+    /// Settings, a sheet of the main window, and the page it opens on.
+    @Published var settingsOpen = false
+    var settingsPage: SettingsPage?
+
+    func openSettings(_ page: SettingsPage? = nil) {
+        settingsPage = page
+        settingsOpen = true
+    }
 }
 
 struct MainWindow: View {
@@ -54,24 +90,65 @@ struct MainWindow: View {
     @ObservedObject private var nav = Navigator.shared
 
     var body: some View {
-        NavigationSplitView {
+        // The sidebar holds the disk's state on every page: it stays.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
             Sidebar(monitor: monitor, selection: $nav.pane)
-                .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 300)
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: 230, ideal: 250, max: 320)
         } detail: {
             Group {
                 switch nav.pane {
                 case .overview: OverviewPage(monitor: monitor)
+                case .space: SpacePage(monitor: monitor)
                 case .trends: TrendsPage(monitor: monitor)
+                case .wear: WearPage(monitor: monitor)
+                case .cruft: CruftPage(monitor: monitor)
                 case .map: MapPage()
-                case .fixes: FixesPage(monitor: monitor)
+                case .prevent: PreventPage(monitor: monitor)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.canvas)
             .navigationTitle(nav.pane.title)
+            // On the page's side of the window, not over the sidebar.
+            .toolbar {
+                // At the window's trailing edge, where a Mac app's Refresh goes.
+                ToolbarItem(placement: .primaryAction) {
+                    if monitor.spaceMeasuring {
+                        ProgressView().controlSize(.small)
+                            .help("Measuring the whole disk…")
+                    } else {
+                        Button {
+                            monitor.refreshAll()
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .help("Measure everything again (⌘R)")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        nav.openSettings()
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                    .help("Settings (⌘,)")
+                }
+            }
         }
         .frame(minWidth: 900, minHeight: 620)
+        .sheet(isPresented: $nav.settingsOpen) {
+            SettingsView(monitor: monitor, page: nav.settingsPage)
+        }
         .onAppear { monitor.viewed() }
+        // While the window is open, free space follows what you delete:
+        // `mdif status` reads it from the disk each time, in milliseconds.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                await monitor.refresh()
+            }
+        }
         // The timer's refresh brings a new sample: the charts follow it.
         .task(id: monitor.lastRefresh) { await monitor.loadDetail() }
     }
@@ -84,17 +161,14 @@ private struct Sidebar: View {
     var body: some View {
         List(selection: Binding(get: { selection }, set: { if let p = $0 { selection = p } })) {
             Section {
-                ForEach(Pane.allCases) { p in
-                    Label {
-                        Text(p.title)
-                    } icon: {
-                        IconTile(symbol: p.symbol, color: p.color, size: 22)
-                    }
-                    .badge(badge(p))
-                    .tag(p)
-                }
+                row(.overview)
             } header: {
                 DiskSummary(monitor: monitor)
+            }
+            ForEach(Pane.Group.allCases, id: \.self) { g in
+                Section(g.rawValue) {
+                    ForEach(g.panes) { row($0) }
+                }
             }
         }
         .listStyle(.sidebar)
@@ -103,39 +177,194 @@ private struct Sidebar: View {
         }
     }
 
+    private func row(_ p: Pane) -> some View {
+        Label {
+            Text(p.title)
+        } icon: {
+            IconTile(symbol: p.symbol, color: p.color, size: 22)
+        }
+        .badge(badge(p))
+        .tag(p)
+    }
+
     private func badge(_ p: Pane) -> Int {
         p == .overview ? monitor.attentionCount : 0
     }
 }
 
-/// The disk at the top of the sidebar: its name, a bar, and what's free.
+/// The disk at the top of the sidebar, on every page: how full it is, where
+/// it's heading in a sentence, how fast, what comes back by itself, and the
+/// Trash with a button to empty it.
 private struct DiskSummary: View {
     @ObservedObject var monitor: Monitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "internaldrive.fill")
-                    .font(.title3)
                     .foregroundStyle(.secondary)
                 Text(Disk.name)
                     .font(.headline)
                     .foregroundStyle(.primary)
                 Spacer()
+                EditionBadge()
             }
             if let s = monitor.status {
-                CapacityBar(used: Double(s.total - s.avail) / Double(max(s.total, 1)),
-                            colors: monitor.health.ring)
-                Text("\(Format.bytes(s.avail)) free of \(Format.bytes(s.total))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                let used = Double(s.total - s.avail) / Double(max(s.total, 1))
+                CapacityRing(used: used, colors: monitor.health.ring, lineWidth: 12) {
+                    VStack(spacing: 1) {
+                        Text(Format.bytes(s.avail))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                        Text("free of \(Format.bytes(s.total))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 150, height: 150)
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 5) {
+                    HealthPill(health: monitor.health)
+                    Text(Headline.title(s))
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(Headline.detail(s))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(spacing: 4) {
+                    row("Used", "\(Format.bytes(s.total - s.avail)) · \(Int((used * 100).rounded()))%")
+                    let pace = Headline.pace(s)
+                    row(pace.label, pace.value)
+                    if let space = monitor.space {
+                        let back = space.byItself.reduce(0) { $0 + $1.bytes }
+                        if back >= 500_000_000 {
+                            HStack(spacing: 4) {
+                                row("Comes back by itself", Format.bytes(back))
+                                FreeingInfo(parts: space.byItself)
+                            }
+                        }
+                    }
+                }
+                if let trash = monitor.space?.trash, trash >= 100_000_000 {
+                    TrashRow(bytes: trash, monitor: monitor)
+                }
             }
         }
         .textCase(nil)
         .padding(.horizontal, 4)
         .padding(.top, 4)
         .padding(.bottom, 12)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value).fontWeight(.semibold).foregroundStyle(.primary).monospacedDigit()
+        }
+        .font(.caption)
+    }
+}
+
+/// Why deleting doesn't always free space at once, behind an (i): what
+/// APFS and macOS keep, and when each comes back.
+private struct FreeingInfo: View {
+    let parts: [SpaceReport.ComesBack]
+    @State private var shown = false
+
+    var body: some View {
+        Button {
+            shown.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("Why deleted files don't always free space at once")
+        .popover(isPresented: $shown, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Why deleting doesn't always free space at once")
+                    .font(.headline)
+                if !parts.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(parts, id: \.what) { p in
+                            Text("\(Format.bytes(p.bytes)) \(SpaceText.what(p.what)): \(p.how).")
+                                .font(.callout.weight(.medium))
+                        }
+                    }
+                }
+                ForEach(Self.reasons, id: \.0) { r in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(r.0).font(.callout.weight(.semibold))
+                        Text(r.1).font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(16)
+            .frame(width: 380)
+        }
+    }
+
+    static let reasons: [(String, String)] = [
+        ("The Trash",
+         "Deleting in Finder moves a file to the Trash. Its space comes back when the Trash is emptied."),
+        ("Snapshots",
+         "A local Time Machine snapshot keeps every file that existed when it was taken. A file it holds frees nothing until the snapshot goes, within a day, or when macOS needs the room."),
+        ("Purgeable space",
+         "Caches, iCloud copies and snapshots macOS can remove whenever something needs room. Finder counts them as available; the disk counts them as used until macOS removes them."),
+        ("Files still open",
+         "A file an app still has open keeps its space after it's deleted, until the app closes it or quits."),
+        ("Swap",
+         "Memory macOS moved to the disk. Its files are removed when the Mac restarts."),
+        ("Copies that share space",
+         "On APFS a copy can share its blocks with the original. Deleting one of them frees only what isn't shared."),
+    ]
+}
+
+/// The Trash takes its space until it's emptied: how much, and a button
+/// that empties it (`mdif clean ~/.Trash`), asked first.
+private struct TrashRow: View {
+    let bytes: Int64
+    @ObservedObject var monitor: Monitor
+
+    var body: some View {
+        let path = NSHomeDirectory() + "/.Trash"
+        let busy = monitor.cleaning.contains(path)
+        HStack(spacing: 8) {
+            Image(systemName: "trash").foregroundStyle(.orange)
+            Text("\(Format.bytes(bytes)) in the Trash")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .monospacedDigit()
+            Spacer(minLength: 4)
+            let action = CleanAction(
+                kind: "empty-trash", label: "Empty Trash", paths: [path],
+                confirm: "The \(Format.bytes(bytes)) in the Trash is erased for good. You can't undo this.",
+                done: nil)
+            #if APP_STORE
+            // The App Store edition may only read: Finder empties it.
+            if let c = action.shellCommand {
+                Button("Copy Command") { monitor.copy(c) }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help("\(c)\nOr choose Finder → Empty Trash.")
+            }
+            #else
+            if busy {
+                ProgressView().controlSize(.mini)
+            } else {
+                Button("Empty") { monitor.clean(action) }
+                    .controlSize(.small)
+            }
+            #endif
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 

@@ -1,0 +1,98 @@
+[
+  {
+    "cause": "8 agent worktrees of ~/devel/app are merged into main and have nothing uncommitted. They take 28.9 GB; removing them frees at least 22.4 GB.",
+    "fix": {
+      "kind": "run",
+      "detail": {
+        "command": "cd '/Users/me/devel/app' && for w in '.claude/worktrees/a' '.claude/worktrees/b'; do git worktree remove \"$w\"; done",
+        "note": "Their branches stay, and nothing is lost: git refuses a worktree with changes, and what it ignores in them is build output or in the main checkout too."
+      }
+    },
+    "space": 22400000000,
+    "per_day": null,
+    "path": "/Users/me/devel/app/.claude/worktrees",
+    "action": {
+      "kind": "worktrees",
+      "label": "Remove 2 Worktrees",
+      "paths": [
+        "/Users/me/devel/app/.claude/worktrees/a",
+        "/Users/me/devel/app/.claude/worktrees/b"
+      ],
+      "confirm": "Remove these 2 worktrees of ~/devel/app? 22.4 GB on disk; they don't go to the Trash.",
+      "done": null
+    },
+    "title": null,
+    "frees": 22400000000,
+    "age": 518400,
+    "sizes": []
+  },
+  {
+    "cause": "Chrome no longer downloads its AI model, but the copy it has still takes 4.3 GB.",
+    "fix": {
+      "kind": "run",
+      "detail": {
+        "command": "rm -rf '/Users/me/Library/Application Support/Google/Chrome/OptGuideOnDeviceModel'",
+        "note": "Quit Chrome first. The policy keeps it from coming back."
+      }
+    },
+    "space": 4300000000,
+    "per_day": null,
+    "path": "/Users/me/Library/Application Support/Google/Chrome/OptGuideOnDeviceModel",
+    "action": {
+      "kind": "trash",
+      "label": "Move to Trash",
+      "paths": [
+        "/Users/me/Library/Application Support/Google/Chrome/OptGuideOnDeviceModel"
+      ],
+      "confirm": null,
+      "done": null
+    },
+    "title": null,
+    "frees": 4300000000,
+    "age": 2592000,
+    "sizes": []
+  },
+  {
+    "cause": "~/devel/app/src-tauri/target grew 13.0 GB in the last 2 days (6.3 GB a day).",
+    "fix": {
+      "kind": "run",
+      "detail": {
+        "command": "cargo clean --manifest-path '/Users/me/devel/app/src-tauri/Cargo.toml'",
+        "note": "Rust rebuilds it locally, without downloading."
+      }
+    },
+    "space": null,
+    "per_day": 6316011888.5,
+    "path": "/Users/me/devel/app/src-tauri/target",
+    "action": {
+      "kind": "delete",
+      "label": "Delete Build Output",
+      "paths": [
+        "/Users/me/devel/app/src-tauri/target"
+      ],
+      "confirm": "Delete ~/devel/app/src-tauri/target? 33.8 GB on disk. It's deleted, not moved to the Trash; the next build makes it again.",
+      "done": null
+    },
+    "title": null,
+    "frees": 31200000000,
+    "age": 172800,
+    "sizes": [
+      {
+        "ts": 1792318800,
+        "bytes": 18500000000
+      },
+      {
+        "ts": 1792405200,
+        "bytes": 20800000000
+      },
+      {
+        "ts": 1792491600,
+        "bytes": 27100000000
+      },
+      {
+        "ts": 1792578000,
+        "bytes": 33800000000
+      }
+    ]
+  }
+]
