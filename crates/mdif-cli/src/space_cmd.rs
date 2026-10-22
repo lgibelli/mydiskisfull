@@ -112,9 +112,16 @@ fn print(r: &Report, now: i64) {
         let back: Vec<String> = r
             .comes_back
             .iter()
-            .map(|c| format!("{} {} ({})", bytes(c.bytes), c.what, c.how))
+            .map(|c| {
+                let what = if c.what == "trash" {
+                    "in the Trash"
+                } else {
+                    c.what
+                };
+                format!("{} {what} ({})", bytes(c.bytes), c.how)
+            })
             .collect();
-        println!("Comes back by itself: {}.", back.join(" · "));
+        println!("Of what's used: {}.", back.join(" · "));
     }
     println!();
     println!(

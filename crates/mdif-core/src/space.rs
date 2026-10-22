@@ -291,7 +291,8 @@ pub struct Report {
     pub measured: i64,
     pub took_secs: f64,
     pub volume: VolumeSpace,
-    /// Space that comes back without deleting anything.
+    /// Space counted as used that is freed without a clean-up: purgeable,
+    /// swap, and the Trash (once it's emptied).
     pub comes_back: Vec<ComesBack>,
     /// Biggest first; together they are `volume.used`.
     pub kinds: Vec<KindReport>,
@@ -321,7 +322,7 @@ pub struct OldFile {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComesBack {
-    /// `purgeable`, `swap`, `snapshots` or `trash`.
+    /// `purgeable`, `swap` or `trash`.
     pub what: &'static str,
     pub bytes: u64,
     pub how: String,
@@ -1207,7 +1208,7 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
             Some("VM") => (
                 Kind::Macos,
                 "Swap".into(),
-                Some("Comes back after a restart"),
+                Some("Removed when the Mac restarts"),
             ),
             Some("Preboot") => (
                 Kind::Macos,
@@ -1254,7 +1255,6 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
             .map(|v| v.bytes)
             .sum(),
         trash,
-        unmeasured: unmeasured.max(0) as u64,
     };
     if unmeasured > 0 {
         let mut note = "Files only macOS can read, and file-system metadata".to_string();
@@ -2053,7 +2053,6 @@ fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
 struct ComingBack {
     swap: u64,
     trash: u64,
-    unmeasured: u64,
 }
 
 /// What the disk is made of, in layers for the history (`strata`): each
@@ -2090,30 +2089,24 @@ pub fn strata(r: &Report) -> Vec<(&'static str, u64)> {
     out
 }
 
-/// Space that comes back without deleting anything. What snapshots hold is
-/// in what the scan couldn't see, which is all that's known of it.
+/// Space counted as used that is freed without a clean-up. What Time
+/// Machine's local snapshots hold is in purgeable already (macOS counts it
+/// there, and deletes them when space is needed); what the scan couldn't
+/// see is mostly macOS's own files and metadata, which stay, so it isn't
+/// here.
 fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     let mut out = vec![
         ComesBack {
             what: "purgeable",
             bytes: m.volume.purgeable,
-            how: "macOS frees it when it needs room".into(),
+            how: "macOS removes it when space is needed".into(),
         },
         ComesBack {
             what: "swap",
             bytes: b.swap,
-            how: "after a restart".into(),
+            how: "removed when the Mac restarts".into(),
         },
     ];
-    if m.snapshots > 0 {
-        out.push(ComesBack {
-            what: "snapshots",
-            bytes: b.unmeasured,
-            how: "after Time Machine's next backups, within a day, or sooner when macOS needs \
-                  the room"
-                .into(),
-        });
-    }
     // The Trash as it is now, not as it was at the scan: emptying it in
     // Finder shows at once.
     let trash = m.home.join(".Trash");
@@ -2125,7 +2118,7 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     out.push(ComesBack {
         what: "trash",
         bytes: trash,
-        how: "when you empty the Trash".into(),
+        how: "freed when the Trash is emptied".into(),
     });
     out.retain(|c| c.bytes > 0);
     out
@@ -2549,12 +2542,12 @@ mod tests {
         assert_eq!(named(&r, "files", "devel").bytes, 6100 * MB);
         assert_eq!(named(&r, "files", "Shared").bytes, GB);
 
-        // What comes back by itself.
+        // What is freed without a clean-up.
         let back: Vec<(&str, u64)> = r.comes_back.iter().map(|c| (c.what, c.bytes)).collect();
         assert_eq!(back, [("swap", 3 * GB), ("trash", 2 * GB)]);
         assert_eq!(
             named(&r, "macos", "Swap").note.as_deref(),
-            Some("Comes back after a restart")
+            Some("Removed when the Mac restarts")
         );
     }
 
@@ -2579,6 +2572,30 @@ mod tests {
         );
         let caches = kind(&r, "caches");
         assert_eq!(caches.reclaimable, caches.bytes - 2 * GB);
+    }
+
+    #[test]
+    fn what_a_snapshot_holds_is_counted_once_in_purgeable() {
+        // A Mac with a local snapshot: macOS counts what it holds as
+        // purgeable; the scan sees none of it, nor macOS's own files.
+        let mut m = measured(a_mac(), vec![volume("VM", 3 * GB)], 25 * GB);
+        m.snapshots = 1;
+        m.volume.purgeable = 10 * GB;
+        let r = report(&m, &Keep::default());
+        let back: Vec<(&str, u64)> = r.comes_back.iter().map(|c| (c.what, c.bytes)).collect();
+        assert_eq!(
+            back,
+            [("purgeable", 10 * GB), ("swap", 3 * GB), ("trash", 2 * GB)]
+        );
+        let unseen = named(&r, "other", "Not measured");
+        assert_eq!(unseen.bytes, 25 * GB);
+        assert!(
+            unseen
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("1 local snapshot holds")
+        );
     }
 
     #[test]

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Changed
+- What was "comes back by itself" is named as macOS names it, each on its own line: Purgeable
+  (macOS removes it when space is needed) and Swap (removed when the Mac restarts). `mdif space`
+  prints them as "Of what's used: …".
+
+### Fixed
+- Refresh and Settings are at the toolbar's trailing edge on macOS 26 and later; 0.1.1 left
+  them next to the sidebar (the window hides its title, and without it nothing pushed them over).
+- With a local Time Machine snapshot on the disk, everything the scan couldn't see was counted
+  as freed by itself (25 GB on a Mac with a 6 GB snapshot): most of it is macOS's own files and
+  metadata, which stay, and what the snapshot holds is in purgeable already. It's counted once.
+
 ## [0.1.1] - 2026-10-21
 
 ### Added

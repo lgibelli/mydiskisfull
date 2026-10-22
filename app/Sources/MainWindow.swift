@@ -111,31 +111,9 @@ struct MainWindow: View {
             .background(Theme.canvas)
             .navigationTitle(nav.pane.title)
             // On the page's side of the window, not over the sidebar.
-            .toolbar {
-                // At the window's trailing edge, where a Mac app's Refresh
-                // goes (.primaryAction is the leading edge on the Mac).
-                ToolbarItem(placement: .automatic) {
-                    if monitor.spaceMeasuring {
-                        ProgressView().controlSize(.small)
-                            .help("Measuring the whole disk…")
-                    } else {
-                        Button {
-                            monitor.refreshAll()
-                        } label: {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .help("Measure everything again (⌘R)")
-                    }
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        nav.openSettings()
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
-                    }
-                    .help("Settings (⌘,)")
-                }
-            }
+            .windowActions(measuring: monitor.spaceMeasuring,
+                           refresh: { monitor.refreshAll() },
+                           settings: { nav.openSettings() })
         }
         .frame(minWidth: 900, minHeight: 620)
         .sheet(isPresented: $nav.settingsOpen) {
@@ -193,9 +171,58 @@ private struct Sidebar: View {
     }
 }
 
+/// Refresh and Settings, in the window's toolbar.
+private struct WindowActions: ToolbarContent {
+    let measuring: Bool
+    let refresh: () -> Void
+    let settings: () -> Void
+
+    var body: some ToolbarContent {
+        ToolbarItem {
+            if measuring {
+                ProgressView().controlSize(.small)
+                    .help("Measuring the whole disk…")
+            } else {
+                Button(action: refresh) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .help("Measure everything again (⌘R)")
+            }
+        }
+        ToolbarItem {
+            Button(action: settings) {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .help("Settings (⌘,)")
+        }
+    }
+}
+
+private extension View {
+    /// The window's actions at the toolbar's trailing edge, where a Mac app's
+    /// Refresh goes. The window hides its title (each page shows its own),
+    /// and without a title nothing pushes them there but a flexible spacer,
+    /// which macOS 26 has; earlier versions put them where SwiftUI does. The
+    /// check is out here, in a view builder, so ToolbarSpacer's type never
+    /// reaches a toolbar on a macOS without it.
+    @ViewBuilder
+    func windowActions(measuring: Bool, refresh: @escaping () -> Void,
+                       settings: @escaping () -> Void) -> some View {
+        let actions = WindowActions(measuring: measuring, refresh: refresh, settings: settings)
+        if #available(macOS 26.0, *) {
+            toolbar {
+                ToolbarSpacer(.flexible)
+                actions
+            }
+        } else {
+            toolbar { actions }
+        }
+    }
+}
+
 /// The disk at the top of the sidebar, on every page: how full it is, where
-/// it's heading in a sentence, how fast, what comes back by itself, and the
-/// Trash with a button to empty it.
+/// it's heading in a sentence, how fast, what's purgeable and in swap, and
+/// the Trash with a button to empty it.
 private struct DiskSummary: View {
     @ObservedObject var monitor: Monitor
 
@@ -240,13 +267,14 @@ private struct DiskSummary: View {
                     row("Used", "\(Format.bytes(s.total - s.avail)) · \(Int((used * 100).rounded()))%")
                     let pace = Headline.pace(s)
                     row(pace.label, pace.value)
+                    // Counted as used, freed without a clean-up; the (i) on
+                    // the first says why deleting doesn't always free space.
                     if let space = monitor.space {
-                        let back = space.byItself.reduce(0) { $0 + $1.bytes }
-                        if back >= 500_000_000 {
-                            HStack(spacing: 4) {
-                                row("Comes back by itself", Format.bytes(back))
-                                FreeingInfo(parts: space.byItself)
-                            }
+                        let parts = space.byItself.filter { $0.bytes >= 500_000_000 }
+                        ForEach(Array(parts.enumerated()), id: \.element.what) { i, p in
+                            row(SpaceText.label(p.what), Format.bytes(p.bytes),
+                                help: "\(SpaceText.label(p.what)): \(p.how).",
+                                info: i == 0 ? space.byItself : nil)
                         }
                     }
                 }
@@ -261,13 +289,18 @@ private struct DiskSummary: View {
         .padding(.bottom, 12)
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
+    private func row(_ label: String, _ value: String, help: String? = nil,
+                     info: [SpaceReport.ComesBack]? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(label).foregroundStyle(.secondary)
+            if let info {
+                FreeingInfo(parts: info)
+            }
             Spacer(minLength: 8)
             Text(value).fontWeight(.semibold).foregroundStyle(.primary).monospacedDigit()
         }
         .font(.caption)
+        .help(help ?? "")
     }
 }
 
@@ -293,7 +326,7 @@ private struct FreeingInfo: View {
                 if !parts.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(parts, id: \.what) { p in
-                            Text("\(Format.bytes(p.bytes)) \(SpaceText.what(p.what)): \(p.how).")
+                            Text("\(SpaceText.label(p.what)): \(Format.bytes(p.bytes)), \(p.how).")
                                 .font(.callout.weight(.medium))
                         }
                     }

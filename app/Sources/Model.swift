@@ -597,7 +597,7 @@ struct SpaceReport: Decodable {
     }
 
     struct ComesBack: Decodable {
-        /// "purgeable", "swap", "snapshots", "trash".
+        /// "purgeable", "swap", "trash".
         let what: String
         let bytes: Int64
         /// "after a restart".
@@ -682,7 +682,8 @@ struct SpaceReport: Decodable {
     /// What's in the Trash: free once it's emptied.
     var trash: Int64 { comesBack.first { $0.what == "trash" }?.bytes ?? 0 }
 
-    /// What comes back without anyone doing anything (not the Trash).
+    /// Purgeable and swap: counted as used, freed without a clean-up (not
+    /// the Trash, which someone empties).
     var byItself: [ComesBack] { comesBack.filter { $0.what != "trash" } }
 }
 

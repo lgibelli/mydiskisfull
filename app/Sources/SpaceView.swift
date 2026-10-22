@@ -162,15 +162,14 @@ private struct SpaceBar: View {
                     .font(.callout.weight(.semibold)).monospacedDigit()
                 Text("\(Format.bytes(report.volume.free)) free")
                     .font(.callout).foregroundStyle(.secondary).monospacedDigit()
-                let back = report.byItself.reduce(0) { $0 + $1.bytes }
-                if back >= 500_000_000 {
-                    Text("+ \(Format.bytes(back)) comes back by itself")
+                // Counted as used, freed without a clean-up.
+                ForEach(report.byItself.filter { $0.bytes >= 500_000_000 }, id: \.what) { p in
+                    Text("\(Format.bytes(p.bytes)) \(SpaceText.label(p.what).lowercased())")
                         .font(.callout).foregroundStyle(.green).monospacedDigit()
-                        .help(report.byItself.map { "\(Format.bytes($0.bytes)) \(SpaceText.what($0.what)), \($0.how)" }
-                            .joined(separator: "\n"))
+                        .help("\(SpaceText.label(p.what)): \(p.how).")
                 }
                 if report.trash >= 100_000_000 {
-                    Text("+ \(Format.bytes(report.trash)) in the Trash")
+                    Text("\(Format.bytes(report.trash)) in the Trash")
                         .font(.callout).foregroundStyle(.orange).monospacedDigit()
                 }
                 Spacer()
@@ -852,14 +851,13 @@ enum SpaceText {
         }
     }
 
-    /// "purgeable" as a phrase: "macOS frees by itself".
-    static func what(_ w: String) -> String {
+    /// What's freed without a clean-up, by macOS's names: "Purgeable".
+    static func label(_ w: String) -> String {
         switch w {
-        case "purgeable": "that macOS frees when it needs room"
-        case "swap": "of swap"
-        case "snapshots": "held by Time Machine's local snapshots"
-        case "trash": "in the Trash"
-        default: w
+        case "purgeable": "Purgeable"
+        case "swap": "Swap"
+        case "trash": "In the Trash"
+        default: w.capitalized
         }
     }
 

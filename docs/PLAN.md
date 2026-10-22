@@ -408,7 +408,7 @@ mydiskisfull/
     cache, Rust `deps`) were 80% of one listing.
 - **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
   - A main window with a sidebar (the capacity ring, the forecast in one sentence led by
-    whatever fills the disk soonest, what comes back by itself, the Trash, the watcher's state)
+    whatever fills the disk soonest, purgeable and swap, the Trash, the watcher's state)
     and seven pages: Overview (what needs attention with its fix, then the top three from each
     page with See All), Space (where the space goes: `mdif space`, a cached whole-disk scan
     sorted into kinds, each with its biggest items and what may not be needed marked, a

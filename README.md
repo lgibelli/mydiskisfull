@@ -92,8 +92,9 @@ The app has a main window with these pages:
 
 - **Overview**: anything that needs attention (a runaway filler, a tweak something undid, the
   watcher stopped), each with what to do; then the top three from each page below, each with its
-  button. How full the disk is and where it's heading is in the sidebar, on every page, with what
-  comes back by itself (swap after a restart, what macOS frees when it needs room) and the Trash.
+  button. How full the disk is and where it's heading is in the sidebar, on every page, with what's
+  purgeable (macOS removes it when space is needed, Time Machine's local snapshots included), swap
+  (removed when the Mac restarts) and the Trash.
 - **Space**: where your space goes: one bar for the disk split by kind (apps, build output,
   developer tools, cloud copies, app data, caches, media, Mail and Messages, virtual machines,
   macOS, your files), each kind biggest first and opening to its biggest items, with what may not
