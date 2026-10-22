@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format is based on
 - What was "comes back by itself" is named as macOS names it, each on its own line: Purgeable
   (macOS removes it when space is needed) and Swap (removed when the Mac restarts). `mdif space`
   prints them as "Of what's used: …".
+- Lite says the full version is completely free, with no ads, and links to its page instead
+  of the site's home page. About says no ads in both.
 
 ### Fixed
 - Refresh and Settings are at the toolbar's trailing edge on macOS 26 and later; 0.1.1 left

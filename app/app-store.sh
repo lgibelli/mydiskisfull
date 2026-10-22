@@ -6,9 +6,10 @@
 #
 #   app/app-store.sh             build/AppStore/MyDiskIsFull-Lite-<version>.pkg, validated
 #   app/app-store.sh --upload    and upload it, as a new build of the app
-#   BUILD_NUMBER=101 app/app-store.sh --upload
+#   BUILD_NUMBER=102.1 app/app-store.sh --upload
 #                                another upload of the same version (each
-#                                build number is taken once)
+#                                build number is taken once, and must stay
+#                                below the next version's: 103)
 #
 # Needs, in release.env (gitignored; see release.env.example):
 #   TEAM_ID                the team's id
@@ -78,6 +79,12 @@ say "Building the App Store edition (universal)"
 ARCH=universal app/build.sh --app-store
 APP="build/AppStore/MyDiskIsFull Lite.app"
 CONTENTS="$APP/Contents"
+# CI uploads on each run of a release branch, and App Store Connect takes a
+# build number once: the run's number goes after the version's (102.7).
+if [ -n "${BUILD_RUN:-}" ]; then
+    plutil -replace CFBundleVersion -string \
+        "$(plutil -extract CFBundleVersion raw "$CONTENTS/Info.plist").$BUILD_RUN" "$CONTENTS/Info.plist"
+fi
 VERSION="$(plutil -extract CFBundleShortVersionString raw "$CONTENTS/Info.plist")"
 BUILD="$(plutil -extract CFBundleVersion raw "$CONTENTS/Info.plist")"
 [ "$(plutil -extract CFBundleIdentifier raw "$CONTENTS/Info.plist")" = "$APP_STORE_BUNDLE_ID" ] \

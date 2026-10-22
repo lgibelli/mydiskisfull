@@ -18,8 +18,8 @@ enum Edition {
     /// The app's name, as the menus and windows say it.
     static let name = appStore ? "MyDiskIsFull Lite" : "MyDiskIsFull"
 
-    /// Where the full version is.
-    static let fullVersion = URL(string: "https://salamacchine.it/")!
+    /// Where the full version is: its own page, with the download.
+    static let fullVersion = URL(string: "https://salamacchine.it/apps/mydiskisfull/")!
 
     @MainActor static func openFullVersion() {
         NSWorkspace.shared.open(fullVersion)
@@ -66,7 +66,7 @@ enum Missing {
         }
     }
 
-    static let pitch = "The full version is free and open source."
+    static let pitch = "The full version is completely free (no ads) and open source."
 }
 
 /// Where a feature would be: locked, with what's missing; asked about, why
@@ -146,7 +146,7 @@ struct FullVersionSheet: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("The full version").font(.headline)
-                Text("It's completely free and open source, digitally signed with our Developer ID and notarized by Apple, so macOS opens it like any App Store app. It cleans up with one click, keeps the disk tidy by itself, applies the tweaks, and shows which apps wear the disk. You can keep both; your keep list stays with each.")
+                Text("It's completely free, with no ads, and open source, digitally signed with our Developer ID and notarized by Apple, so macOS opens it like any App Store app. It cleans up with one click, keeps the disk tidy by itself, applies the tweaks, and shows which apps wear the disk. You can keep both; your keep list stays with each.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

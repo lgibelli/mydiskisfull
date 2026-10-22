@@ -58,15 +58,15 @@ struct AboutView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
 
-            Text("Free and open source, under the GNU AGPL 3.0 licence. No telemetry, no account.")
+            Text("Completely free and open source, under the GNU AGPL 3.0 licence. No ads, no telemetry, no account.")
                 .font(.caption2).foregroundStyle(.secondary)
             #if APP_STORE
-            Text("This is the App Store version. The full version also applies tweaks for you and shows which apps write the most.")
+            Text("This is the App Store version. The full version, also completely free with no ads, cleans up with one click, applies tweaks for you and shows which apps write the most.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 30)
-            Link("Get the Full Version", destination: Edition.fullVersion)
+            Link("Get the Free Full Version", destination: Edition.fullVersion)
                 .font(.caption)
             #else
             Link("Source", destination: URL(string: "https://github.com/lgibelli/mydiskisfull")!)

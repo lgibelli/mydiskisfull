@@ -50,8 +50,8 @@ Whoever controls the feed can't get anything else installed.
 `.github/workflows/release.yml` runs the same two commands from a `release/x.y.z` branch (or by
 hand), with a provenance attestation in between, so a download can be checked with
 `gh attestation verify MyDiskIsFull.dmg --repo lgibelli/mydiskisfull`. Beside it, its
-`app-store` job runs `app/app-store.sh --upload` from the same commit: Lite reaches App Store
-Connect and, once processed (usually within the hour), TestFlight. Both jobs wait in the
+`app-store` job runs `app/app-store.sh --upload` from the same commit, numbered with the run
+(0.1.2 is build 102.<run>, as a branch may run again): Lite reaches App Store Connect and, once processed (usually within the hour), TestFlight. Both jobs wait in the
 `release` environment, approved together. It needs, under Settings → Secrets and variables →
 Actions:
 
@@ -86,7 +86,7 @@ Each version:
 ```sh
 app/app-store.sh             # universal, signed for the store, packaged, validated
 app/app-store.sh --upload    # and uploaded as a new build
-BUILD_NUMBER=10001 app/app-store.sh --upload   # the same version again
+BUILD_NUMBER=102.1 app/app-store.sh --upload   # 0.1.2 again: each build number goes once
 ```
 
 Then, in App Store Connect, pick the build for the version and submit it for review. Releasing
