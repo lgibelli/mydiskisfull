@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.2] - 2026-10-22
+
+### Added
+- A release branch builds MyDiskIsFull Lite too, from the same commit, signs it for the Mac App
+  Store and uploads it to App Store Connect, where it shows in TestFlight.
+
 ### Changed
 - What was "comes back by itself" is named as macOS names it, each on its own line: Purgeable
   (macOS removes it when space is needed) and Swap (removed when the Mac restarts). `mdif space`
@@ -362,5 +368,6 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.2]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.2
 [0.1.1]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.1
 [0.1.0]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.0

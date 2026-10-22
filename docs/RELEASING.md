@@ -2,7 +2,8 @@
 
 A release is the full edition of the app as a universal disk image (Developer ID signed,
 notarized, stapled), the command line on its own, and the Sparkle feed that tells installed
-copies about it, all on a GitHub release. The App Store edition isn't released yet (PLAN, M7).
+copies about it, all on a GitHub release; and MyDiskIsFull Lite, the App Store edition, uploaded
+to App Store Connect from the same commit, for TestFlight and review.
 
 ## How installed copies update
 
@@ -48,15 +49,21 @@ Whoever controls the feed can't get anything else installed.
 
 `.github/workflows/release.yml` runs the same two commands from a `release/x.y.z` branch (or by
 hand), with a provenance attestation in between, so a download can be checked with
-`gh attestation verify MyDiskIsFull.dmg --repo lgibelli/mydiskisfull`. It needs, under
-Settings → Secrets and variables → Actions:
+`gh attestation verify MyDiskIsFull.dmg --repo lgibelli/mydiskisfull`. Beside it, its
+`app-store` job runs `app/app-store.sh --upload` from the same commit: Lite reaches App Store
+Connect and, once processed (usually within the hour), TestFlight. Both jobs wait in the
+`release` environment, approved together. It needs, under Settings → Secrets and variables →
+Actions:
 
 | Name | Kind | What |
 |---|---|---|
 | `MACOS_CERT_P12_BASE64`, `MACOS_CERT_PASSWORD` | secrets | the Developer ID Application certificate and its key, exported as .p12, base64 |
 | `APPLE_API_KEY_B64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | secrets | an App Store Connect API key (Developer role) for notarytool |
 | `SPARKLE_ED_PRIVATE_KEY` | secret | the exported Sparkle key |
+| `MAS_APP_P12_BASE64`, `MAS_INSTALLER_P12_BASE64`, `MAS_P12_PASSWORD` | secrets | the Apple Distribution and Mac Installer Distribution identities, each a .p12 with Apple's WWDR G3 intermediate in it, base64 |
+| `MAS_PROFILE_BASE64` | secret | Lite's Mac App Store provisioning profile, base64 |
 | `APPLE_TEAM_ID` | variable | the team ID |
+| `APP_STORE_BUNDLE_ID` | variable | Lite's bundle id |
 
 The job runs in the `release` environment: add required reviewers there so a push alone can't
 sign anything. It, too, stops at a draft.
