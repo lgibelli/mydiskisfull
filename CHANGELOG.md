@@ -18,6 +18,8 @@ All notable changes to this project are documented here. The format is based on
   prints them as "Of what's used: …".
 - Lite says the full version is completely free, with no ads, and links to its page instead
   of the site's home page. About says no ads in both.
+- Lite leaves out Disk Wear and Prevent: the App Sandbox rules out everything they do, so they
+  only pointed at the full version. Its pages are ⌘1 to ⌘5.
 
 ### Fixed
 - Refresh and Settings are at the toolbar's trailing edge on macOS 26 and later; 0.1.1 left

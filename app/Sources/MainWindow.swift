@@ -16,8 +16,14 @@ enum Pane: String, CaseIterable, Identifiable {
     enum Group: String, CaseIterable {
         case monitor = "Monitor", clean = "Clean"
 
-        var panes: [Pane] { Pane.allCases.filter { $0.group == self } }
+        var panes: [Pane] { Pane.shown.filter { $0.group == self } }
     }
+
+    /// The pages this edition has. The App Store one leaves out Disk Wear and
+    /// Prevent: the sandbox rules out all they do (which apps write, tweaks,
+    /// clean-ups), and a page that only points at the full version reads as a
+    /// placeholder.
+    static let shown: [Pane] = Edition.appStore ? allCases.filter { $0 != .wear && $0 != .prevent } : allCases
 
     var group: Group? {
         switch self {
@@ -63,9 +69,9 @@ enum Pane: String, CaseIterable, Identifiable {
         }
     }
 
-    /// ⌘1 to ⌘7.
+    /// ⌘1 to ⌘7 (⌘5 in the App Store edition).
     var key: KeyEquivalent {
-        KeyEquivalent(Character("\((Pane.allCases.firstIndex(of: self) ?? 0) + 1)"))
+        KeyEquivalent(Character("\((Pane.shown.firstIndex(of: self) ?? 0) + 1)"))
     }
 }
 

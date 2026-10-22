@@ -68,7 +68,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut(",", modifiers: .command)
         }
         CommandGroup(before: .sidebar) {
-            ForEach(Pane.allCases) { p in
+            ForEach(Pane.shown) { p in
                 Button(p.title) { AppDelegate.show(p) }
                     .keyboardShortcut(p.key, modifiers: .command)
             }
