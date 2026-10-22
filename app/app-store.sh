@@ -83,8 +83,13 @@ BUILD="$(plutil -extract CFBundleVersion raw "$CONTENTS/Info.plist")"
 [ "$(plutil -extract CFBundleIdentifier raw "$CONTENTS/Info.plist")" = "$APP_STORE_BUNDLE_ID" ] \
     || die "the bundle id isn't $APP_STORE_BUNDLE_ID"
 
+[ -f "$CONTENTS/Resources/Assets.car" ] \
+    || die "the icon went in as an .icns, which macOS 26 frames in grey: this needs actool from Xcode 26 on macOS 26"
+
 say "Signing for the App Store as: $SIGN_APP"
-cp "$PROFILE" "$CONTENTS/embedded.provisionprofile"
+# Readable by all: CI writes the profile under umask 077, and the installer
+# makes every file root's.
+install -m 644 "$PROFILE" "$CONTENTS/embedded.provisionprofile"
 # The store wants the app's own entitlements plus who it is, as the profile
 # grants them. The helper keeps exactly the two it inherits the sandbox with.
 ENT="$(mktemp).entitlements"
@@ -99,6 +104,10 @@ codesign --force --timestamp --options runtime --sign "$SIGN_APP" --entitlements
 codesign --verify --deep --strict "$APP"
 # A quarantine flag anywhere in the package is rejected after the upload.
 if xattr -rl "$APP" | grep -q com.apple.quarantine; then die "a file in the app is quarantined"; fi
+# Installed, everything is root's: what others can't read, nobody can check
+# the signature of, and App Store Connect refuses the package.
+private="$(find "$APP" \( -type d ! -perm -o+rx \) -o \( ! -type d ! -perm -o+r \))"
+[ -z "$private" ] || die "only root could read these once installed: $private"
 
 PKG="build/AppStore/MyDiskIsFull-Lite-$VERSION-$BUILD.pkg"
 say "Packaging, signed as: $SIGN_PKG"
@@ -107,12 +116,23 @@ productbuild --component "$APP" /Applications --sign "$SIGN_PKG" "$PKG"
 pkgutil --check-signature "$PKG" | head -3
 
 KEY=(--apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER")
+# altool exits 0 when App Store Connect refuses the package: what it says on
+# success is the only evidence.
+altool() { # what it says on success, then its arguments
+    local ok="$1"
+    shift
+    xcrun altool "$@" 2>&1 | tee "$ALTOOL_LOG" || true
+    grep -q "$ok" "$ALTOOL_LOG" || die "App Store Connect refused the package (above)"
+}
+ALTOOL_LOG="$(mktemp)"
+trap 'rm -f "$profile_plist" "${ENT:-}" "$ALTOOL_LOG"' EXIT
+
 say "Validating with App Store Connect"
-xcrun altool --validate-app -f "$PKG" -t macos "${KEY[@]}"
+altool "No errors validating archive" --validate-app -f "$PKG" -t macos "${KEY[@]}"
 
 if $UPLOAD; then
     say "Uploading $VERSION ($BUILD)"
-    xcrun altool --upload-app -f "$PKG" -t macos "${KEY[@]}"
+    altool "No errors uploading archive" --upload-app -f "$PKG" -t macos "${KEY[@]}"
     say "Uploaded. It shows in App Store Connect once it's processed, usually within the hour."
 else
     say "Validated: $PKG. app/app-store.sh --upload sends it."

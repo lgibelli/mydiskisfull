@@ -44,7 +44,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     environment: release # add required reviewers in Settings → Environments
     steps:
       - uses: actions/checkout@v5
@@ -53,8 +53,9 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
-      # actool reads the icon's layers (an .icon) from Xcode 26; with an older
-      # one the app gets an .icns that macOS 26 shows in a grey frame.
+      # actool reads the icon's layers (an .icon) from Xcode 26, and on macOS 15
+      # not even then: the app got an .icns that macOS 26 shows in a grey frame
+      # (0.1.1). release.sh and app-store.sh now stop instead.
       - name: Use Xcode 26 or later if the runner has it
         run: |
           xcode=$(ls -d /Applications/Xcode_2[6-9]*.app 2>/dev/null | sort -V | tail -1 || true)
@@ -121,7 +122,7 @@ jobs:
   # MyDiskIsFull Lite, for TestFlight and the Mac App Store. The build number
   # comes from the version (0.1.2 is 102), so each version uploads once.
   app-store:
-    runs-on: macos-15
+    runs-on: macos-26
     environment: release
     steps:
       - uses: actions/checkout@v5

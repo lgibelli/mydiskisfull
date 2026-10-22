@@ -155,6 +155,7 @@ if xcrun actool "$ROOT/$LAYERS" --compile "$ROOT/$CONTENTS/Resources" --platform
     plutil -replace CFBundleIconName -string "$APP_NAME" "$CONTENTS/Info.plist"
 else
     say "actool can't compile an .icon (Xcode 26 or later): the icon goes in as an .icns"
+    tail -5 "$ICON_DIR/actool.log" | sed 's/^/   /'
     rm -f "$CONTENTS/Resources/Assets.car"
     ICON="$ICON_DIR/$APP_NAME.icns"
     if [ ! -f "$ICON" ] || [ app/make-icon.swift -nt "$ICON" ]; then
