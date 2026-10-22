@@ -87,6 +87,19 @@ notarize() {
     fi
 }
 
+# stapler gets the ticket from Apple (CloudKit): a dropped connection
+# ("The network connection was lost", error 68) is tried again; a ticket
+# that isn't there fails each time, and then for good.
+stapler() {
+    local i
+    for i in 1 2 3; do
+        xcrun stapler "$@" && return 0
+        echo "stapler $1 failed (try $i of 4): again in 20 s" >&2
+        sleep 20
+    done
+    xcrun stapler "$@"
+}
+
 upload() {
     local files=("$DMG" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml" "$CLI" "$CLI.sha256")
     for f in "${files[@]}" "$OUT/notes.md"; do
@@ -157,8 +170,8 @@ ZIP="$OUT/$APP_NAME-$VERSION.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 notarize "$ZIP"
 rm -f "$ZIP"
-xcrun stapler staple "$APP"
-xcrun stapler validate "$APP"
+stapler staple "$APP"
+stapler validate "$APP"
 spctl -a -vv -t execute "$APP"
 
 # The command line on its own, for those who don't want the app: the binary
@@ -183,15 +196,15 @@ rm -rf "$STAGE"
 # Gatekeeper assesses the image as well as the app in it.
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 notarize "$DMG"
-xcrun stapler staple "$DMG"
-xcrun stapler validate "$DMG"
+stapler staple "$DMG"
+stapler validate "$DMG"
 
 say "4/5  Checking the image as someone downloading it gets it"
 MNT=$(mktemp -d)
 hdiutil attach "$DMG" -nobrowse -readonly -quiet -mountpoint "$MNT"
 CHECK=$(spctl -a -vv -t execute "$MNT/$APP_NAME.app" 2>&1 || true)
 STAPLED=yes
-xcrun stapler validate "$MNT/$APP_NAME.app" >/dev/null 2>&1 || STAPLED=no
+stapler validate "$MNT/$APP_NAME.app" >/dev/null 2>&1 || STAPLED=no
 ARCHS=$(lipo -archs "$MNT/$APP_NAME.app/Contents/MacOS/$APP_NAME")
 ls_unregister "$MNT/$APP_NAME.app"
 hdiutil detach "$MNT" -quiet
