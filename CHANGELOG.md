@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.3] - 2026-10-23
+
+### Added
+- Delete Snapshots: when the disk is nearly full and local Time Machine snapshots keep the space
+  of deleted files, the suggestion deletes them after you confirm, instead of only giving a
+  command for Terminal. Backups on your backup disk aren't touched. `mdif clean` takes a snapshot
+  by its name and checks it's gone afterwards. Lite still gives the command.
+- A copy button beside each path on Cruft (and Space) copies the whole path, for Terminal or
+  Go to Folder.
+
+### Fixed
+- Move to Trash on a forgotten folder (Minecraft's game folder, a cloud folder nothing syncs any
+  more) always failed with "isn't a file": the check made right before took every folder for a
+  file.
+- When nothing was cleaned, the alert no longer says the disk has more free space: that was
+  something else changing the disk meanwhile.
+
 ## [0.1.2] - 2026-10-22
 
 ### Added
@@ -375,6 +392,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.3]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.3
 [0.1.2]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.2
 [0.1.1]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.1
 [0.1.0]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.0
