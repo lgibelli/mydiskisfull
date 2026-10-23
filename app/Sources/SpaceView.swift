@@ -677,11 +677,19 @@ struct ItemRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(i.name).font(.callout.weight(.medium)).lineLimit(1)
-                    // Named by its path already: once is enough.
-                    if Format.path(i.path) != i.name, !i.path.isEmpty {
-                        Text(Format.path(i.path)).font(.caption).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
+                    // Named by its path already: once is enough, and the
+                    // copy button goes by the name.
+                    let named = Format.path(i.path) == i.name
+                    HStack(spacing: 4) {
+                        Text(i.name).font(.callout.weight(.medium)).lineLimit(1)
+                        if named, !i.path.isEmpty { CopyPathButton(path: i.path) }
+                    }
+                    if !named, !i.path.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(Format.path(i.path)).font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                            CopyPathButton(path: i.path)
+                        }
                     }
                 }
                 Spacer(minLength: 8)

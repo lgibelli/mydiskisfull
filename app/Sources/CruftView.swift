@@ -143,9 +143,12 @@ private struct CruftRow: View {
                     Text(f.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                     if f.kept { Pill(text: "Kept", color: .secondary, symbol: "pin.fill") }
                 }
-                Text(Format.path((f.path as NSString).deletingLastPathComponent))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 4) {
+                    Text(Format.path((f.path as NSString).deletingLastPathComponent))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    CopyPathButton(path: f.path)
+                }
                 Text(used).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)

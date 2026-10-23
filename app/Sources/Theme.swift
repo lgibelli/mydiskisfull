@@ -231,6 +231,32 @@ struct Pill: View {
     }
 }
 
+/// Copies a path, whole and as it is (no `~`, no quotes), for Terminal or
+/// Go to Folder; a tick says it's done.
+struct CopyPathButton: View {
+    let path: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(path, forType: .string)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .frame(width: 12)
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .help("Copy the path: \(path)")
+    }
+}
+
 struct HealthPill: View {
     let health: Health
 
