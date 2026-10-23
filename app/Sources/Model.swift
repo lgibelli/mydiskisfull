@@ -320,7 +320,7 @@ struct Suggestion: Decodable {
 /// What a suggestion's button does: `mdif clean` on its paths, which checks
 /// each again first.
 struct CleanAction: Decodable {
-    /// "worktrees", "trash", "delete", "empty" or "restart".
+    /// "worktrees", "trash", "delete", "empty", "restart" or "snapshots".
     let kind: String
     /// "Move to Trash", "Remove 8 Worktrees".
     let label: String
@@ -375,6 +375,7 @@ struct CleanAction: Decodable {
         case "empty-trash": "Emptying the Trash…"
         case "finder-trash": "Waiting for Finder…"
         case "restart": "Restarting…"
+        case "snapshots": "Deleting the snapshots…"
         default: "Removing…"
         }
     }
@@ -385,8 +386,8 @@ struct CleanAction: Decodable {
 struct Cleaned: Decodable {
     struct Item: Decodable {
         let path: String
-        /// "removed", "trashed", "deleted", "emptied", "erased" (the Trash) or
-        /// "restarted".
+        /// "removed", "trashed", "deleted", "emptied", "erased" (the Trash),
+        /// "restarted" or "released" (a local snapshot).
         let how: String
         /// What went to the Trash, which still takes its space there.
         let size: Int64?

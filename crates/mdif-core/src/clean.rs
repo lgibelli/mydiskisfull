@@ -24,6 +24,9 @@
 //!   when it needs it: the app itself, and its windows, stay.
 //!
 //! - The Trash is emptied, after you confirm: what's in it is erased.
+//! - Local Time Machine snapshots ([`snapshot`]) are deleted with `tmutil
+//!   deletelocalsnapshots`, after you confirm: backups on the backup disk
+//!   stay, but changes since the last one lose their local copy.
 //! - The folders macOS updates leave in `/Users/Shared` ([`relocated`]) go
 //!   to the Trash through Finder, which asks for an administrator's
 //!   password: they belong to the system.
@@ -42,7 +45,7 @@ use crate::worktrees::{self, Finished};
 /// What a button does, offered with a suggestion.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Action {
-    /// `worktrees`, `trash`, `delete`, `empty` or `restart`.
+    /// `worktrees`, `trash`, `delete`, `empty`, `restart` or `snapshots`.
     pub kind: &'static str,
     /// "Move to Trash", "Remove 8 Worktrees".
     pub label: String,
@@ -60,7 +63,8 @@ pub struct Action {
 pub enum Step {
     RemoveWorktree(Finished),
     /// To the Trash once `quit` (a process name) isn't running. Without one,
-    /// a big file nobody uses ([`unused_file`]), checked again right before.
+    /// a folder that can go ([`trashable_folder`]) or a big file nobody uses
+    /// ([`unused_file`]), checked again right before.
     Trash {
         path: PathBuf,
         quit: Option<&'static str>,
@@ -85,6 +89,13 @@ pub enum Step {
         helper: String,
         pids: Vec<i32>,
     },
+    /// The local Time Machine snapshot `name`, taken at `date`, deleted;
+    /// checked gone from `volume` afterwards.
+    DeleteSnapshot {
+        name: PathBuf,
+        date: String,
+        volume: PathBuf,
+    },
 }
 
 impl Step {
@@ -97,6 +108,7 @@ impl Step {
             | Step::EmptyTrash(path)
             | Step::FinderTrash(path) => path,
             Step::Restart { app, .. } => app,
+            Step::DeleteSnapshot { name, .. } => name,
         }
     }
 }
@@ -104,8 +116,8 @@ impl Step {
 #[derive(Debug, Clone, Serialize)]
 pub struct Done {
     pub path: PathBuf,
-    /// `removed`, `trashed`, `deleted`, `emptied`, `erased` (the Trash) or
-    /// `restarted`.
+    /// `removed`, `trashed`, `deleted`, `emptied`, `erased` (the Trash),
+    /// `restarted` or `released` (a snapshot).
     pub how: &'static str,
     /// Where it went in the Trash.
     pub to: Option<PathBuf>,
@@ -150,18 +162,7 @@ pub fn plan(
     if relocated(path, Path::new(SHARED)) {
         return Ok(Step::FinderTrash(path.to_path_buf()));
     }
-    // Minecraft's game folder, saved worlds and all, after you confirm.
-    if minecraft(path) {
-        return deletable(path, home).map(|()| Step::Trash {
-            path: path.to_path_buf(),
-            quit: None,
-        });
-    }
-    // A folder a handler says can go (a cloud folder nothing syncs any more).
-    if path
-        .strip_prefix(home)
-        .is_ok_and(crate::handlers::trashable)
-    {
+    if trashable_folder(path, home) {
         return deletable(path, home).map(|()| Step::Trash {
             path: path.to_path_buf(),
             quit: None,
@@ -228,9 +229,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     ));
                 }
                 Some(_) => {}
-                // Still one of yours that nobody uses, and not a link put
-                // in its place.
-                None => unused_file(path, home, BIG_FILE, crate::watch::unix_now())?,
+                None => still_trashable(path, home)?,
             }
             mdif_macos::fs::trash(path)
                 .map(|to| Done {
@@ -331,7 +330,72 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 })
                 .map_err(|e| format!("{shown}: {e}"))
         }
+        Step::DeleteSnapshot { name, date, volume } => {
+            let shown = name.display();
+            let out = std::process::Command::new("/usr/bin/tmutil")
+                .arg("deletelocalsnapshots")
+                .arg(date)
+                .output()
+                .map_err(|e| format!("{shown}: tmutil: {e}"))?;
+            // Gone is what counts, whatever tmutil's exit status says.
+            let listed = crate::apfs::local_snapshots(volume).map_err(|e| format!("{e:#}"))?;
+            if listed.iter().any(|s| Path::new(s) == name) {
+                let said = String::from_utf8_lossy(if out.stderr.is_empty() {
+                    &out.stdout
+                } else {
+                    &out.stderr
+                })
+                .trim()
+                .to_string();
+                return Err(format!(
+                    "{shown} is still there: {}",
+                    crate::text::printable(&said)
+                ));
+            }
+            Ok(Done {
+                path: name.clone(),
+                how: "released",
+                to: None,
+            })
+        }
     }
+}
+
+/// Deleting a local Time Machine snapshot, by the name `tmutil
+/// listlocalsnapshots` gives it, while it is among `listed` (on `volume`).
+/// Only Time Machine's own: never what macOS updates or other apps take.
+pub fn snapshot(name: &Path, listed: &[String], volume: &Path) -> Result<Step, String> {
+    let shown = crate::text::printable(&name.to_string_lossy()).into_owned();
+    let Some(date) = snapshot_date(name) else {
+        return Err(format!("{shown} isn't a local Time Machine snapshot."));
+    };
+    if !listed.iter().any(|s| Path::new(s) == name) {
+        return Err(format!("{shown} isn't on the disk any more."));
+    }
+    Ok(Step::DeleteSnapshot {
+        name: name.to_path_buf(),
+        date: date.to_string(),
+        volume: volume.to_path_buf(),
+    })
+}
+
+/// The date in a local Time Machine snapshot's name
+/// (`com.apple.TimeMachine.2026-10-18-204720.local`), when the name is just
+/// that: only a well-formed date goes into `tmutil`.
+pub fn snapshot_date(name: &Path) -> Option<&str> {
+    let d = name
+        .to_str()?
+        .strip_prefix("com.apple.TimeMachine.")?
+        .strip_suffix(".local")?;
+    let ok = d.len() == 17
+        && d.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 4 | 7 | 10) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        });
+    ok.then_some(d)
 }
 
 /// Where macOS updates leave what they moved aside.
@@ -716,6 +780,27 @@ fn empty(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether `path` is a folder that goes to the Trash whole: Minecraft's game
+/// folder, saved worlds and all, after you confirm, or one a handler says
+/// can go (a cloud folder nothing syncs any more).
+fn trashable_folder(path: &Path, home: &Path) -> bool {
+    minecraft(path)
+        || path
+            .strip_prefix(home)
+            .is_ok_and(crate::handlers::trashable)
+}
+
+/// What goes to the Trash with no app to quit, checked again right before:
+/// still a folder that can go, or a file of yours that nobody uses, and not
+/// a link put in its place.
+fn still_trashable(path: &Path, home: &Path) -> Result<(), String> {
+    if trashable_folder(path, home) {
+        deletable(path, home)
+    } else {
+        unused_file(path, home, BIG_FILE, crate::watch::unix_now())
+    }
+}
+
 /// Whether `dir` is Minecraft's game folder: a real folder with its
 /// launcher's profiles, and saved worlds or the versions it downloaded.
 pub fn minecraft(dir: &Path) -> bool {
@@ -975,6 +1060,8 @@ mod tests {
         std::fs::write(game.join("launcher_profiles.json"), "{}").unwrap();
         let step = plan(&game, h, &Keep::default(), &[], &[]).unwrap();
         assert!(matches!(step, Step::Trash { quit: None, .. }));
+        // Checked again as a folder, not as a file, right before.
+        assert_eq!(still_trashable(&game, h), Ok(()));
         assert_eq!(minecraft_worlds(&game), ["Island", "New World"]);
         // Kept, or not Minecraft's: refused.
         let keep = Keep::parse("~/Library/Application\n", h);
@@ -995,8 +1082,15 @@ mod tests {
         }
         let step = plan(&old, h, &Keep::default(), &[], &[]).unwrap();
         assert!(matches!(step, Step::Trash { quit: None, .. }));
+        assert_eq!(still_trashable(&old, h), Ok(()));
         assert!(plan(&live, h, &Keep::default(), &[], &[]).is_err());
         assert!(plan(&old.join("Documents"), h, &Keep::default(), &[], &[]).is_err());
+        // A link put in its place before it's done: refused, nothing moved.
+        let aside = h.join("aside");
+        std::fs::rename(&old, &aside).unwrap();
+        std::os::unix::fs::symlink(&aside, &old).unwrap();
+        assert!(run(&step, h).unwrap_err().contains("isn't a folder"));
+        assert!(aside.is_dir() && old.is_symlink());
     }
 
     #[test]
@@ -1199,6 +1293,38 @@ mod tests {
         std::os::unix::fs::symlink(&aside, &movie).unwrap();
         assert!(run(&step, h).unwrap_err().contains("isn't a file"));
         assert!(aside.is_file() && movie.is_symlink());
+    }
+
+    #[test]
+    fn only_time_machines_own_snapshots_still_there_are_deleted() {
+        let vol = Path::new(crate::map::DATA_ROOT);
+        let name = Path::new("com.apple.TimeMachine.2026-10-18-204720.local");
+        assert_eq!(snapshot_date(name), Some("2026-10-18-204720"));
+        let listed = vec![
+            name.to_string_lossy().into_owned(),
+            "com.apple.os.update-ABC".to_string(),
+        ];
+        assert!(matches!(
+            snapshot(name, &listed, vol),
+            Ok(Step::DeleteSnapshot { date, .. }) if date == "2026-10-18-204720"
+        ));
+        // Gone since it was suggested.
+        assert!(
+            snapshot(name, &listed[1..], vol)
+                .unwrap_err()
+                .contains("any more")
+        );
+        // Never macOS's own, a path, or more than a date into tmutil.
+        for bad in [
+            "com.apple.os.update-ABC",
+            "/tmp/com.apple.TimeMachine.2026-10-18-204720.local",
+            "com.apple.TimeMachine.2026-10-18-204720.local/x",
+            "com.apple.TimeMachine.2026-10-18-2047.local",
+            "com.apple.TimeMachine.2026-10-18 -20472.local",
+        ] {
+            assert_eq!(snapshot_date(Path::new(bad)), None, "{bad}");
+            assert!(snapshot(Path::new(bad), &[bad.to_string()], vol).is_err());
+        }
     }
 
     #[test]

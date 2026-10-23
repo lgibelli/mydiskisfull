@@ -23,10 +23,20 @@ pub fn clean(
 ) -> Result<()> {
     let home = home();
     let keep = crate::keep_cmd::load(db)?;
+    // A local snapshot goes by its name, which isn't a path.
     let paths: Vec<PathBuf> = paths
         .iter()
-        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
+        .map(|p| match clean::snapshot_date(p) {
+            Some(_) => p.clone(),
+            None => std::path::absolute(p).unwrap_or_else(|_| p.clone()),
+        })
         .collect();
+    // Only worth running tmutil when one of them is a snapshot.
+    let snapshots = if paths.iter().any(|p| clean::snapshot_date(p).is_some()) {
+        mdif_core::apfs::local_snapshots(volume).map_err(|e| format!("{e:#}"))
+    } else {
+        Ok(Vec::new())
+    };
     // Only worth running git when one of them is a worktree.
     let finished = if paths.iter().any(|p| p.join(".git").is_file()) {
         worktrees::finished(&home, unix_now())
@@ -45,7 +55,14 @@ pub fn clean(
     let mut steps: Vec<Step> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     for p in &paths {
-        match clean::plan(p, &home, &keep, &finished, &churning) {
+        let step = match &snapshots {
+            _ if clean::snapshot_date(p).is_none() => {
+                clean::plan(p, &home, &keep, &finished, &churning)
+            }
+            Ok(listed) => clean::snapshot(p, listed, volume),
+            Err(why) => Err(why.clone()),
+        };
+        match step {
             Ok(s) => steps.push(s),
             Err(why) => failed.push((p.clone(), why)),
         }
@@ -71,6 +88,7 @@ pub fn clean(
                     Step::EmptyTrash(_) => "Would empty the Trash",
                     Step::FinderTrash(_) => "Would move to the Trash with Finder",
                     Step::Restart { .. } => "Would restart a helper of",
+                    Step::DeleteSnapshot { .. } => "Would delete the local snapshot",
                 };
                 println!("{verb}: {}", printable(&tilde(&s.path().to_string_lossy())));
             }
@@ -118,7 +136,12 @@ pub fn clean(
             Err(why) => failed.push((s.path().to_path_buf(), why)),
         }
     }
-    let freed = mdif_macos::fs::statfs(volume)?.avail.saturating_sub(before);
+    // Nothing done frees nothing, whatever else changed on the disk meanwhile.
+    let freed = if done.is_empty() {
+        0
+    } else {
+        mdif_macos::fs::statfs(volume)?.avail.saturating_sub(before)
+    };
     if !done.is_empty() {
         crate::watch_cmd::record_clean(db, freed);
         // What went to the Trash is there now too.
@@ -158,6 +181,7 @@ pub fn clean(
                 "emptied" => println!("Emptied: {shown}"),
                 "erased" => println!("Emptied the Trash"),
                 "restarted" => println!("Restarted a helper of {shown}"),
+                "released" => println!("Deleted the local snapshot {shown}"),
                 _ => println!("Removed: {shown} (its branch stays)"),
             }
         }
@@ -184,6 +208,7 @@ fn how(s: &Step) -> &'static str {
         Step::EmptyTrash(_) => "empty-trash",
         Step::FinderTrash(_) => "finder-trash",
         Step::Restart { .. } => "restart",
+        Step::DeleteSnapshot { .. } => "snapshots",
     }
 }
 

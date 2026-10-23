@@ -36,6 +36,11 @@ enum CleanFlow {
         if deleted > 0 {
             lines.append("Deleted. The next build makes it again.")
         }
+        let released = r.done.filter { $0.how == "released" }.count
+        if released > 0 {
+            lines.append(released == 1 ? "Deleted the local snapshot. Your backups on the backup disk are as they were."
+                                       : "Deleted \(released) local snapshots. Your backups on the backup disk are as they were.")
+        }
         if r.done.contains(where: { $0.how == "erased" }) {
             lines.append("Emptied the Trash.")
         }

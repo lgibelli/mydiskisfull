@@ -199,7 +199,7 @@ than in the week before (from the watcher's history).
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
 | Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
 | Docker disk image | prune it; cap it in Docker's settings | `docker system prune`. Shrinking the image deletes its contents, so no tweak. | no |
-| Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | `tmutil deletelocalsnapshots <date>` | no |
+| Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | Delete Snapshots (`mdif clean`, `tmutil deletelocalsnapshots <date>` after a confirmation); the command in Lite | no |
 | Swap | restart | shown with its size when the disk is tight | no |
 | Cloud files kept downloaded | free up space / unpin | Finder's Free Up Space (steps); OneDrive needs its own `MarkUnpinned` action (research) | no |
 | Stuck sync client (churn) | restart it | quit and relaunch (known apps only: an unknown process name never goes into a command), then the churn clause shows whether writes dropped | no |

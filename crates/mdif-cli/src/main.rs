@@ -110,10 +110,11 @@ enum Cmd {
         history: History,
     },
     /// Do the clean-ups a suggestion offers: remove finished worktrees,
-    /// delete build output, move what an app left behind to the Trash. Each
-    /// is checked again first
+    /// delete build output, move what an app left behind to the Trash,
+    /// delete local Time Machine snapshots. Each is checked again first
     Clean {
-        /// What a suggestion offers to clean (its action's paths)
+        /// What a suggestion offers to clean (its action's paths; a local
+        /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         /// Show what would be done, and do nothing

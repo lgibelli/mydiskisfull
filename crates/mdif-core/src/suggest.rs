@@ -843,25 +843,12 @@ fn from_leftovers(out: &mut Vec<Suggestion>) {
 
 fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
     let snaps = apfs::local_snapshots(Path::new(mount)).unwrap_or_default();
-    // com.apple.TimeMachine.2026-10-18-204720.local; only a well-formed date
-    // goes into the command.
-    let dates: Vec<&str> = snaps
+    // Time Machine's own, by name; only a well-formed date goes into the
+    // command.
+    let (names, dates): (Vec<&String>, Vec<&str>) = snaps
         .iter()
-        .filter_map(|s| {
-            s.strip_prefix("com.apple.TimeMachine.")?
-                .strip_suffix(".local")
-        })
-        .filter(|d| {
-            d.len() == 17
-                && d.bytes().enumerate().all(|(i, b)| {
-                    if matches!(i, 4 | 7 | 10) {
-                        b == b'-'
-                    } else {
-                        b.is_ascii_digit()
-                    }
-                })
-        })
-        .collect();
+        .filter_map(|s| clean::snapshot_date(Path::new(s)).map(|d| (s, d)))
+        .unzip();
     let when = |d: &str| match (d.get(..10), d.get(11..13), d.get(13..15)) {
         (Some(day), Some(h), Some(m)) => format!("{day} {h}:{m}"),
         _ => d.to_string(),
@@ -894,7 +881,26 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
             space: None,
             per_day: None,
             path: None,
-            action: None,
+            action: Some(Action {
+                kind: "snapshots",
+                label: if names.len() == 1 {
+                    "Delete Snapshot".into()
+                } else {
+                    format!("Delete {} Snapshots", names.len())
+                },
+                paths: names.iter().map(|n| n.to_string()).collect(),
+                confirm: Some(format!(
+                    "Delete {}? Backups on your backup disk aren't touched, but what changed \
+                     since the last backup loses its local copy: Time Machine can't restore it \
+                     from this Mac any more. This can't be undone.",
+                    if names.len() == 1 {
+                        "the local Time Machine snapshot".to_string()
+                    } else {
+                        format!("{} local Time Machine snapshots", names.len())
+                    }
+                )),
+                done: None,
+            }),
             title: None,
             measured: Measured::default(),
             rank: (2, 0),
