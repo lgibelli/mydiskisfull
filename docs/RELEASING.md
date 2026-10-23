@@ -52,7 +52,9 @@ hand), with a provenance attestation in between, so a download can be checked wi
 `gh attestation verify MyDiskIsFull.dmg --repo lgibelli/mydiskisfull`. Beside it, its
 `app-store` job runs `app/app-store.sh --upload` from the same commit, numbered with the run
 (0.1.2 is build 102.<run>, as a branch may run again): Lite reaches App Store Connect and, once processed (usually within the hour), TestFlight. Both jobs wait in the
-`release` environment, approved together. It needs, under Settings → Secrets and variables →
+`release` environment, approved together. For the full edition alone, with nothing uploaded
+to App Store Connect, run it by hand with Lite off: `gh workflow run release.yml --ref main -f
+lite=false` (no release branch: a push runs both). It needs, under Settings → Secrets and variables →
 Actions:
 
 | Name | Kind | What |

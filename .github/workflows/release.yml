@@ -13,7 +13,10 @@ name: Release (signed DMG, draft; Lite to App Store Connect)
 # (which a fork can't create) or by hand, never on pull requests.
 #
 # Release flow: bump the version in Cargo.toml, turn CHANGELOG's Unreleased
-# into "## [x.y.z] - date", push, then push a release/x.y.z branch.
+# into "## [x.y.z] - date", push, then push a release/x.y.z branch. The full
+# edition alone, with nothing uploaded to App Store Connect:
+#
+#   gh workflow run release.yml --ref main -f lite=false
 #
 # Secrets (Settings → Secrets and variables → Actions):
 #   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD   the Developer ID Application
@@ -32,6 +35,11 @@ on:
   push:
     branches: ["release/**"]
   workflow_dispatch:
+    inputs:
+      lite:
+        description: Upload MyDiskIsFull Lite to App Store Connect too
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -122,6 +130,7 @@ jobs:
   # MyDiskIsFull Lite, for TestFlight and the Mac App Store. The build number
   # comes from the version (0.1.2 is 102), so each version uploads once.
   app-store:
+    if: github.event_name == 'push' || inputs.lite
     runs-on: macos-26
     environment: release
     steps:
