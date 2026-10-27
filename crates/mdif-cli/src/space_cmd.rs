@@ -38,7 +38,7 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
             m
         }
     };
-    let r = space::report(&m, &keep);
+    let r = space::report(&m, &keep).with_update(mdif_core::os_update::staged().as_ref());
     // Again for the same measurement replaces it: nothing piles up.
     record(db, r.measured, &r);
     if json_out {
@@ -113,10 +113,10 @@ fn print(r: &Report, now: i64) {
             .comes_back
             .iter()
             .map(|c| {
-                let what = if c.what == "trash" {
-                    "in the Trash"
-                } else {
-                    c.what
+                let what = match c.what {
+                    "trash" => "in the Trash",
+                    "update" => "macOS update",
+                    w => w,
                 };
                 format!("{} {what} ({})", bytes(c.bytes), c.how)
             })

@@ -45,7 +45,7 @@ use crate::units::bytes;
 
 /// What [`Measured`] looks like; a kept one of another version is measured
 /// again.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Folders this deep and this big are kept in the tree; smaller ones count
 /// in the folder above. Files as big as [`clean::BIG_FILE`] are listed too.
@@ -234,6 +234,10 @@ pub struct Dir {
     pub cold: u64,
     #[serde(rename = "k", default)]
     pub cloned: u64,
+    /// Of `allocated`, what clones in it count twice (see
+    /// [`scan::Totals::twice`]).
+    #[serde(rename = "t", default)]
+    pub twice: u64,
     /// When its bytes were modified, on average (size-weighted).
     #[serde(rename = "m", default)]
     pub mtime: Option<i64>,
@@ -257,6 +261,7 @@ impl Dir {
             private: n.totals.private,
             cold: n.totals.cold,
             cloned: n.totals.cloned,
+            twice: n.totals.twice,
             mtime: n.totals.mean_mtime(),
             children: n
                 .children
@@ -322,10 +327,15 @@ pub struct OldFile {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComesBack {
-    /// `purgeable`, `swap` or `trash`.
+    /// `purgeable`, `swap`, `update` (a macOS update waiting for a restart)
+    /// or `trash`.
     pub what: &'static str,
     pub bytes: u64,
     pub how: String,
+    /// The kind it's counted in, when it's known: the app draws it apart
+    /// from the rest of that kind. Purgeable is in Other's "Not measured"
+    /// when local snapshots hold it; purgeable files are wherever they are.
+    pub kind: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,6 +388,15 @@ pub struct About {
 // ---------------------------------------------------------------------------
 // Measuring.
 
+/// What macOS would free by itself on the volume holding `path` (local
+/// snapshots, purgeable caches, cloud files it can download again): Finder's
+/// "available" less `free`, the free space now.
+pub fn purgeable(path: &Path, free: u64) -> u64 {
+    mdif_macos::fs::available_for_important_usage(path)
+        .unwrap_or(0)
+        .saturating_sub(free)
+}
+
 /// Scans the Data volume and reads what else the report needs. As long as
 /// the disk map takes (`mdif map`); never downloads a cloud file.
 pub fn measure(home: &Path) -> Result<Measured> {
@@ -409,7 +428,6 @@ pub fn measure(home: &Path) -> Result<Measured> {
         })
         .collect();
     let free = st.avail;
-    let important = fs::available_for_important_usage(root).unwrap_or(0);
     let snapshots = crate::apfs::local_snapshots(Path::new(&st.mount_point))
         .map(|s| s.len())
         .unwrap_or(0);
@@ -423,7 +441,7 @@ pub fn measure(home: &Path) -> Result<Measured> {
             total: st.total,
             used: st.total.saturating_sub(free),
             free,
-            purgeable: important.saturating_sub(free),
+            purgeable: purgeable(root, free),
         },
         volumes,
         data_in_use: data.capacity_in_use,
@@ -502,11 +520,12 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
         };
         new.name = old.name.clone();
         let delta = |n: u64, o: u64| n as i128 - o as i128;
-        let (da, dp, dc, dk) = (
+        let (da, dp, dc, dk, dt) = (
             delta(new.allocated, old.allocated),
             delta(new.private, old.private),
             delta(new.cold, old.cold),
             delta(new.cloned, old.cloned),
+            delta(new.twice, old.twice),
         );
         *old = new;
         let apply = |v: &mut u64, d: i128| *v = (*v as i128 + d).max(0) as u64;
@@ -516,9 +535,10 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
                 apply(&mut a.private, dp);
                 apply(&mut a.cold, dc);
                 apply(&mut a.cloned, dk);
+                apply(&mut a.twice, dt);
             }
         }
-        apply(&mut m.data_real, da);
+        apply(&mut m.data_real, da - dt);
         // Its big files as they are now.
         m.files.retain(|f| !Path::new(&f.path).starts_with(&at));
         m.files.extend(own_files(&s.big_files, &m.home));
@@ -996,6 +1016,7 @@ struct Part {
     private: i64,
     cold: i64,
     cloned: i64,
+    twice: i64,
     mtime_weighted: i128,
     /// Of `allocated`, what's in kept folders.
     kept: i64,
@@ -1010,6 +1031,7 @@ impl Part {
             private: d.private as i64,
             cold: d.cold as i64,
             cloned: d.cloned as i64,
+            twice: d.twice as i64,
             mtime_weighted: d.mtime.unwrap_or(0) as i128 * d.allocated as i128,
             kept: 0,
             cold_unkept: 0,
@@ -1021,6 +1043,7 @@ impl Part {
         self.private += o.private;
         self.cold += o.cold;
         self.cloned += o.cloned;
+        self.twice += o.twice;
         self.mtime_weighted += o.mtime_weighted;
         self.kept += o.kept;
         self.cold_unkept += o.cold_unkept;
@@ -1031,6 +1054,7 @@ impl Part {
         self.private -= o.private;
         self.cold -= o.cold;
         self.cloned -= o.cloned;
+        self.twice -= o.twice;
         self.mtime_weighted -= o.mtime_weighted;
     }
 }
@@ -1071,7 +1095,7 @@ fn sort(m: &Measured, keep: &Keep) -> Tree {
         what: What::Plain,
         kept: false,
     };
-    visit(&m.tree, root, &top, &m.home, keep, &mut t);
+    visit(&m.tree, root, &top, 0, &m.home, keep, &mut t);
     t
 }
 
@@ -1083,7 +1107,8 @@ struct Owner {
     kept: bool,
 }
 
-fn visit(d: &Dir, path: PathBuf, up: &Owner, home: &Path, keep: &Keep, t: &mut Tree) {
+/// `twice`: what the folder above counted twice and handed down to this one.
+fn visit(d: &Dir, path: PathBuf, up: &Owner, twice: i64, home: &Path, keep: &Keep, t: &mut Tree) {
     let at = shown(&path);
     let kept = up.kept || keep.covering(&at).is_some();
     let class = {
@@ -1120,6 +1145,21 @@ fn visit(d: &Dir, path: PathBuf, up: &Owner, home: &Path, keep: &Keep, t: &mut T
     for c in &d.children {
         own.sub(&Part::of(c));
     }
+    // What's counted twice here and not inside one of its folders (blocks
+    // its folders or files share with each other) goes to them, by what
+    // they share.
+    let across = (own.twice + twice).max(0) as i128;
+    let weight = |c: &Dir| c.cloned.saturating_sub(c.twice) as i128;
+    let weights = own.cloned.max(0) as i128 + d.children.iter().map(weight).sum::<i128>();
+    let handed: Vec<i64> = d
+        .children
+        .iter()
+        .map(|c| match weights {
+            0 => 0,
+            w => (across * weight(c) / w).min(weight(c)) as i64,
+        })
+        .collect();
+    own.twice = (across - handed.iter().map(|&h| h as i128).sum::<i128>()) as i64;
     if kept {
         own.kept = own.allocated;
     } else {
@@ -1129,8 +1169,8 @@ fn visit(d: &Dir, path: PathBuf, up: &Owner, home: &Path, keep: &Keep, t: &mut T
         Some(i) => t.items[i].part.add(&own),
         None => t.rest.entry(owner.kind).or_default().add(&own),
     }
-    for c in &d.children {
-        visit(c, path.join(&c.name), &owner, home, keep, t);
+    for (c, h) in d.children.iter().zip(handed) {
+        visit(c, path.join(&c.name), &owner, h, home, keep, t);
     }
 }
 
@@ -1140,8 +1180,9 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
     let t = sort(m, keep);
     let home = m.home.as_path();
 
-    // Clones counted once: take off what allocated sizes count twice, where
-    // the clones are, down to what the scan found really used.
+    // Clones counted once: take off what each part's clones count twice,
+    // then what's still counted twice (blocks shared between parts, hard
+    // links) where the clones are, down to what the scan found really used.
     let total: i128 = t
         .items
         .iter()
@@ -1149,20 +1190,23 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
         .sum::<i128>()
         + t.rest.values().map(|p| p.allocated as i128).sum::<i128>();
     let real = m.data_real.min(m.data_in_use) as i128;
-    let over = (total - real).max(0);
     let parts = || t.items.iter().map(|i| &i.part).chain(t.rest.values());
+    let shared = |p: &Part| (p.allocated - p.private).max(0) as i128;
+    let twice = |p: &Part| (p.twice.max(0) as i128).min(shared(p));
+    let over = (total - real - parts().map(twice).sum::<i128>()).max(0);
     let weight: fn(&Part) -> i128 = if parts().any(|p| p.cloned > 0) {
-        |p| p.cloned.max(0) as i128
+        |p| (p.cloned - p.twice).max(0) as i128
     } else {
         |p| (p.allocated - p.private).max(0) as i128
     };
     let weights: i128 = parts().map(weight).sum();
     let size = |p: &Part| -> (u64, u64) {
-        let cut = if weights > 0 {
-            (over * weight(p) / weights).min((p.allocated - p.private).max(0) as i128)
-        } else {
-            0
-        };
+        let cut = twice(p)
+            + if weights > 0 {
+                (over * weight(p) / weights).min(shared(p) - twice(p))
+            } else {
+                0
+            };
         let bytes = (p.allocated as i128 - cut).max(0) as u64;
         (bytes, (p.private.max(0) as u64).min(bytes))
     };
@@ -1568,6 +1612,38 @@ fn worlds(dir: &Path) -> String {
         n if n <= 3 => format!("{n} saved worlds ({names})"),
         n => format!("{n} saved worlds ({names}, …)"),
     }
+}
+
+/// `, the folder named “Application”, not “Application Support”,` when a
+/// folder beside `dir` starts with its name and a space: a launcher that
+/// split `Application Support` at the space made `~/Library/Application`,
+/// and its path alone reads as cut short.
+fn not_to_be_confused(dir: &Path) -> String {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return String::new();
+    };
+    let name = name.to_string_lossy();
+    let mut longer: Vec<String> = std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            n.strip_prefix(name.as_ref())
+                .is_some_and(|r| r.starts_with(' '))
+        })
+        .map(|n| format!("“{}”", crate::text::printable(&n)))
+        .collect();
+    if longer.is_empty() {
+        return String::new();
+    }
+    longer.sort();
+    longer.truncate(3);
+    format!(
+        ", the folder named “{}”, not {},",
+        crate::text::printable(&name),
+        longer.join(" or ")
+    )
 }
 
 fn artifact_note(path: &Path) -> String {
@@ -1980,9 +2056,10 @@ fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
             label: "Move to Trash".into(),
             paths: vec![i.path.clone()],
             confirm: Some(format!(
-                "Move {shown} to the Trash? {}: Minecraft's game, what it downloaded, and {}. \
+                "Move {shown}{} to the Trash? {}: Minecraft's game, what it downloaded, and {}. \
                  To keep the worlds, copy its saves folder somewhere else first. Put Back \
                  returns all of it; the space comes back once you empty the Trash.",
+                not_to_be_confused(&s.path),
                 bytes(s.whole),
                 worlds(&s.path)
             )),
@@ -2100,11 +2177,13 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
             what: "purgeable",
             bytes: m.volume.purgeable,
             how: "macOS removes it when space is needed".into(),
+            kind: (m.snapshots > 0).then_some("other"),
         },
         ComesBack {
             what: "swap",
             bytes: b.swap,
             how: "removed when the Mac restarts".into(),
+            kind: Some("macos"),
         },
     ];
     // The Trash as it is now, not as it was at the scan: emptying it in
@@ -2119,9 +2198,56 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
         what: "trash",
         bytes: trash,
         how: "freed when the Trash is emptied".into(),
+        kind: Some("files"),
     });
     out.retain(|c| c.bytes > 0);
     out
+}
+
+impl Report {
+    /// With a macOS update that's waiting for the restart that installs it
+    /// ([`crate::os_update::staged`]): what it holds comes back then. It's
+    /// in macOS, in Preboot, the Update volume and System downloads, which
+    /// say so.
+    pub fn with_update(mut self, u: Option<&crate::os_update::Staged>) -> Report {
+        let Some(u) = u else {
+            return self;
+        };
+        let at = self
+            .comes_back
+            .iter()
+            .position(|c| c.what == "trash")
+            .unwrap_or(self.comes_back.len());
+        self.comes_back.insert(
+            at,
+            ComesBack {
+                what: "update",
+                bytes: u.bytes,
+                how: format!("freed once the Mac restarts to install macOS {}", u.version),
+                kind: Some("macos"),
+            },
+        );
+        let held = format!(
+            "macOS {} is here too, until a restart installs it",
+            u.version
+        );
+        for k in self.kinds.iter_mut().filter(|k| k.id == "macos") {
+            for i in &mut k.items {
+                if matches!(
+                    i.path.as_str(),
+                    "/System/Volumes/Preboot"
+                        | "/System/Volumes/Update"
+                        | "/System/Library/AssetsV2"
+                ) {
+                    i.note = Some(match &i.note {
+                        Some(n) => format!("{n}. {held}"),
+                        None => held.clone(),
+                    });
+                }
+            }
+        }
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2218,14 +2344,17 @@ mod tests {
             private: own,
             cold: 0,
             cloned: 0,
+            twice: 0,
             mtime: Some(NOW - DAY),
             children,
         };
+        // Its folders share nothing with each other.
         for c in &d.children {
             d.allocated += c.allocated;
             d.private += c.private;
             d.cold += c.cold;
             d.cloned += c.cloned;
+            d.twice += c.twice;
         }
         d
     }
@@ -2596,6 +2725,71 @@ mod tests {
                 .unwrap()
                 .contains("1 local snapshot holds")
         );
+        // Drawn apart from the rest of Other, where the scan couldn't see.
+        assert_eq!(r.comes_back[0].kind, Some("other"));
+    }
+
+    #[test]
+    fn a_folder_named_like_the_start_of_another_says_which_it_is() {
+        let lib = tempfile::tempdir().unwrap();
+        for d in [
+            "Application",
+            "Application Support",
+            "Application Scripts",
+            "Caches",
+        ] {
+            std::fs::create_dir(lib.path().join(d)).unwrap();
+        }
+        assert_eq!(
+            not_to_be_confused(&lib.path().join("Application")),
+            ", the folder named “Application”, not “Application Scripts” or \
+             “Application Support”,"
+        );
+        assert_eq!(not_to_be_confused(&lib.path().join("Caches")), "");
+        assert_eq!(
+            not_to_be_confused(&lib.path().join("Application Support")),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_macos_update_waiting_for_a_restart_comes_back_then() {
+        let mut m = measured(
+            a_mac(),
+            vec![volume("VM", 3 * GB), volume("Preboot", 20 * GB)],
+            0,
+        );
+        m.volumes[1].mount = Some("/System/Volumes/Preboot".into());
+        let u = crate::os_update::Staged {
+            version: "27.2".into(),
+            bytes: 13 * GB,
+        };
+        let r = report(&m, &Keep::default()).with_update(Some(&u));
+        let back: Vec<_> = r
+            .comes_back
+            .iter()
+            .map(|c| (c.what, c.bytes, c.kind))
+            .collect();
+        assert_eq!(
+            back,
+            [
+                ("swap", 3 * GB, Some("macos")),
+                ("update", 13 * GB, Some("macos")),
+                ("trash", 2 * GB, Some("files"))
+            ]
+        );
+        assert!(r.comes_back[1].how.ends_with("install macOS 27.2"));
+        assert_eq!(
+            named(&r, "macos", "Preboot").note.as_deref(),
+            Some(
+                "What the Mac starts up from. macOS 27.2 is here too, until a restart \
+                 installs it"
+            )
+        );
+        // None waiting: as it was.
+        let before = serde_json::to_value(report(&m, &Keep::default())).unwrap();
+        let after = serde_json::to_value(report(&m, &Keep::default()).with_update(None)).unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]
@@ -2608,6 +2802,7 @@ mod tests {
             private: 10 * MB,
             cold: 0,
             cloned: 9 * GB - 10 * MB,
+            twice: 0,
             mtime: Some(NOW),
             children: Vec::new(),
         };
@@ -2649,6 +2844,75 @@ mod tests {
             "no clones, nothing taken off"
         );
         assert_eq!(named(&r, "other", "Not measured").bytes, GB);
+    }
+
+    #[test]
+    fn a_folder_of_copies_takes_what_its_copies_really_take() {
+        // 60 copies of a 4 GB app that Chrome left in a temporary folder,
+        // all sharing their blocks: 240 GB as du counts it, 4 GB really.
+        let copies = Dir {
+            name: "X".into(),
+            allocated: 240 * GB,
+            private: 0,
+            cold: 0,
+            cloned: 240 * GB,
+            twice: 236 * GB,
+            mtime: Some(NOW),
+            children: Vec::new(),
+        };
+        // And 18 GB of OneDrive clones, shared between two folders.
+        let shared = |name: &str| Dir {
+            name: name.into(),
+            allocated: 9 * GB,
+            private: 0,
+            cold: 0,
+            cloned: 9 * GB,
+            twice: 0,
+            mtime: Some(NOW),
+            children: Vec::new(),
+        };
+        let user = dir("T", 2 * GB, vec![copies]);
+        let mut library = dir(
+            "Library",
+            0,
+            vec![
+                dir("CloudStorage", 0, vec![shared("OneDrive-Personal")]),
+                dir(
+                    "Group Containers",
+                    0,
+                    vec![shared("UBF8T346G9.OneDriveSyncClientSuite")],
+                ),
+            ],
+        );
+        library.twice += 9 * GB;
+        let tree = dir(
+            DATA_ROOT,
+            0,
+            vec![
+                dir(
+                    "private",
+                    0,
+                    vec![dir(
+                        "var",
+                        0,
+                        vec![dir("folders", 0, vec![dir("ab", 0, vec![user])])],
+                    )],
+                ),
+                dir("Users", 0, vec![dir("me", 0, vec![library])]),
+            ],
+        );
+        let mut m = measured(tree, Vec::new(), 0);
+        m.data_real = 2 * GB + 4 * GB + 9 * GB;
+        m.data_in_use = m.data_real;
+        m.volume.used = m.data_in_use;
+        let r = report(&m, &Keep::default());
+        assert_eq!(
+            named(&r, "caches", "Temporary files").bytes,
+            6 * GB,
+            "the copies once, and the rest"
+        );
+        // What's counted twice across folders still comes off theirs.
+        assert_eq!(kind(&r, "cloud").bytes, 9 * GB);
     }
 
     #[test]
@@ -3016,6 +3280,7 @@ mod tests {
                 what: "swap",
                 bytes: 1,
                 how: String::new(),
+                kind: Some("macos"),
             }],
             kinds: vec![KindReport {
                 id: "build",

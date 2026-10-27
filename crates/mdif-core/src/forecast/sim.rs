@@ -25,7 +25,8 @@
 //! Deterministic: the random numbers are seeded from the data.
 
 use super::{
-    DAY, FullBy, HOUR, Params, Step, WINDOWS, known, median, recurs, runs, step_rule, theil_sen,
+    Arrival, DAY, FullBy, HOUR, Params, Step, WINDOWS, arrivals, known, known_at, median,
+    one_off_arrivals, recurs, runs, step_rule, theil_sen, within,
 };
 use crate::store::{Cleanup, SpacePoint};
 
@@ -39,7 +40,9 @@ pub(crate) struct Hourly {
     pub steps: Vec<Step>,
     /// Clean-ups done through MyDiskIsFull, oldest first: always taken out.
     pub known: Vec<Step>,
-    /// Per hour of `x`: left out as a step or a clean-up. Not missing data,
+    /// Space taken in one go and taken out as a one-off, oldest first.
+    pub arrivals: Vec<Arrival>,
+    /// Per hour of `x`: left out as a step, an arrival or a clean-up. Not missing data,
     /// so it counts as covered for [`Hourly::mean_over`].
     pub stepped: Vec<bool>,
     /// Whether the steps were taken out: too few over
@@ -55,14 +58,16 @@ impl Hourly {
     /// compacting the store changes nothing here.
     #[cfg(test)]
     pub fn new(points: &[SpacePoint], p: &Params) -> Option<Hourly> {
-        Hourly::with_cleanups(points, &[], p)
+        Hourly::with_cleanups(points, &[], None, p)
     }
 
     /// The same, with the hours `cleanups` fall in left out (see
-    /// [`known`](super::known)).
+    /// [`known`](super::known)), and the arrival a macOS `update` prepared
+    /// then falls in.
     pub fn with_cleanups(
         points: &[SpacePoint],
         cleanups: &[Cleanup],
+        update: Option<i64>,
         p: &Params,
     ) -> Option<Hourly> {
         let last = points.last()?.ts.div_euclid(HOUR);
@@ -113,12 +118,29 @@ impl Hourly {
             }
         }
         let removed = !recurs(n, freed, refilled, p);
+        // Arrivals too.
+        let came = arrivals(deltas.len(), |i| deltas[i].2, |i| deltas[i].3, threshold);
+        // The last hour and the hour so far: no arrival there is a one-off yet.
+        let calm = deltas.len().saturating_sub(2);
+        let one_off = one_off_arrivals(&came, calm, p, |i| {
+            let (hour, gap) = (deltas[i].0, deltas[i].1);
+            update.is_some_and(|t| known_at(t, (hour - gap) * HOUR, hour * HOUR, HOUR))
+        });
 
         let levels: Vec<(i64, f64)> = levels.into_iter().filter(|l| l.0 >= first).collect();
         if levels.len() < 2 {
             return None;
         }
-        let deltas = &deltas[deltas.len() - (levels.len() - 1)..];
+        let before = deltas.len() - (levels.len() - 1);
+        let arrived: Vec<Arrival> = one_off
+            .iter()
+            .filter(|a| a.last >= before)
+            .map(|a| Arrival {
+                ts: deltas[a.last].0 * HOUR,
+                bytes: a.bytes as u64,
+            })
+            .collect();
+        let deltas = &deltas[before..];
         let steps: Vec<Step> = deltas
             .iter()
             .filter(|d| !d.3 && is_step(d.2))
@@ -132,8 +154,8 @@ impl Hourly {
         let start = levels[0].0 + 1;
         let mut x = vec![None; (levels[levels.len() - 1].0 - levels[0].0) as usize];
         let mut stepped = vec![false; x.len()];
-        for &(hour, gap, consumed, cleaned) in deltas {
-            let step = cleaned || (removed && is_step(consumed));
+        for (j, &(hour, gap, consumed, cleaned)) in deltas.iter().enumerate() {
+            let step = cleaned || (removed && is_step(consumed)) || within(&one_off, before + j);
             if step || gap > p.max_gap_hours {
                 if step && gap <= p.max_gap_hours {
                     for h in hour - gap + 1..=hour {
@@ -150,6 +172,7 @@ impl Hourly {
             x,
             steps,
             known,
+            arrivals: arrived,
             stepped,
             removed,
             threshold,

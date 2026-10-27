@@ -1,10 +1,10 @@
 //! Volume statistics, process-wide file-system policy, and the Trash.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libc::c_int;
 
@@ -15,6 +15,8 @@ const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
 
 unsafe extern "C" {
     fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) -> c_int;
+    // <sys/fsgetpath.h>
+    fn fsgetpath(buf: *mut libc::c_char, size: usize, fsid: *mut libc::fsid_t, id: u64) -> isize;
 }
 
 /// Stop this process from downloading cloud placeholders (OneDrive, iCloud,
@@ -134,6 +136,43 @@ pub fn space_used(mount: &Path) -> io::Result<u64> {
 }
 
 /// Device id of `path` itself (not following a final symlink).
+/// A volume's file-system ID, to find what's on it by number ([`path_of`]).
+#[derive(Clone, Copy)]
+pub struct FsId(libc::fsid_t);
+
+impl std::fmt::Debug for FsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FsId")
+    }
+}
+
+/// The ID of the volume holding `path`.
+pub fn fsid(path: &Path) -> io::Result<FsId> {
+    let c = CString::new(path.as_os_str().as_bytes())?;
+    let mut st = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(FsId(unsafe { st.assume_init() }.f_fsid))
+}
+
+/// Where the file or folder with inode number `inode` on the volume is now:
+/// it follows renames and moves (to the Trash too), and is `NotFound` once
+/// it's deleted. Paths on the boot volume come as FSEvents reports them,
+/// through its firmlinks (`/Users`, not `/System/Volumes/Data/Users`).
+pub fn path_of(fsid: FsId, inode: u64) -> io::Result<PathBuf> {
+    let mut buf = vec![0u8; 4 * libc::PATH_MAX as usize];
+    let mut id = fsid.0;
+    // SAFETY: the buffer is as long as said, and the call writes a
+    // NUL-terminated path within it.
+    let n = unsafe { fsgetpath(buf.as_mut_ptr().cast(), buf.len(), &mut id, inode) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(OsStr::from_bytes(&buf[..end])))
+}
+
 pub fn dev_of(path: &Path) -> io::Result<i32> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::symlink_metadata(path)?.dev() as i32)
@@ -191,6 +230,25 @@ pub fn available_for_important_usage(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_found_by_number_after_it_moves_and_not_once_deleted() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a");
+        std::fs::create_dir(&a).unwrap();
+        let inode = std::fs::metadata(&a).unwrap().ino();
+        let id = fsid(&root).unwrap();
+        assert_eq!(path_of(id, inode).unwrap(), a);
+        let b = root.join("moved").join("b");
+        std::fs::create_dir(root.join("moved")).unwrap();
+        std::fs::rename(&a, &b).unwrap();
+        assert_eq!(path_of(id, inode).unwrap(), b);
+        std::fs::remove_dir(&b).unwrap();
+        let e = path_of(id, inode).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    }
 
     #[test]
     fn available_for_important_usage_counts_at_least_the_free_space() {

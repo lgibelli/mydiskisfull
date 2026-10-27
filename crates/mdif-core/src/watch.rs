@@ -55,6 +55,8 @@ pub struct Watcher {
     /// (`sys::access_probes`); checked at every sample (one `open`), so a
     /// grant is noticed within minutes.
     access_probes: Vec<PathBuf>,
+    /// Free space at the last sample.
+    last_avail: Option<u64>,
 }
 
 /// What counts as an incident. The defaults are the plan's clauses.
@@ -123,6 +125,15 @@ pub struct Period {
 /// has open for writing, whose folders FSEvents may not report (see
 /// [`proc::files_open_for_writing`]).
 pub const OPEN_FILES_MIN: u64 = 4_000_000;
+
+/// Free space that came back since the last sample (something deleted, the
+/// Trash emptied) starts an owners period now, so the folder it came from
+/// shows it within minutes rather than at the next period...
+pub const EARLY_RISE: u64 = 1_000_000_000;
+/// ...unless the last one is more recent than this. Only rises: they are a
+/// few a day, while a busy disk drops by a GB in five minutes many times an
+/// hour, which would multiply what the watcher costs.
+const EARLY_AFTER: i64 = 10 * 60;
 
 /// How long a replay of the journal may take before the rest is left to the
 /// next period.
@@ -249,6 +260,7 @@ impl Watcher {
             sizes: HashMap::new(),
             period_writes: HashMap::new(),
             access_probes: Vec::new(),
+            last_avail: None,
         })
     }
 
@@ -298,8 +310,12 @@ impl Watcher {
             PathBuf::from(&self.key)
         };
         self.user = alerts::Settings::load(&self.store)?;
+        let mut tracker = Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1));
+        if let Ok(id) = fs::fsid(&self.volume) {
+            tracker.follow_moves(id);
+        }
         self.owners = Some(Owners {
-            tracker: Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1)),
+            tracker,
             root,
             last_id,
             last_period: None,
@@ -335,6 +351,14 @@ impl Watcher {
             // The first sample starts the first period.
             o.last_period.get_or_insert(now);
         }
+        let rose = self
+            .last_avail
+            .is_some_and(|before| st.avail >= before.saturating_add(EARLY_RISE));
+        self.last_avail = Some(st.avail);
+        let due = self
+            .owners
+            .as_ref()
+            .is_some_and(|o| o.due(now) || (rose && o.since(now) >= EARLY_AFTER));
         // Checked before a period lists anything: without Full Disk Access
         // the folders that would show a privacy prompt are left alone, since
         // nobody may be there to answer it and the open would wait.
@@ -350,7 +374,7 @@ impl Watcher {
                 })
             }
         };
-        if self.owners.as_ref().is_some_and(|o| o.due(now)) {
+        if due {
             let user = alerts::Settings::load(&self.store)?;
             if user != self.user {
                 self.user = user;
@@ -358,7 +382,7 @@ impl Watcher {
             }
         }
         let (growth, period) = match self.owners.as_mut() {
-            Some(o) if o.due(now) => {
+            Some(o) if due => {
                 let heavy: Vec<i32> = self
                     .period_writes
                     .drain()
@@ -538,8 +562,12 @@ impl Watcher {
 
 impl Owners {
     fn due(&self, now: i64) -> bool {
-        self.last_period
-            .is_some_and(|last| now - last >= self.every)
+        self.since(now) >= self.every
+    }
+
+    /// Seconds since the previous period (0 before the first sample).
+    fn since(&self, now: i64) -> i64 {
+        self.last_period.map_or(0, |last| now - last)
     }
 
     /// Replay the journal since the previous period, add the folders of

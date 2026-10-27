@@ -6,9 +6,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use mdif_core::alerts;
-use mdif_core::forecast::{self, Alert, DAY, Forecast, Params};
+use mdif_core::forecast::{self, Alert, DAY, Facts, Forecast, HOUR, Params};
 use mdif_core::privacy;
-use mdif_core::store::{Episode, Store};
+use mdif_core::store::{Cleanup, Episode, SpacePoint, Store};
 use mdif_core::tweaks::{self, Status, Tweak};
 use mdif_core::units::bytes;
 use mdif_core::watch::{self, unix_now};
@@ -61,7 +61,11 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => alerts::Settings::load(s)?,
         None => alerts::Settings::default(),
     };
-    let f = forecast::forecast_with(&pts, &cleanups, &Params::default());
+    let f = forecast::forecast_with(
+        &pts,
+        &facts(volume, &pts, &cleanups, now),
+        &Params::default(),
+    );
     let alert = user.alert(f.as_ref(), st.avail, st.total);
     let keep = crate::keep_cmd::load_or_warn(db);
     let open: Vec<Episode> = match &store {
@@ -165,6 +169,23 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
 }
 
 /// Tweaks with a record not reverted, the most recent apply of each.
+/// What the forecast from `pts` knows besides them: the clean-ups, and what
+/// macOS would free by itself on `volume` and the macOS update waiting for a
+/// restart, which are as of now, so only when the last sample is recent.
+pub(crate) fn facts<'a>(
+    volume: &Path,
+    pts: &[SpacePoint],
+    cleanups: &'a [Cleanup],
+    now: i64,
+) -> Facts<'a> {
+    let recent = pts.last().filter(|last| now - last.ts < HOUR);
+    Facts {
+        cleanups,
+        purgeable: recent.map_or(0, |last| mdif_core::space::purgeable(volume, last.avail)),
+        update: recent.and(mdif_core::os_update::prepared_at()),
+    }
+}
+
 fn applied(store: &Store) -> Result<Vec<Applied>> {
     let mut out: Vec<Applied> = Vec::new();
     for r in store.all_tweaks()? {

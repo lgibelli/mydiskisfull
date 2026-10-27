@@ -2,20 +2,22 @@
 // (macOS, apps, build output, caches, the Trash, snapshots…) from the
 // whole-disk measurements, with where the trend goes (and how sure it is),
 // the floor that raises an alert and the cleanups taken out of the trend;
-// then what grew the most in the last day. What was written is on Disk Wear.
+// then what grew and shrank the most over the span shown. What was written
+// is on Disk Wear.
 
 import Charts
 import SwiftUI
 
 struct TrendsPage: View {
     @ObservedObject var monitor: Monitor
+    @State private var span: Span = .twoWeeks
 
     var body: some View {
         Page(title: "Disk Usage", subtitle: "How full the disk gets, and what changes it.") {
             if let s = monitor.status {
                 FreeSpaceCard(status: s, series: monitor.detail?.series ?? [],
-                              strata: monitor.detail?.strata ?? [], health: monitor.health)
-                GrewList(rows: monitor.detail?.growth24h ?? [])
+                              strata: monitor.detail?.strata ?? [], health: monitor.health, span: $span)
+                GrewList(detail: monitor.detail, span: span)
             } else {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 360)
             }
@@ -41,7 +43,7 @@ private struct FreeSpaceCard: View {
     let series: [[Int64]]
     let strata: [ForecastDetail.Strata]
     let health: Health
-    @State private var span: Span = .twoWeeks
+    @Binding var span: Span
     @State private var hover: Date?
 
     private struct Point: Identifiable {
@@ -425,25 +427,58 @@ private struct FreeSpaceCard: View {
     }
 }
 
+/// What grew and what shrank the most over the span the chart shows (two
+/// weeks at most: what the watcher's history of folders covers here).
 private struct GrewList: View {
-    let rows: [ForecastDetail.Growth]
+    let detail: ForecastDetail?
+    let span: Span
+
+    private var rows: [ForecastDetail.Growth] {
+        switch span {
+        case .day: detail?.growth24h ?? []
+        case .threeDays: detail?.growth3d ?? detail?.growth24h ?? []
+        case .twoWeeks, .all: detail?.growth14d ?? detail?.growth24h ?? []
+        }
+    }
+
+    private var window: String {
+        switch span {
+        case .day: "the last 24 hours"
+        case .threeDays: detail?.growth3d == nil ? "the last 24 hours" : "the last 3 days"
+        case .twoWeeks, .all: detail?.growth14d == nil ? "the last 24 hours" : "the last 2 weeks"
+        }
+    }
 
     var body: some View {
-        let shown = rows.filter { $0.bytes > 0 }.prefix(8)
+        let grew = Array(rows.filter { $0.bytes >= 1_000_000 }.prefix(8))
+        // Deleted, moved to the Trash (which grows instead until it's
+        // emptied), or cleaned by the app that keeps it.
+        let shrank = Array(rows.filter { $0.bytes <= -100_000_000 }.sorted { $0.bytes < $1.bytes }.prefix(3))
         VStack(alignment: .leading, spacing: 14) {
-            SectionHeader(title: "Grew the most", subtitle: "Folders, the last 24 hours")
-            if shown.isEmpty {
+            SectionHeader(title: "Grew the most", subtitle: "Folders, \(window)")
+            if grew.isEmpty {
                 Text("Nothing grew much.").font(.callout).foregroundStyle(.secondary)
             }
-            ForEach(Array(shown.enumerated()), id: \.offset) { _, g in
-                BarRow(name: URL(fileURLWithPath: g.owner).lastPathComponent,
-                       detail: Format.path(URL(fileURLWithPath: g.owner).deletingLastPathComponent().path),
-                       value: g.bytes, largest: shown.first?.bytes ?? 1, color: .orange,
-                       help: Format.path(g.owner))
+            ForEach(Array(grew.enumerated()), id: \.offset) { _, g in
+                row(g, largest: grew.first?.bytes ?? 1, color: .orange)
+            }
+            if !shrank.isEmpty {
+                SectionHeader(title: "Shrank the most", subtitle: "Folders, \(window)")
+                    .padding(.top, 6)
+                ForEach(Array(shrank.enumerated()), id: \.offset) { _, g in
+                    row(g, largest: abs(shrank.first?.bytes ?? 1), color: .green)
+                }
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .card()
+    }
+
+    private func row(_ g: ForecastDetail.Growth, largest: Int64, color: Color) -> some View {
+        BarRow(name: URL(fileURLWithPath: g.owner).lastPathComponent,
+               detail: Format.path(URL(fileURLWithPath: g.owner).deletingLastPathComponent().path),
+               value: abs(g.bytes), largest: largest, color: color,
+               help: Format.path(g.owner))
     }
 }
 

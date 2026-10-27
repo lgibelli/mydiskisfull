@@ -12,16 +12,19 @@
 //!   ID but still shares most of its blocks) is counted once too. When the
 //!   extents can't be read the overlap may be counted twice, and how much
 //!   is reported as uncertainty instead of hidden.
+//! - each folder also knows what of its own `allocated` its clones count
+//!   twice, so a folder of copies sharing their blocks (what Chrome leaves
+//!   when it's killed) is measured by what it really takes.
 //!
 //! The walk never leaves the starting volume, never follows symlinks and
 //! never descends into dataless (cloud-only) directories, which would make
 //! the File Provider download their listing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mdif_macos::bulk::{self, EF_MAY_SHARE_BLOCKS, Entry, Kind};
 use mdif_macos::extents;
@@ -65,6 +68,11 @@ pub struct Totals {
     /// with a clone: where `allocated` may count the same blocks twice.
     #[serde(skip)]
     pub cloned: u64,
+    /// Of `allocated`, what clones here count more than once: the blocks
+    /// they share with each other, less one copy. Only for this folder as a
+    /// whole: a parent's isn't the sum of its folders'.
+    #[serde(skip)]
+    pub twice: u64,
 }
 
 /// How long a file goes unmodified before its bytes count as cold.
@@ -212,10 +220,67 @@ struct Ctx<'a> {
 
 #[derive(Default)]
 struct Clones {
-    /// Clone IDs already measured: pure clones have identical extents.
-    seen: HashSet<u64>,
-    extents: Vec<(u64, u64)>,
+    /// Each clone ID measured (pure clones have identical extents): its
+    /// extents and the bytes they cover, none when they couldn't be read.
+    measured: HashMap<u64, Option<Shared>>,
     uncertain: u64,
+}
+
+/// The physical extents of a file that shares blocks, and the bytes they
+/// cover.
+type Shared = (Arc<[(u64, u64)]>, u64);
+
+/// Extents of the files under a folder that share blocks, each counted
+/// once, and what they'd add up to file by file.
+#[derive(Default)]
+struct Blocks {
+    extents: Vec<(u64, u64)>,
+    mapped: u64,
+}
+
+impl Blocks {
+    fn add(&mut self, s: Option<Shared>) {
+        if let Some((x, mapped)) = s {
+            self.extents.extend_from_slice(&x);
+            self.mapped += mapped;
+        }
+    }
+
+    fn merge(&mut self, o: Blocks) {
+        if o.extents.len() > self.extents.len() {
+            let mapped = self.mapped;
+            let mine = std::mem::replace(self, o);
+            self.extents.extend(mine.extents);
+            self.mapped += mapped;
+        } else {
+            self.extents.extend(o.extents);
+            self.mapped += o.mapped;
+        }
+    }
+
+    /// Merges overlapping extents; returns what they'd count twice.
+    fn coalesce(&mut self) -> u64 {
+        let x = &mut self.extents;
+        x.sort_unstable();
+        let mut n = 0;
+        for i in 0..x.len() {
+            let (start, len) = x[i];
+            if n > 0 && start <= x[n - 1].0 + x[n - 1].1 {
+                let end = (start + len).max(x[n - 1].0 + x[n - 1].1);
+                x[n - 1].1 = end - x[n - 1].0;
+            } else {
+                x[n] = (start, len);
+                n += 1;
+            }
+        }
+        x.truncate(n);
+        self.mapped
+            .saturating_sub(x.iter().map(|&(_, len)| len).sum::<u64>())
+    }
+
+    fn covered(&self) -> u64 {
+        self.extents.iter().map(|&(_, len)| len).sum()
+    }
 }
 
 impl Ctx<'_> {
@@ -236,33 +301,42 @@ impl Ctx<'_> {
         }
     }
 
-    /// Count the blocks of one file (once per inode).
-    fn account(&self, path: &Path, e: &Entry) {
+    /// Count the blocks of one file (once per inode). A file that shares
+    /// blocks with clones comes back with its extents.
+    fn account(&self, path: &Path, e: &Entry) -> Option<Shared> {
         if e.is_dataless() {
-            return;
+            return None;
         }
         if e.kind != Kind::File || e.ext_flags & EF_MAY_SHARE_BLOCKS == 0 || e.shared() == 0 {
             // Its shared bytes, if any, are only shared with a snapshot.
             self.plain.fetch_add(e.allocated, Ordering::Relaxed);
-            return;
+            return None;
         }
-        if !self.clones.lock().unwrap().seen.insert(e.clone_id) {
-            return;
+        if let Some(s) = self.clones.lock().unwrap().measured.get(&e.clone_id) {
+            return s.clone();
         }
-        match extents::physical(path, BLOCK) {
-            Ok(mut x) => {
-                let mapped = extents::union_len(&mut x);
-                // Allocated but not mapped to extents: APFS reserves the
-                // tail of small sparse files.
-                self.plain
-                    .fetch_add(e.allocated.saturating_sub(mapped), Ordering::Relaxed);
-                self.clones.lock().unwrap().extents.extend(x);
+        let read = extents::physical(path, BLOCK).ok().map(|mut x| {
+            let mapped = extents::union_len(&mut x);
+            (Arc::<[(u64, u64)]>::from(x), mapped)
+        });
+        let mut clones = self.clones.lock().unwrap();
+        if let Some(s) = clones.measured.get(&e.clone_id) {
+            // Measured meanwhile, from another of its clones.
+            return s.clone();
+        }
+        match &read {
+            // Allocated but not mapped to extents: APFS reserves the tail of
+            // small sparse files.
+            Some((_, mapped)) => self
+                .plain
+                .fetch_add(e.allocated.saturating_sub(*mapped), Ordering::Relaxed),
+            None => {
+                clones.uncertain += e.shared();
+                self.plain.fetch_add(e.allocated, Ordering::Relaxed)
             }
-            Err(_) => {
-                self.plain.fetch_add(e.allocated, Ordering::Relaxed);
-                self.clones.lock().unwrap().uncertain += e.shared();
-            }
-        }
+        };
+        clones.measured.insert(e.clone_id, read.clone());
+        read
     }
 }
 
@@ -273,6 +347,8 @@ struct Walked {
     /// adds once it has merged its children's.
     base: Totals,
     links: Links,
+    /// Of the files counted in `base`.
+    blocks: Blocks,
     unreadable: Vec<PathBuf>,
 }
 
@@ -315,14 +391,15 @@ pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
         clones: Mutex::new(Clones::default()),
         big: Mutex::new(Vec::new()),
     };
-    let w = walk(root, 0, &ctx);
+    let mut w = walk(root, 0, &ctx);
     // Links to these files live outside the scanned tree (or in folders we
     // couldn't read), but their blocks are still used here.
     for l in w.links.values() {
-        ctx.account(&l.path, &l.entry);
+        w.blocks.add(ctx.account(&l.path, &l.entry));
     }
-    let mut clones = ctx.clones.into_inner().unwrap();
-    let real = ctx.plain.into_inner() + extents::union_len(&mut clones.extents);
+    w.blocks.coalesce();
+    let clones = ctx.clones.into_inner().unwrap();
+    let real = ctx.plain.into_inner() + w.blocks.covered();
     let t = w.node.totals;
     Ok(Scan {
         real,
@@ -359,11 +436,13 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
                 },
                 base,
                 links,
+                blocks: Blocks::default(),
                 unreadable: vec![dir.to_path_buf()],
             };
         }
     };
 
+    let mut blocks = Blocks::default();
     let mut subdirs = Vec::new();
     for e in entries {
         match e.kind {
@@ -385,7 +464,7 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
             _ => {
                 base.add_file(&e, ctx.cold_before);
                 let path = dir.join(&e.name);
-                ctx.account(&path, &e);
+                blocks.add(ctx.account(&path, &e));
                 ctx.note_big(&path, &e);
             }
         }
@@ -399,6 +478,7 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
     let mut unreadable = Vec::new();
     for w in walked {
         base.add(&w.base);
+        blocks.merge(w.blocks);
         merge(&mut links, w.links);
         if unreadable.len() < UNREADABLE_SAMPLE {
             unreadable.extend(w.unreadable);
@@ -414,9 +494,10 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
             return true;
         }
         base.add_file(&l.entry, ctx.cold_before);
-        ctx.account(&l.path, &l.entry);
+        blocks.add(ctx.account(&l.path, &l.entry));
         false
     });
+    base.twice = blocks.coalesce();
     let mut totals = base;
     for l in links.values() {
         totals.add_linked(&l.entry, ctx.cold_before);
@@ -431,6 +512,7 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         },
         base,
         links,
+        blocks,
         unreadable,
     }
 }
@@ -757,5 +839,47 @@ mod tests {
         // Both sides of the clone pair share all of their blocks.
         assert_eq!(tot.cloned, 8 * MIB, "{tot:?}");
         assert_eq!(tot.allocated - tot.private, tot.cloned);
+    }
+
+    #[test]
+    fn a_folder_of_copies_is_measured_by_what_it_really_takes() {
+        // What Chrome leaves when it's killed: copies of the same files,
+        // in their own folders, sharing every block.
+        let t = tempfile::tempdir().unwrap();
+        write(&t.path().join("app/bin"), 4 * MIB as usize);
+        for n in 0..3 {
+            clone(
+                &t.path().join("app/bin"),
+                &t.path().join(format!("left/{n}/bin")),
+            );
+        }
+        // One modified: 1 MiB of it its own, the rest still shared.
+        let edited = t.path().join("left/2/bin");
+        let mut f = fs::OpenOptions::new().write(true).open(&edited).unwrap();
+        std::io::Write::write_all(&mut f, &[9u8; MIB as usize]).unwrap();
+        f.sync_all().unwrap();
+        write(&t.path().join("left/own.bin"), MIB as usize);
+
+        let s = scan(t.path(), &opts(0)).unwrap();
+        let find = |name: &str| -> Totals {
+            let at = t.path().join(name);
+            fn find<'a>(n: &'a Node, at: &Path) -> Option<&'a Node> {
+                if n.path == at {
+                    return Some(n);
+                }
+                n.children.iter().find_map(|c| find(c, at))
+            }
+            find(&s.root, &at).unwrap().totals
+        };
+        let (left, one, app) = (find("left"), find("left/0"), find("app"));
+        assert_eq!(left.allocated, 3 * 4 * MIB + MIB, "{left:?}");
+        // The three copies take 4 MiB, the edit 1 MiB more and the other
+        // file 1 MiB: the rest is counted twice.
+        assert_eq!(left.allocated - left.twice, 6 * MIB, "{left:?}");
+        // Alone, a copy counts nothing twice; nor does the original.
+        assert_eq!((one.twice, app.twice), (0, 0));
+        // The whole tree shares the copies' blocks with the original too.
+        assert_eq!(s.root.totals.twice, 3 * 4 * MIB - MIB);
+        assert_eq!(s.real, s.root.totals.allocated - s.root.totals.twice);
     }
 }

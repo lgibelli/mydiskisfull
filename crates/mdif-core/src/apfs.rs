@@ -121,6 +121,11 @@ fn mount_of<'a>(mounts: &'a [(String, String)], id: &str) -> Option<&'a str> {
 
 /// Names of local Time Machine snapshots on the volume mounted at `mount`.
 /// They keep deleted files' blocks allocated until they expire.
+///
+/// Not the snapshots macOS keeps while it installs an update
+/// (`com.apple.os.update-…`): they aren't Time Machine's to delete, and go
+/// with the update. Nor one listed as `(dataless)`: its blocks are released
+/// already, and it holds nothing.
 pub fn local_snapshots(mount: &Path) -> Result<Vec<String>> {
     let out = Command::new("tmutil")
         .arg("listlocalsnapshots")
@@ -138,7 +143,8 @@ pub fn local_snapshots(mount: &Path) -> Result<Vec<String>> {
 fn parse_snapshots(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
-        .filter(|l| l.starts_with("com.apple."))
+        .filter(|l| l.starts_with("com.apple.TimeMachine.") && !l.ends_with("(dataless)"))
+        .filter_map(|l| l.split_whitespace().next())
         .map(String::from)
         .collect()
 }
@@ -190,6 +196,18 @@ mod tests {
             ["com.apple.TimeMachine.2026-10-16-191222.local"]
         );
         assert!(parse_snapshots("Snapshots for disk /:\n").is_empty());
+        // As on a Mac with an update waiting for a restart, after macOS
+        // released the older snapshot's blocks to make room.
+        let out = "Snapshots for volume group containing disk /System/Volumes/Data:
+com.apple.TimeMachine.2026-10-26-030412.local
+com.apple.TimeMachine.2026-10-26-090437.local (dataless)
+com.apple.os.update-519C13F331E7E4D12810265CA118595DB1E847980966608AE2A7FA5C568764B63
+com.apple.os.update-MSUPrepareUpdate
+";
+        assert_eq!(
+            parse_snapshots(out),
+            ["com.apple.TimeMachine.2026-10-26-030412.local"]
+        );
     }
 
     #[test]

@@ -86,6 +86,9 @@ enum Alert: String, Decodable, Comparable {
 struct Forecast: Decodable {
     let at: Int64
     let avail: Int64
+    /// What macOS frees by itself when it needs to (purgeable), counted in
+    /// the time to full (`nil` from an older `mdif`).
+    let purgeable: Int64?
     /// The longest window with enough data.
     let rate: Rate?
     /// The shortest window, when it differs from `rate`.
@@ -94,6 +97,9 @@ struct Forecast: Decodable {
     /// When the recent rate fills the disk much sooner.
     let recentFullIn: FullIn?
     let steps: [Step]
+    /// Space taken in one go (a big download, a macOS update) and left out
+    /// as a one-off.
+    let arrivals: [Arrival]?
     /// "simulation" (futures drawn from the past days) or "trend" (a
     /// straight line, with less than a day of history).
     let method: String?
@@ -137,6 +143,11 @@ struct FullIn: Decodable {
 struct Step: Decodable {
     let ts: Int64
     let freed: Int64
+}
+
+struct Arrival: Decodable {
+    let ts: Int64
+    let bytes: Int64
 }
 
 struct History: Decodable {
@@ -254,6 +265,10 @@ struct ForecastDetail: Decodable {
     let forecast: Forecast?
     let writes24h: [Writer]
     let growth24h: [Growth]
+    /// The 25 that grew and the 10 that shrank the most over 3 days and 2
+    /// weeks (`nil` from an older `mdif`).
+    let growth3d: [Growth]?
+    let growth14d: [Growth]?
     /// [unix seconds, bytes free]; only with `--series`.
     let series: [[Int64]]?
     /// What was written each local day, oldest first; only with `--series`.
@@ -598,11 +613,14 @@ struct SpaceReport: Decodable {
     }
 
     struct ComesBack: Decodable {
-        /// "purgeable", "swap", "trash".
+        /// "purgeable", "swap", "update" (a macOS update waiting for a
+        /// restart), "trash".
         let what: String
         let bytes: Int64
         /// "after a restart".
         let how: String
+        /// The kind that counts it, when known ("other", "macos").
+        let kind: String?
     }
 
     struct Kind: Decodable, Identifiable {
@@ -683,8 +701,8 @@ struct SpaceReport: Decodable {
     /// What's in the Trash: free once it's emptied.
     var trash: Int64 { comesBack.first { $0.what == "trash" }?.bytes ?? 0 }
 
-    /// Purgeable and swap: counted as used, freed without a clean-up (not
-    /// the Trash, which someone empties).
+    /// Purgeable, swap and a waiting macOS update: counted as used, freed
+    /// without a clean-up (not the Trash, which someone empties).
     var byItself: [ComesBack] { comesBack.filter { $0.what != "trash" } }
 }
 

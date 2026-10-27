@@ -45,7 +45,8 @@ was invisible to snapshot tools:
   horizon. Builds, imports and backups that stop don't count.
 - **Honest numbers.** It measures APFS *private size* (what deleting would actually free), counts
   every block shared by clones (modified ones too, by their physical extents) and every hard link
-  once, and keeps cloud-only placeholders separate. The total reconciles with what APFS reports
+  once, folder by folder (a folder of 63 copies Chrome left behind is 137 GB to `du` and 3.0 GB
+  here), and keeps cloud-only placeholders separate. The total reconciles with what APFS reports
   in use, and what it can't pin down is shown as uncertainty.
 - **Never costs you network traffic.** Scanning turns off cloud-placeholder downloads for the
   process, so looking at an iCloud or OneDrive folder never downloads it.
@@ -94,7 +95,8 @@ The app has a main window with these pages:
   watcher stopped), each with what to do; then the top three from each page below, each with its
   button. How full the disk is and where it's heading is in the sidebar, on every page, with what's
   purgeable (macOS removes it when space is needed, Time Machine's local snapshots included), swap
-  (removed when the Mac restarts) and the Trash.
+  (removed when the Mac restarts), a macOS update waiting for the restart that installs it, and the
+  Trash.
 - **Space**: where your space goes: one bar for the disk split by kind (apps, build output,
   developer tools, cloud copies, app data, caches, media, Mail and Messages, virtual machines,
   macOS, your files), each kind biggest first and opening to its biggest items, with what may not
@@ -106,8 +108,8 @@ The app has a main window with these pages:
   Trash.
 - **Disk Usage**: how full the disk is over time (% used), in layers by kind (macOS, apps, build
   output, caches, the Trash, snapshots…), where the trend goes and how sure it is, what the disk
-  filled or freed in the last hour, day and week, the cleanups left out of the trend, and what
-  grew the most in the last day.
+  filled or freed in the last hour, day and week, the cleanups and one-off arrivals (a download,
+  a macOS update) left out of the trend, and what grew and shrank the most over the span shown.
 - **Disk Wear**: what was written each day, and which apps wrote the most in the last day,
   against the disk's size: writing
   doesn't fill the disk, but it wears an SSD out.
@@ -189,7 +191,9 @@ costs a fraction of that.
 Every half hour the watcher also works out which folders grew. It replays the FSEvents journal
 since its last look, re-lists only the folders that changed (one level each, never the whole
 disk), and asks the processes that wrote the most which files they have open, because a log that
-is kept open while it grows never shows up in FSEvents. Growth is attributed to folders a person
+is kept open while it grows never shows up in FSEvents. A folder that grew is listed again the
+next time whether or not FSEvents mentions it, and a folder moved elsewhere (to the Trash, say)
+is found again by its inode number and takes its size along. Growth is attributed to folders a person
 recognises: an app's container or cache, a project and, separately, its build output or one of
 its worktrees. When a folder keeps growing or a process keeps rewriting data, and every clause in
 the [plan](docs/PLAN.md#2-runaway-fillers) holds, it becomes an incident:

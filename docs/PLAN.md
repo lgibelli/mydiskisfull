@@ -76,6 +76,14 @@ nothing to warn about it.
   the next, since a compacted hour's level may come from before it), never counted as a
   pattern. Gaps of up to two days have their net change spread over their hours (a sleeping Mac
   consumes nothing, and nothing is invented); longer ones are unknown, not zero.
+- Arrivals are steps too: space taken in one go (a download, a macOS update preparing) is a run
+  of hours each taking at least the step threshold. It comes out like a one-off cleanup unless
+  there are three or more arrivals at least half its size (then that's how this disk fills),
+  and only once an hour has passed with nothing like it (one still going on is a rate). The
+  macOS update waiting for its restart is one-off whatever its peers. Without this a 28 GB download and a 13 GB
+  update read as a daily rate: "full in about 22 hours", with 69 GB of snapshots purgeable.
+- What macOS frees by itself when it's needed (purgeable: local snapshots, caches it manages)
+  counts as room in the time to full, as Finder counts it as available.
 - Paces beside it: the last hour (Theil–Sen over its 5-minute samples, steps among them judged
   at their own scale too), the last 24 hours and the last 7 days (net), each in bytes a day,
   each only when the samples cover it (hours left out as steps count as covered).
@@ -199,8 +207,9 @@ than in the week before (from the watcher's history).
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
 | Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
 | Docker disk image | prune it; cap it in Docker's settings | `docker system prune`. Shrinking the image deletes its contents, so no tweak. | no |
-| Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | Delete Snapshots (`mdif clean`, `tmutil deletelocalsnapshots <date>` after a confirmation); the command in Lite | no |
+| Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | Delete Snapshots (`mdif clean`, `tmutil deletelocalsnapshots <date>` after a confirmation); the command in Lite. Sized by what macOS counts as purgeable, and ranked by it | no |
 | Swap | restart | shown with its size when the disk is tight | no |
+| A macOS update prepared, waiting for its restart (the running macOS's cryptexes kept beside the update's in Preboot, its staging on the Update volume, its download in AssetsV2) | restart to install it | shown with what the restart frees, measured (clones once), beside purgeable and swap | no |
 | Cloud files kept downloaded | free up space / unpin | Finder's Free Up Space (steps); OneDrive needs its own `MarkUnpinned` action (research) | no |
 | Stuck sync client (churn) | restart it | quit and relaunch (known apps only: an unknown process name never goes into a command), then the churn clause shows whether writes dropped | no |
 | Chat backups (WhatsApp), Messages "keep for", Photos/iCloud "Optimize" | change the setting | no API, so the steps in the app | — |
@@ -253,7 +262,12 @@ by the same size and age. Nothing is offloaded yet.
 
 ### 5. Map: the honest current picture (done in M0)
 - Volumes, snapshots and purgeable space, plus a tree measured with APFS private size, clone
-  families counted once, and cloud-only placeholders counted separately.
+  families counted once, and cloud-only placeholders counted separately. Each folder also knows
+  what its own clones count twice (the union of their extents, merged up the tree), so a folder
+  of copies is measured by what it really takes: Chrome leaves a copy of itself in
+  `/var/folders/…/X` each time it's killed instead of quit, 63 here, 137 GB to `du` and 3.0 GB
+  counted once. Space takes that off where it is, and what folders share with each other off the
+  folders that share it.
 - It reconciles with APFS: on the development Mac, 415.6 GB measured vs 416.6 GB reported in use
   (0.24% unexplained), the whole Data volume in 27 s with 44 MB of memory and no root.
 
@@ -291,7 +305,8 @@ deleting things frees nothing, and `du` sees nothing.
   scan can attribute (clones counted once) is space only snapshots and metadata keep. Without
   snapshots it is about 1 GB here; with them it rises, which gives a "held by snapshots" size and
   growth rate.
-- **Snapshot count and age** from `tmutil listlocalsnapshots`.
+- **Snapshot count and age** from `tmutil listlocalsnapshots`, Time Machine's only: it also lists
+  macOS update snapshots (`com.apple.os.update-*`) and dataless ones.
 
 *Incident clauses:* no successful backup for longer than the expected interval × 6 (default 24 h)
 *and* snapshot-held space growing *and* that growth materially shortens the forecast.
@@ -364,7 +379,15 @@ mydiskisfull/
   - Listing costs about 3.5 µs per entry whatever is asked for (private size doubles it), so
     folders with thousands of entries are re-listed at most every 2 hours.
   - A folder seen for the first time has no previous size: only files created since the last
-    period count, so the first period is a lower bound. A folder moved as a whole is not seen.
+    period count, so the first period is a lower bound. A folder that grew is listed again the
+    next period, event or not: a 28.5 GB download into a new folder raised no file events (only
+    the folder's creation), its downloader's writes weren't in its rusage, and the folder was
+    recorded at the 10.7 GB it had when first seen.
+  - A folder moved as a whole changes only its old and new parents. Folders are kept with their
+    inode number, and one that's gone from its parent is looked up by it (`fsgetpath`, which
+    follows moves and fails once it's deleted): moved to the Trash its size goes with it, and
+    comes off when the Trash is emptied. When free space jumps by a gigabyte the folders are
+    measured early (after 10 minutes, not 30).
   - `diskimages-helper` rewrites everything written into a mounted disk image, so it is
     allowlisted for churn (its clients are measured); attributing its writes to the image in
     the writers list is still to do.

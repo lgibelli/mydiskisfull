@@ -414,7 +414,7 @@ pub fn gather(
     }
     from_tweaks(store, home, now, tight, keep, &mut out);
     if tight {
-        from_system(home, &st.mount_point, &mut out);
+        from_system(home, &st.mount_point, st.avail, &mut out);
     }
     from_worktrees(home, store, now, keep, &mut out);
     from_leftovers(&mut out);
@@ -841,7 +841,7 @@ fn from_leftovers(out: &mut Vec<Suggestion>) {
     }
 }
 
-fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
+fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
     let snaps = apfs::local_snapshots(Path::new(mount)).unwrap_or_default();
     // Time Machine's own, by name; only a well-formed date goes into the
     // command.
@@ -854,10 +854,14 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
         _ => d.to_string(),
     };
     if !dates.is_empty() {
+        // What they hold takes root to measure, but macOS counts it as
+        // purgeable, with the caches it would delete by itself: so at most
+        // that.
+        let held = crate::space::purgeable(Path::new(mount), free);
         out.push(Suggestion {
             cause: format!(
                 "{} local Time Machine snapshot{} (from {}) keep{} the space of files deleted \
-                 since {} taken, and the disk is nearly full.",
+                 since {} taken{}, and the disk is nearly full.",
                 dates.len(),
                 if dates.len() == 1 { "" } else { "s" },
                 when(dates[0]),
@@ -866,6 +870,11 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
                     "it was"
                 } else {
                     "they were"
+                },
+                if held > 0 {
+                    format!(": up to {}, which macOS counts as purgeable", bytes(held))
+                } else {
+                    String::new()
                 },
             ),
             fix: Fix::Run {
@@ -878,7 +887,7 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
                        since the last backup lose their local copy."
                     .into(),
             },
-            space: None,
+            space: (held > 0).then_some(held),
             per_day: None,
             path: None,
             action: Some(Action {
@@ -903,7 +912,13 @@ fn from_system(home: &Path, mount: &str, out: &mut Vec<Suggestion>) {
             }),
             title: None,
             measured: Measured::default(),
-            rank: (2, 0),
+            // Among what was measured, by size: the biggest thing to free
+            // when they hold tens of GB.
+            rank: if held > 0 {
+                (1, u64::MAX - held)
+            } else {
+                (2, 0)
+            },
             key: "snapshots".into(),
         });
     }

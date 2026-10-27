@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.4] - 2026-10-27
+
+### Fixed
+- The forecast no longer reads space taken in one go as a daily rate. A big download or a macOS
+  update getting ready made it say "full in about 22 hours" when the disk was filling by a few
+  GB a day. Such arrivals are left out as one-offs unless they keep happening, and the headline
+  says what was left out. What macOS frees by itself when it's needed (purgeable space, local
+  snapshots included) now counts as room before the disk is full.
+- A big file written into a new folder was recorded at the size it had when the watcher first
+  saw it: a 28.5 GB download showed as 10.7 GB, because macOS reported no file events for it. A
+  folder that grew is now measured again the next time, events or not.
+- Moving a folder to the Trash wasn't seen at all. The folder is now followed: its size goes to
+  the Trash and comes off once the Trash is emptied. When free space jumps by a gigabyte or more,
+  folders are measured after 10 minutes instead of 30.
+- Copies of files that share their blocks are counted once in each folder, not only for the disk
+  as a whole. Chrome leaves a copy of itself in a temporary folder each time it's killed instead
+  of quit: 63 of them were 137 GB to `du`, 26 GB in Space, and really take 3.0 GB, which is what
+  Space shows now. `mdif map` has a column for it ("ONCE").
+- The local snapshots suggestion carries the size macOS counts as purgeable and is ranked by it,
+  so 69 GB of snapshots comes first instead of seventh with no size.
+- Only Time Machine's local snapshots are counted: macOS update snapshots made "5 local
+  snapshots" out of 2.
+
+### Added
+- A macOS update waiting for the restart that installs it is shown with what that restart frees,
+  beside purgeable space and swap, striped in the Space bar.
+- Trends shows what grew and what shrank the most over the span the chart shows (24 hours,
+  3 days or 2 weeks), and the Overview card covers the last 3 days instead of 24 hours.
+
+### Changed
+- Move to Trash on Minecraft's game folder (`~/Library/Application`) says it's the folder named
+  "Application", not "Application Support": its path alone reads as cut short. A clean-up shows
+  as busy only once you've confirmed it.
+
 ## [0.1.3] - 2026-10-23
 
 ### Added
@@ -392,6 +426,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.4]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.4
 [0.1.3]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.3
 [0.1.2]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.2
 [0.1.1]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.1

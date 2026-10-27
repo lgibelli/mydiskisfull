@@ -361,6 +361,8 @@ private struct FreeingInfo: View {
          "A file an app still has open keeps its space after it's deleted, until the app closes it or quits."),
         ("Swap",
          "Memory macOS moved to the disk. Its files are removed when the Mac restarts."),
+        ("A macOS update",
+         "Once it's downloaded, macOS prepares an update before asking for the restart: a second copy of parts of macOS, on volumes beside your files. The restart that installs it removes the old copy."),
         ("Copies that share space",
          "On APFS a copy can share its blocks with the original. Deleting one of them frees only what isn't shared."),
     ]

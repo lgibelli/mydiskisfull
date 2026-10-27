@@ -11,17 +11,26 @@
     {
       "what": "purgeable",
       "bytes": 701514000,
-      "how": "macOS frees it when it needs room"
+      "how": "macOS frees it when it needs room",
+      "kind": null
     },
     {
       "what": "swap",
       "bytes": 7519000000,
-      "how": "after a restart"
+      "how": "after a restart",
+      "kind": "macos"
+    },
+    {
+      "what": "update",
+      "bytes": 13300000000,
+      "how": "freed once the Mac restarts to install macOS 27.2",
+      "kind": "macos"
     },
     {
       "what": "trash",
       "bytes": 1204000000,
-      "how": "when you empty the Trash"
+      "how": "when you empty the Trash",
+      "kind": "files"
     }
   ],
   "kinds": [

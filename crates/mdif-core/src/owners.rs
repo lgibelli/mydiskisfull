@@ -11,8 +11,18 @@
 //! the change in each one's direct-file size into growth of its owner
 //! ([`Tracker`]). A directory seen for the first time has no previous size,
 //! so only its files created since the previous period count: the first
-//! period after a start is a lower bound, later ones are exact. A folder
-//! moved as a whole (a rename, a move to the Trash) is seen on neither side.
+//! period after a start is a lower bound, later ones are exact.
+//!
+//! FSEvents doesn't always say when a file grows: a 28 GB download by a
+//! torrent client showed only its folder being created, and the folder was
+//! listed once, 10 GB in. So a folder that grew is listed again the next
+//! period, event or not, until it holds still.
+//!
+//! A folder moved as a whole (a rename, a move to the Trash) changes only
+//! its parents. When a parent is listed and a folder known below it is gone,
+//! it's looked up by its inode number (`fsgetpath`): what was known of it
+//! moves to where it is now, to its new owner (the Trash, until it's
+//! emptied), or is freed if it was deleted.
 //!
 //! Sizes are allocated bytes, which snapshots don't change, divided among
 //! hard links and among pure clones so neither is counted twice.
@@ -33,12 +43,16 @@
 //! created since the previous period count, as for any folder seen first.)
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
+use std::ops::Bound;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use mdif_macos::bulk::{self, Detail, EF_MAY_SHARE_BLOCKS, Entry, Kind};
+use mdif_macos::fs::FsId;
 use mdif_macos::fsevents::{Event, flag};
 
 use crate::privacy;
@@ -242,6 +256,8 @@ struct Dir {
     seen: i64,
     /// Listings in a row that found it [`STEADY`], up to [`MAX_STEADY`].
     steady: u32,
+    /// Its inode number, to find it if it moves (0: unknown).
+    inode: u64,
 }
 
 impl Dir {
@@ -281,6 +297,8 @@ pub struct Tracker {
     rules: Rules,
     /// Device of the watched volume; directories elsewhere are ignored.
     dev: Option<i32>,
+    /// Its file-system ID, to follow folders that move ([`Tracker::follow_moves`]).
+    fsid: Option<FsId>,
     dirs: BTreeMap<PathBuf, Dir>,
     carry: HashMap<PathBuf, i64>,
     /// Changed but deferred.
@@ -299,6 +317,7 @@ impl Tracker {
         Tracker {
             rules,
             dev,
+            fsid: None,
             dirs: BTreeMap::new(),
             carry: HashMap::new(),
             pending: BTreeSet::new(),
@@ -312,6 +331,12 @@ impl Tracker {
     /// steady ([`STEADY`] by default).
     pub fn steady_below(&mut self, bytes: u64) {
         self.steady = bytes;
+    }
+
+    /// Follow folders that move on the volume with this ID; without it,
+    /// one that's gone from its parent is taken as deleted.
+    pub fn follow_moves(&mut self, fsid: FsId) {
+        self.fsid = Some(fsid);
     }
 
     pub fn rules(&self) -> &Rules {
@@ -443,6 +468,18 @@ impl Tracker {
                     if entries.len() >= DEFER_UNIT as usize {
                         up.biggest.push((dir.clone(), entries.len()));
                     }
+                    // Folders known below it that aren't in it any more:
+                    // moved or deleted.
+                    let present: HashSet<&OsStr> = entries
+                        .iter()
+                        .filter(|e| e.kind == Kind::Dir)
+                        .map(|e| e.name.as_os_str())
+                        .collect();
+                    for child in self.known_children(&dir) {
+                        if child.file_name().is_some_and(|n| !present.contains(n)) {
+                            self.gone(&child, deltas);
+                        }
+                    }
                     let (mut own, mut created) = (0u64, 0u64);
                     for e in &entries {
                         if e.kind == Kind::Dir {
@@ -463,6 +500,7 @@ impl Tracker {
                         entries: entries.len().min(u32::MAX as usize) as u32,
                         seen: now,
                         steady: 0,
+                        inode: std::fs::symlink_metadata(&dir).map_or(0, |m| m.ino()),
                     };
                     let before = self.dirs.get(&dir).copied();
                     if let Some(b) = before {
@@ -479,25 +517,86 @@ impl Tracker {
                     if delta != 0 {
                         *deltas.entry(self.rules.owner_of(&dir)).or_default() += delta;
                     }
-                }
-                Err(e) if is_gone(&e) => {
-                    // Deleted: it and whatever we knew below it are freed.
-                    let gone: Vec<PathBuf> = self
-                        .dirs
-                        .range(dir.clone()..)
-                        .take_while(|(p, _)| p.starts_with(&dir))
-                        .map(|(p, _)| p.clone())
-                        .collect();
-                    for p in gone {
-                        let d = self.dirs.remove(&p).expect("just listed");
-                        if d.own > 0 {
-                            *deltas.entry(self.rules.owner_of(&p)).or_default() -= d.own as i64;
-                        }
+                    // Growing: listed again next period, whatever FSEvents says.
+                    if delta > 0 && delta >= self.steady as i64 {
+                        self.pending.insert(dir.clone());
                     }
                 }
+                Err(e) if is_gone(&e) => self.gone(&dir, deltas),
                 Err(_) => up.unreadable += 1,
             }
         }
+    }
+
+    /// The children of `dir` that it, or folders known below them, are
+    /// known by.
+    fn known_children(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut from = Bound::Excluded(dir.to_path_buf());
+        while let Some((p, _)) = self.dirs.range((from, Bound::Unbounded)).next() {
+            let Some(name) = p.strip_prefix(dir).ok().and_then(|r| r.iter().next()) else {
+                break;
+            };
+            let child = dir.join(name);
+            // Past all that's below it: paths compare by component, and no
+            // name sorts after 0xFF, which UTF-8 never holds.
+            from = Bound::Excluded(child.join(OsStr::from_bytes(b"\xff")));
+            out.push(child);
+        }
+        out
+    }
+
+    /// `root` isn't where it was. What was known of it and below it moves to
+    /// where it is now, and to that place's owner, or is freed if it was
+    /// deleted (or can't be followed).
+    fn gone(&mut self, root: &Path, deltas: &mut HashMap<PathBuf, i64>) {
+        let below: Vec<PathBuf> = self
+            .dirs
+            .range(root.to_path_buf()..)
+            .take_while(|(p, _)| p.starts_with(root))
+            .map(|(p, _)| p.clone())
+            .collect();
+        let to = self.now_at(root, &below);
+        if to.as_deref() == Some(root) {
+            return;
+        }
+        for p in below {
+            let d = self.dirs.remove(&p).expect("just listed");
+            let pending = self.pending.remove(&p);
+            *deltas.entry(self.rules.owner_of(&p)).or_default() -= d.own as i64;
+            let Some(to) = &to else { continue };
+            let rel = p.strip_prefix(root).expect("below it");
+            let moved = if rel.as_os_str().is_empty() {
+                to.clone()
+            } else {
+                to.join(rel)
+            };
+            if !self.dirs.contains_key(&moved) {
+                *deltas.entry(self.rules.owner_of(&moved)).or_default() += d.own as i64;
+                if pending {
+                    self.pending.insert(moved.clone());
+                }
+                self.dirs.insert(moved, d);
+            }
+        }
+    }
+
+    /// Where `root` is now, from the inode number of a folder known in it
+    /// (`below`): `None` if it was deleted or can't be looked up (nothing
+    /// is looked up while privacy prompts are avoided: it may be in a
+    /// guarded folder now).
+    fn now_at(&self, root: &Path, below: &[PathBuf]) -> Option<PathBuf> {
+        let fsid = self.fsid.filter(|_| !privacy::avoiding())?;
+        below.iter().find_map(|p| {
+            let d = self.dirs.get(p).filter(|d| d.inode != 0)?;
+            let now = mdif_macos::fs::path_of(fsid, d.inode).ok()?;
+            // Its place inside what moved is the same.
+            let rel = p.strip_prefix(root).ok()?;
+            let depth = rel.components().count();
+            (depth == 0 || now.ends_with(rel))
+                .then(|| now.ancestors().nth(depth).map(Path::to_path_buf))
+                .flatten()
+        })
     }
 
     /// Forget directories not listed since `before`, to bound memory. If
@@ -685,6 +784,80 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_grew_is_listed_again_without_an_event() {
+        // A download written while kept open: FSEvents may report its
+        // folder once, when it's created.
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let film = root.join("Storage/film");
+        let file = film.join("film.mkv");
+        write(&file, 20 * MB as usize);
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        let up = tr.apply(&[event(&film)], 0, 100);
+        assert!(
+            growth(&up, &root.join("Storage")) >= 20 * MB as i64,
+            "{up:?}"
+        );
+
+        let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut f, &vec![3u8; 30 * MB as usize]).unwrap();
+        f.sync_all().unwrap();
+        let up = tr.apply(&[], i64::MAX, 200);
+        assert_eq!(up.listed, 1, "{up:?}");
+        assert!(
+            growth(&up, &root.join("Storage")) >= 30 * MB as i64,
+            "{up:?}"
+        );
+
+        // Found still: no more listings without an event.
+        let up = tr.apply(&[], i64::MAX, 300);
+        assert!(up.growth.is_empty(), "{up:?}");
+        let up = tr.apply(&[], i64::MAX, 400);
+        assert_eq!(up.listed, 0, "{up:?}");
+    }
+
+    #[test]
+    fn a_folder_moved_to_the_trash_takes_its_size_along_until_emptied() {
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (storage, trash) = (root.join("Desktop/Storage"), root.join(".Trash"));
+        let film = storage.join("film");
+        write(&film.join("sub/film.mkv"), 20 * MB as usize);
+        fs::create_dir_all(&trash).unwrap();
+        let rules = Rules::default()
+            .depth(&root, 1)
+            .depth(root.join("Desktop"), 1);
+        let mut tr = Tracker::new(rules.clone(), None, 1);
+        tr.follow_moves(mdif_macos::fs::fsid(&root).unwrap());
+        let up = tr.apply(&[event(&film.join("sub"))], 0, 100);
+        assert!(growth(&up, &storage) >= 20 * MB as i64, "{up:?}");
+
+        // Moved: only its parents change.
+        fs::rename(&film, trash.join("film")).unwrap();
+        let up = tr.apply(&[event(&storage), event(&trash)], i64::MAX, 200);
+        assert!(growth(&up, &storage) <= -(20 * MB as i64), "{up:?}");
+        assert!(growth(&up, &trash) >= 20 * MB as i64, "{up:?}");
+
+        // Emptied: freed from the Trash.
+        fs::remove_dir_all(trash.join("film")).unwrap();
+        let up = tr.apply(&[event(&trash)], i64::MAX, 300);
+        assert!(growth(&up, &trash) <= -(20 * MB as i64), "{up:?}");
+        assert!(!tr.dirs.keys().any(|p| p.starts_with(trash.join("film"))));
+
+        // Not followed: gone from where it was.
+        let mut tr = Tracker::new(rules, None, 1);
+        write(&storage.join("other/x.bin"), 20 * MB as usize);
+        tr.apply(&[event(&storage.join("other"))], 0, 100);
+        fs::rename(storage.join("other"), trash.join("other")).unwrap();
+        let up = tr.apply(&[event(&storage), event(&trash)], i64::MAX, 200);
+        assert!(growth(&up, &storage) <= -(20 * MB as i64), "{up:?}");
+        assert_eq!(growth(&up, &trash), 0, "{up:?}");
+    }
+
+    #[test]
     fn first_sight_ignores_files_older_than_the_last_period() {
         let t = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(t.path()).unwrap();
@@ -783,8 +956,9 @@ mod tests {
         assert_eq!(listed, [2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2]);
         // What the cache changed while it waited still counts.
         write(&cache.join("more"), 3 * MB as usize);
+        // (The logs, which grew last time, are listed again regardless.)
         let up = tr.apply(&[event(&cache)], i64::MAX, 12 * period);
-        assert_eq!((up.listed, up.deferred), (0, 1));
+        assert_eq!((up.listed, up.deferred), (1, 1));
         let up = tr.apply(&[], i64::MAX, 15 * period);
         assert!(growth(&up, &cache) >= 3 * MB as i64, "{up:?}");
     }

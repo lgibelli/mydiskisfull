@@ -31,6 +31,7 @@ pub mod handlers;
 pub mod incidents;
 pub mod keep;
 pub mod map;
+pub mod os_update;
 pub mod owners;
 pub mod privacy;
 pub mod profile;

@@ -445,7 +445,15 @@ enum Headline {
             return "A forecast needs 8 samples over 3 hours; there are \(s.history.samples) so far."
         }
         if let full = f.fullIn {
-            var t = "Around \(Format.date(at: f.at, inDays: full.days)), at \(Format.bytes(r.perDay)) a day."
+            var t = "Around \(Format.date(at: f.at, inDays: full.days)), at \(Format.bytes(r.perDay)) a day"
+            if let p = f.purgeable, p >= 1_000_000_000 {
+                t += ", counting the \(Format.bytes(p)) macOS frees by itself"
+            }
+            t += "."
+            if let a = f.arrivals?.max(by: { $0.bytes < $1.bytes }) {
+                let more = (f.arrivals?.count ?? 1) - 1
+                t += " Leaves out \(Format.bytes(a.bytes)) taken in one go on \(Format.day(a.ts))\(more > 0 ? " and \(more) more" : ""), as one-offs."
+            }
             // How sure: the nearest horizon with a real chance.
             if let p = f.fullBy {
                 if p.d1 >= 0.1 {

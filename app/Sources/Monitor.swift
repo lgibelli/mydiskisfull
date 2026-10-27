@@ -519,6 +519,9 @@ final class Monitor: ObservableObject {
     /// Does a suggestion's clean-up, then measures again.
     func clean(_ a: CleanAction) {
         guard !a.paths.isEmpty, cleaning.isDisjoint(with: a.paths) else { return }
+        // Busy only once it's confirmed: not "Moving to the Trash…" beside
+        // the question.
+        guard CleanFlow.confirmed(a) else { return }
         cleaning.formUnion(a.paths)
         Task {
             let done = await CleanFlow.run(a)

@@ -152,11 +152,7 @@ private struct SpaceBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            RailBar(stops: report.kinds.filter { $0.bytes > 0 }.map {
-                RailBar.Stop(id: $0.id, title: $0.title, bytes: $0.bytes, color: SpaceText.color($0.id))
-            } + [RailBar.Stop(id: nil, title: "Free", bytes: report.volume.free,
-                              color: Color.secondary.opacity(0.18), muted: true)],
-                    total: max(report.volume.total, 1), selected: selected, onSelect: onSelect)
+            RailBar(stops: stops, total: max(report.volume.total, 1), selected: selected, onSelect: onSelect)
             HStack(spacing: 14) {
                 Text("\(Format.bytes(report.volume.used)) used")
                     .font(.callout.weight(.semibold)).monospacedDigit()
@@ -164,7 +160,7 @@ private struct SpaceBar: View {
                     .font(.callout).foregroundStyle(.secondary).monospacedDigit()
                 // Counted as used, freed without a clean-up.
                 ForEach(report.byItself.filter { $0.bytes >= 500_000_000 }, id: \.what) { p in
-                    Text("\(Format.bytes(p.bytes)) \(SpaceText.label(p.what).lowercased())")
+                    Text("\(Format.bytes(p.bytes)) \(SpaceText.phrase(p.what))")
                         .font(.callout).foregroundStyle(.green).monospacedDigit()
                         .help("\(SpaceText.label(p.what)): \(p.how).")
                 }
@@ -175,6 +171,26 @@ private struct SpaceBar: View {
                 Spacer()
             }
         }
+    }
+
+    /// Each kind, then what comes back by itself (purgeable, swap, a macOS
+    /// update waiting for a restart) taken out of the kind that counts it
+    /// and drawn hatched beside what's free, then what's free.
+    private var stops: [RailBar.Stop] {
+        let kinds = report.kinds.filter { $0.bytes > 0 }
+        var left = Dictionary(kinds.map { ($0.id, $0.bytes) }, uniquingKeysWith: +)
+        let back: [RailBar.Stop] = report.byItself.compactMap { b in
+            guard b.bytes >= 500_000_000, let k = b.kind, let has = left[k], has > 0 else { return nil }
+            let bytes = min(b.bytes, has)
+            left[k] = has - bytes
+            return RailBar.Stop(id: k, title: SpaceText.label(b.what), bytes: bytes,
+                                color: .green, hatched: true)
+        }
+        return kinds.compactMap { k in
+            let bytes = left[k.id] ?? 0
+            return bytes > 0 ? RailBar.Stop(id: k.id, title: k.title, bytes: bytes, color: SpaceText.color(k.id)) : nil
+        } + back + [RailBar.Stop(id: nil, title: "Free", bytes: report.volume.free,
+                                 color: Color.secondary.opacity(0.18), muted: true)]
     }
 }
 
@@ -191,6 +207,8 @@ struct RailBar: View {
         let color: Color
         /// Free space: its name and line in grey.
         var muted = false
+        /// Comes back by itself: striped.
+        var hatched = false
     }
 
     let stops: [Stop]
@@ -371,6 +389,18 @@ struct RailBar: View {
             bar.fill(Path(r), with: .linearGradient(Gradient(colors: [s.color.opacity(0.85), s.color]),
                                                     startPoint: CGPoint(x: 0, y: Self.top),
                                                     endPoint: CGPoint(x: 0, y: Self.bottom)))
+            if s.hatched {
+                var h = bar
+                h.clip(to: Path(r))
+                var lines = Path()
+                var x = r.minX - Self.barHeight
+                while x < r.maxX {
+                    lines.move(to: CGPoint(x: x, y: Self.bottom))
+                    lines.addLine(to: CGPoint(x: x + Self.barHeight, y: Self.top))
+                    x += 7
+                }
+                h.stroke(lines, with: .color(Theme.card.opacity(0.55)), lineWidth: 2.5)
+            }
         }
         for p in l.labels {
             let s = stops[p.stop]
@@ -864,9 +894,15 @@ enum SpaceText {
         switch w {
         case "purgeable": "Purgeable"
         case "swap": "Swap"
+        case "update": "macOS update"
         case "trash": "In the Trash"
         default: w.capitalized
         }
+    }
+
+    /// The same, inside a sentence: "27 GB purgeable", "13 GB macOS update".
+    static func phrase(_ w: String) -> String {
+        w == "update" ? label(w) : label(w).lowercased()
     }
 
     /// The biggest of what looks forgotten, from every kind: unchanged or

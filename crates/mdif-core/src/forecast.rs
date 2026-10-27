@@ -23,6 +23,18 @@
 //! again in between (half of it at least), so an afternoon of cleaning, many
 //! steps and little refill, stays a one-off.
 //!
+//! Space *taken* in one go (a film downloaded, a macOS update prepared) is
+//! an *arrival*, and a one-off too unless arrivals that big recur: fewer
+//! than three at least half its size over four weeks, and it isn't still
+//! going on. Left in, a 30 GB download is drawn into every simulated day
+//! with the weight of the day it happened, and a disk that fills 3 GB a day
+//! reads as full tomorrow. Arrivals that recur (a disk that takes 30 GB at
+//! a time every few days) are how it fills, and stay.
+//!
+//! The disk is full when its free space *and* what macOS gives back by
+//! itself (purgeable: local snapshots, caches) are used up, so the time to
+//! full counts both, as Finder's "available" does.
+//!
 //! Clean-ups done through MyDiskIsFull (`mdif clean`, `mdif tidy`) are
 //! recorded, and [`forecast_with`] takes out the changes each one falls in
 //! whatever their size, even below the step threshold or spread over several
@@ -119,6 +131,14 @@ pub struct Step {
     pub freed: u64,
 }
 
+/// Space taken in one go and left out of the forecast as a one-off.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Arrival {
+    /// When it ended.
+    pub ts: i64,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Rate {
     /// Seconds of history it comes from.
@@ -133,7 +153,7 @@ pub struct Rate {
     pub low: f64,
     pub high: f64,
     /// Whether steps in this window were taken out (one-off cleanups) or
-    /// kept (a recurring pattern).
+    /// kept (a recurring pattern). One-off arrivals count too.
     pub steps_removed: usize,
 }
 
@@ -193,6 +213,9 @@ impl FullBy {
 pub struct Forecast {
     pub at: i64,
     pub avail: u64,
+    /// What macOS gives back by itself before the disk is full (purgeable),
+    /// counted in the time to full.
+    pub purgeable: u64,
     pub method: Method,
     /// The forecast rate: the simulation's, or the trend.
     pub rate: Option<Rate>,
@@ -208,6 +231,8 @@ pub struct Forecast {
     pub paces: Paces,
     /// Steps seen in the history the forecast comes from, oldest first.
     pub steps: Vec<Step>,
+    /// One-off arrivals left out of it, oldest first.
+    pub arrivals: Vec<Arrival>,
     /// What alerts are made of: `full_by`, at its lowest with any one day of
     /// the history left out. `None` until there's enough history.
     #[serde(skip)]
@@ -215,59 +240,91 @@ pub struct Forecast {
 }
 
 pub fn forecast(points: &[SpacePoint], p: &Params) -> Option<Forecast> {
-    forecast_with(points, &[], p)
+    forecast_with(points, &Facts::default(), p)
 }
 
-/// The forecast, with the clean-ups done through MyDiskIsFull taken out as
-/// steps whatever their size: every change in free space one of them falls
-/// in (see [`known`]) is left out, like a one-off step, and never counts
-/// towards a pattern. One that freed nothing by its own measure is ignored.
-pub fn forecast_with(points: &[SpacePoint], cleanups: &[Cleanup], p: &Params) -> Option<Forecast> {
+/// What's known besides the free-space history.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Facts<'a> {
+    /// Clean-ups done through MyDiskIsFull, taken out as steps whatever
+    /// their size: every change in free space one of them falls in (see
+    /// [`known`]) is left out, like a one-off step, and never counts towards
+    /// a pattern. One that freed nothing by its own measure is ignored.
+    pub cleanups: &'a [Cleanup],
+    /// What macOS would free by itself now, which the disk uses up too
+    /// before it's full.
+    pub purgeable: u64,
+    /// When the macOS update waiting for a restart was prepared: the
+    /// arrival it falls in is a one-off whatever its size.
+    pub update: Option<i64>,
+}
+
+/// The forecast, with what else is known taken into account.
+pub fn forecast_with(points: &[SpacePoint], facts: &Facts, p: &Params) -> Option<Forecast> {
     let last = *points.last()?;
-    let cleanups: Vec<Cleanup> = cleanups.iter().filter(|c| c.freed > 0).copied().collect();
-    let cleanups = cleanups.as_slice();
-    let rates: Vec<(Rate, Vec<Step>)> = WINDOWS
+    let purgeable = facts.purgeable;
+    let room = last.avail + purgeable;
+    let cleanups: Vec<Cleanup> = facts
+        .cleanups
         .iter()
-        .filter_map(|&w| window_rate(points, cleanups, last.ts - w, w, p))
+        .filter(|c| c.freed > 0)
+        .copied()
         .collect();
-    let trend = rates.first().map(|(r, _)| *r);
+    let cleanups = cleanups.as_slice();
+    let update = facts.update;
+    let rates: Vec<Window> = WINDOWS
+        .iter()
+        .filter_map(|&w| window_rate(points, cleanups, update, last.ts - w, w, p))
+        .collect();
+    let trend = rates.first().map(|w| w.rate);
     let recent = rates
         .last()
-        .map(|(r, _)| *r)
+        .map(|w| w.rate)
         .filter(|r| Some(r.window) != trend.map(|x| x.window));
-    let hourly = sim::Hourly::with_cleanups(points, cleanups, p);
+    let hourly = sim::Hourly::with_cleanups(points, cleanups, update, p);
     let paces = hourly.as_ref().map_or(Paces::default(), |h| Paces {
         hour: h.last_hour(points, cleanups, p),
         day: h.mean_over(24, 0.75).map(|v| v * 24.0),
         week: h.mean_over(7 * 24, 0.5).map(|v| v * 24.0),
     });
+    let first = rates.into_iter().next();
     let mut f = Forecast {
         at: last.ts,
         avail: last.avail,
+        purgeable,
         method: Method::Trend,
         rate: trend,
         trend,
         recent,
-        full_in: trend.and_then(|r| full_in(last.avail, &r)),
+        full_in: trend.and_then(|r| full_in(room, &r)),
         full_by: None,
         recent_full_in: None,
         paces,
-        steps: rates.first().map(|(_, s)| s.clone()).unwrap_or_default(),
+        steps: first.as_ref().map(|w| w.steps.clone()).unwrap_or_default(),
+        arrivals: first.map(|w| w.arrivals).unwrap_or_default(),
         robust: None,
     };
-    if let Some((h, o)) = hourly.and_then(|h| simulate(&h, last, p).map(|o| (h, o))) {
+    if let Some((h, o)) = hourly.and_then(|h| simulate(&h, room, last.ts, p).map(|o| (h, o))) {
         f.method = Method::Simulation;
         f.rate = Some(o.rate);
         f.full_in = o.full_in;
         f.full_by = Some(o.full_by);
         f.robust = o.robust;
         f.steps = merged(h.steps, h.known);
+        f.arrivals = h.arrivals;
     }
     f.recent_full_in = match (f.recent, f.rate) {
-        (Some(rc), Some(r)) if rc.per_day > 2.0 * r.per_day.max(0.0) => full_in(last.avail, &rc),
+        (Some(rc), Some(r)) if rc.per_day > 2.0 * r.per_day.max(0.0) => full_in(room, &rc),
         _ => None,
     };
     Some(f)
+}
+
+/// A window's trend, and the steps and one-off arrivals in it.
+struct Window {
+    rate: Rate,
+    steps: Vec<Step>,
+    arrivals: Vec<Arrival>,
 }
 
 /// What the simulation says.
@@ -278,10 +335,11 @@ struct Outlook {
     robust: Option<FullBy>,
 }
 
-fn simulate(h: &sim::Hourly, last: SpacePoint, p: &Params) -> Option<Outlook> {
+/// The futures from `room` bytes left (free and purgeable) at `at`.
+fn simulate(h: &sim::Hourly, room: u64, at: i64, p: &Params) -> Option<Outlook> {
     let pool = sim::Pool::new(h, p, None, p.min_sim_hours)?;
-    let avail = last.avail as f64;
-    let seed = sim::seed(h, avail, last.ts);
+    let avail = room as f64;
+    let seed = sim::seed(h, avail, at);
     let out = pool.run(p.paths, (p.horizon_days * 24) as usize, Some(avail), seed);
     let ttf = sim::sorted(out.ttf);
     let rates = sim::sorted(out.rate);
@@ -323,7 +381,9 @@ fn simulate(h: &sim::Hourly, last: SpacePoint, p: &Params) -> Option<Outlook> {
             per_day: sim::quantile(&rates, 0.5),
             low: sim::quantile(&rates, 0.1),
             high: sim::quantile(&rates, 0.9),
-            steps_removed: h.known.len() + if h.removed { h.steps.len() } else { 0 },
+            steps_removed: h.known.len()
+                + h.arrivals.len()
+                + if h.removed { h.steps.len() } else { 0 },
         },
         full_in,
         full_by,
@@ -408,10 +468,11 @@ fn full_in(avail: u64, r: &Rate) -> Option<FullIn> {
 fn window_rate(
     points: &[SpacePoint],
     cleanups: &[Cleanup],
+    update: Option<i64>,
     since: i64,
     window: i64,
     p: &Params,
-) -> Option<(Rate, Vec<Step>)> {
+) -> Option<Window> {
     let pts: Vec<&SpacePoint> = points.iter().filter(|pt| pt.ts >= since).collect();
     if pts.len() < p.min_points {
         return None;
@@ -451,13 +512,18 @@ fn window_rate(
         })
         .collect();
     let known_steps = runs(&cleaned, |i| deltas[i], |i| pts[i + 1].ts);
+    let came = arrivals(deltas.len(), |i| -deltas[i], |i| cleaned[i], threshold);
+    let calm = pts.partition_point(|pt| pt.ts < pts[pts.len() - 1].ts - HOUR);
+    let one_off = one_off_arrivals(&came, calm.saturating_sub(1), p, |i| {
+        update.is_some_and(|t| known_at(t, pts[i].ts, pts[i + 1].ts, bin))
+    });
 
-    // Free space with one-off steps and clean-ups taken out.
+    // Free space with one-off steps, arrivals and clean-ups taken out.
     let mut y = Vec::with_capacity(pts.len());
     let mut level = pts[0].avail as f64;
     y.push(level);
     for (i, d) in deltas.iter().enumerate() {
-        if !(cleaned[i] || (remove && step_idx.contains(&i))) {
+        if !(cleaned[i] || (remove && step_idx.contains(&i)) || within(&one_off, i)) {
             level += d;
         }
         y.push(level);
@@ -466,17 +532,88 @@ fn window_rate(
     let (slope, lo, hi) = theil_sen(&t, &y)?;
     // Slope is free bytes per second; consumption is its opposite.
     let per_day = -slope * DAY as f64;
-    Some((
-        Rate {
+    Some(Window {
+        rate: Rate {
             window,
             points: pts.len(),
             per_day,
             low: -hi * DAY as f64,
             high: -lo * DAY as f64,
-            steps_removed: known_steps.len() + if remove { step_idx.len() } else { 0 },
+            steps_removed: known_steps.len()
+                + one_off.len()
+                + if remove { step_idx.len() } else { 0 },
         },
-        merged(steps, known_steps),
-    ))
+        steps: merged(steps, known_steps),
+        arrivals: one_off
+            .iter()
+            .map(|a| Arrival {
+                ts: pts[a.last + 1].ts,
+                bytes: a.bytes as u64,
+            })
+            .collect(),
+    })
+}
+
+/// Space taken in one go: a run of consecutive changes that each took at
+/// least the step threshold (a download over several samples is one).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Taken {
+    /// Indices of its first and last change.
+    pub first: usize,
+    pub last: usize,
+    pub bytes: f64,
+}
+
+/// The arrivals among `n` changes: `taken(i)` is what change `i` took
+/// (negative: freed), `skip(i)` whether it's a clean-up, left out anyway.
+pub(crate) fn arrivals(
+    n: usize,
+    taken: impl Fn(usize) -> f64,
+    skip: impl Fn(usize) -> bool,
+    threshold: f64,
+) -> Vec<Taken> {
+    let mut out: Vec<Taken> = Vec::new();
+    for i in (0..n).filter(|&i| !skip(i) && taken(i) >= threshold) {
+        match out.last_mut() {
+            Some(a) if a.last + 1 == i => {
+                a.last = i;
+                a.bytes += taken(i);
+            }
+            _ => out.push(Taken {
+                first: i,
+                last: i,
+                bytes: taken(i),
+            }),
+        }
+    }
+    out
+}
+
+/// The one-offs among `arrivals`: those with fewer than
+/// [`Params::recurring_steps`] arrivals at least half as big (themselves
+/// included) that ended before change `calm`, the start of the last hour
+/// and the hour so far. One that hasn't been followed by an hour of calm may
+/// be a runaway, and is what's happening now. And those with a change whose
+/// cause is `known` to be a one-off (a macOS update), whatever their size.
+pub(crate) fn one_off_arrivals(
+    arrivals: &[Taken],
+    calm: usize,
+    p: &Params,
+    known: impl Fn(usize) -> bool,
+) -> Vec<Taken> {
+    let rare = |a: &Taken| {
+        arrivals.iter().filter(|b| b.bytes >= a.bytes / 2.0).count() < p.recurring_steps
+    };
+    arrivals
+        .iter()
+        .filter(|a| (a.last < calm && rare(a)) || (a.first..=a.last).any(&known))
+        .copied()
+        .collect()
+}
+
+/// Whether change `i` is part of one of `arrivals`.
+pub(crate) fn within(arrivals: &[Taken], i: usize) -> bool {
+    arrivals.iter().any(|a| (a.first..=a.last).contains(&i))
 }
 
 /// Whether `n` steps that freed `freed` bytes in all are a pattern, kept in
@@ -514,10 +651,14 @@ pub(crate) fn step_rule(deltas: &[f64], p: &Params) -> (f64, bool) {
 /// depends on nothing compaction drops, so it decides the same before and
 /// after.
 pub(crate) fn known(cleanups: &[Cleanup], from: i64, to: i64, res: i64) -> bool {
-    let until = to + res.max(1);
     cleanups
         .iter()
-        .any(|c| c.end.max(c.start) > from && c.start < until)
+        .any(|c| c.end.max(c.start) > from && c.start < to + res.max(1))
+}
+
+/// The same for a moment `t` (see [`known`]).
+pub(crate) fn known_at(t: i64, from: i64, to: i64, res: i64) -> bool {
+    t > from && t < to + res.max(1)
 }
 
 /// Runs of consecutive changes that clean-ups fall in, as one step each:
@@ -686,6 +827,91 @@ mod tests {
         // Full in (current free) / 2 GB a day, not "never".
         let full = f.full_in.unwrap();
         assert!((full.days - f.avail as f64 / (2.0 * GB)).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_one_off_download_is_not_a_rate() {
+        // 2 GB/day, and on day 10 a 30 GB film in one hour: the forecast is
+        // still 2 GB a day, not a 30 GB day drawn again and again.
+        let pts = hourly(14, 150.0 * GB, |k| {
+            let film = k == 10 * 24 + 15;
+            (2.0 * GB / 24.0 + if film { 30.0 * GB } else { 0.0 }, true)
+        });
+        let f = forecast(&pts, &Params::default()).unwrap();
+        let r = f.rate.unwrap();
+        assert!((r.per_day / GB - 2.0).abs() < 0.3, "{r:?}");
+        assert_eq!(f.arrivals.len(), 1, "{f:?}");
+        assert!((f.arrivals[0].bytes as f64 / GB - 30.0).abs() < 0.2);
+        assert!(f.full_by.unwrap().d1 < 0.05, "{f:?}");
+    }
+
+    #[test]
+    fn arrivals_that_recur_are_how_the_disk_fills() {
+        // 1 GB/day, and 20 GB more every other day: kept.
+        let pts = hourly(14, 400.0 * GB, |k| {
+            let big = k % 48 == 30;
+            (GB / 24.0 + if big { 20.0 * GB } else { 0.0 }, true)
+        });
+        let f = forecast(&pts, &Params::default()).unwrap();
+        assert!(f.arrivals.is_empty(), "{:?}", f.arrivals);
+        assert!(f.rate.unwrap().per_day > 6.0 * GB, "{:?}", f.rate);
+    }
+
+    #[test]
+    fn an_arrival_in_the_last_hour_stays_until_it_calms() {
+        // 30 GB in the last full hour: it may be a runaway starting.
+        let pts = hourly(7, 150.0 * GB, |k| {
+            (
+                GB / 24.0 + if k == 7 * 24 - 1 { 30.0 * GB } else { 0.0 },
+                true,
+            )
+        });
+        let f = forecast(&pts, &Params::default()).unwrap();
+        assert!(f.arrivals.is_empty(), "{:?}", f.arrivals);
+    }
+
+    #[test]
+    fn a_prepared_macos_update_is_a_one_off_whatever_its_peers() {
+        // 25 GB arrivals every other day recur, but the one that was a
+        // macOS update being prepared comes back when it's installed.
+        let update = (12 * 24 + 6) as i64;
+        let pts = hourly(14, 400.0 * GB, |k| {
+            let big = k % 48 == 6;
+            (GB / 24.0 + if big { 25.0 * GB } else { 0.0 }, true)
+        });
+        let at = update * HOUR - 600;
+        let f = forecast_with(
+            &pts,
+            &Facts {
+                update: Some(at),
+                ..Facts::default()
+            },
+            &Params::default(),
+        )
+        .unwrap();
+        assert_eq!(f.arrivals.len(), 1, "{:?}", f.arrivals);
+        assert!(
+            (f.arrivals[0].ts - update * HOUR).abs() <= HOUR,
+            "{:?}",
+            f.arrivals
+        );
+    }
+
+    #[test]
+    fn what_macos_frees_by_itself_counts_as_room() {
+        let pts = series(7, |h| 20.0 * GB - 2.0 * GB * h / 24.0);
+        let facts = |purgeable| Facts {
+            purgeable,
+            ..Facts::default()
+        };
+        let p = Params::default();
+        let bare = forecast_with(&pts, &facts(0), &p).unwrap().full_in.unwrap();
+        let f = forecast_with(&pts, &facts(40_000_000_000), &p).unwrap();
+        let roomy = f.full_in.unwrap();
+        // 6 GB free at 2 GB a day, then 40 GB more.
+        assert!((bare.days - 3.0).abs() < 0.5, "{bare:?}");
+        assert!((roomy.days - 23.0).abs() < 2.0, "{roomy:?}");
+        assert_eq!((f.avail, f.purgeable), (6_000_000_000, 40_000_000_000));
     }
 
     #[test]
@@ -1061,7 +1287,15 @@ mod tests {
         assert!(without.rate.unwrap().per_day < 1.0 * GB, "{without:?}");
 
         let cleanups: Vec<Cleanup> = events.iter().map(|&(h, b)| cleanup_at(h, b)).collect();
-        let f = forecast_with(&pts, &cleanups, &p).unwrap();
+        let f = forecast_with(
+            &pts,
+            &Facts {
+                cleanups: &cleanups,
+                ..Facts::default()
+            },
+            &p,
+        )
+        .unwrap();
         let r = f.rate.unwrap();
         assert!((r.per_day / GB - 2.0).abs() < 0.2, "{r:?}");
         // One step: the hours they fall in, 39:00 to 47:00, 4.8 GB less
@@ -1113,7 +1347,15 @@ mod tests {
                 freed: 3_500_000_000,
             },
         ];
-        let f = forecast_with(&pts, &cleanups, &p).unwrap();
+        let f = forecast_with(
+            &pts,
+            &Facts {
+                cleanups: &cleanups,
+                ..Facts::default()
+            },
+            &p,
+        )
+        .unwrap();
         // By the hour: each takes the hour it's in and the next (the hour's
         // level may come from before it), less what those hours consumed.
         let freed: Vec<f64> = f.steps.iter().map(|s| s.freed as f64 / GB).collect();
@@ -1183,7 +1425,15 @@ mod tests {
             freed: 20_000_000_000,
         };
         let p = Params::default();
-        let f = forecast_with(&pts, &[cleanup], &p).unwrap();
+        let f = forecast_with(
+            &pts,
+            &Facts {
+                cleanups: &[cleanup],
+                ..Facts::default()
+            },
+            &p,
+        )
+        .unwrap();
         let r = f.rate.unwrap();
         assert!((r.per_day / GB - 16.0).abs() < 1.5, "{r:?}");
         // The night is no 20 GB coming back; the step is the hour before and
@@ -1206,7 +1456,15 @@ mod tests {
             ..cleanup
         };
         assert_eq!(
-            forecast_with(&pts, &[early, nothing], &p).unwrap(),
+            forecast_with(
+                &pts,
+                &Facts {
+                    cleanups: &[early, nothing],
+                    ..Facts::default()
+                },
+                &p
+            )
+            .unwrap(),
             forecast(&pts, &p).unwrap()
         );
     }
@@ -1223,7 +1481,15 @@ mod tests {
         ];
         let pts = with_events(3, 4.0, &events);
         let cleanups: Vec<Cleanup> = events.iter().map(|&(h, b)| cleanup_at(h, b)).collect();
-        let raw = forecast_with(&pts, &cleanups, &Params::default()).unwrap();
+        let raw = forecast_with(
+            &pts,
+            &Facts {
+                cleanups: &cleanups,
+                ..Facts::default()
+            },
+            &Params::default(),
+        )
+        .unwrap();
         let store = crate::store::Store::open_in_memory().unwrap();
         for pt in &pts {
             store.add_space("/", *pt).unwrap();
@@ -1231,7 +1497,15 @@ mod tests {
         store.compact(pts.last().unwrap().ts).unwrap();
         let compacted = store.space_since("/", 0).unwrap();
         assert!(compacted.len() < pts.len() / 2, "compaction ran");
-        let after = forecast_with(&compacted, &cleanups, &Params::default()).unwrap();
+        let after = forecast_with(
+            &compacted,
+            &Facts {
+                cleanups: &cleanups,
+                ..Facts::default()
+            },
+            &Params::default(),
+        )
+        .unwrap();
         assert_eq!(raw.steps, after.steps);
         assert_eq!(raw.trend, after.trend);
         let (a, b) = (raw.rate.unwrap(), after.rate.unwrap());

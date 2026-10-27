@@ -10,11 +10,14 @@ import AppKit
 
 @MainActor
 enum CleanFlow {
-    /// Returns whether anything was done.
+    /// Whether to go ahead: what can't be undone is asked first.
+    static func confirmed(_ a: CleanAction) -> Bool {
+        guard let confirm = a.confirm else { return true }
+        return TweakFlow.ask("\(a.label)?", confirm, button: a.label)
+    }
+
+    /// Once `confirmed`; returns whether anything was done.
     static func run(_ a: CleanAction) async -> Bool {
-        if let confirm = a.confirm {
-            guard TweakFlow.ask("\(a.label)?", confirm, button: a.label) else { return false }
-        }
         let r: Cleaned
         do {
             // Removing build output can be hundreds of thousands of files.

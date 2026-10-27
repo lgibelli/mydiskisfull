@@ -299,7 +299,11 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     let now = watch::unix_now();
     let pts = store.space_since(&key, now - 400 * DAY)?;
     let cleanups = store.cleanups_since(pts.first().map_or(now, |p| p.ts))?;
-    let f = forecast::forecast_with(&pts, &cleanups, &Params::default());
+    let f = forecast::forecast_with(
+        &pts,
+        &crate::status_cmd::facts(volume, &pts, &cleanups, now),
+        &Params::default(),
+    );
     let writers = store.writes_since(now - DAY)?;
     let cost = watch::recorded_cost(&store)?;
     let last_period = watch::recorded_period(&store)?;
@@ -312,6 +316,8 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
             "forecast": f,
             "writes_24h": writers.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
             "growth_24h": store.growth_since(now - DAY)?.iter().map(|(o, b)| json!({"owner": o, "bytes": b})).collect::<Vec<_>>(),
+            "growth_3d": growth_json(&store, now - 3 * DAY)?,
+            "growth_14d": growth_json(&store, now - 14 * DAY)?,
             "watcher_cost": cost.map(|c| cost_json(&c, interval)),
             "last_period": last_period,
         });
@@ -464,6 +470,43 @@ fn print_forecast(key: &str, f: &Forecast, samples: usize, since: Option<i64>) {
             list.join(", ")
         );
     }
+    if !f.arrivals.is_empty() {
+        let list: Vec<String> = f
+            .arrivals
+            .iter()
+            .rev()
+            .take(3)
+            .map(|a| {
+                format!(
+                    "-{} on {}",
+                    bytes(a.bytes),
+                    local(a.ts).format("%b %-d %H:%M")
+                )
+            })
+            .collect();
+        println!(
+            "Space taken in one go, taken out of the forecast (one-off): {}.",
+            list.join(", ")
+        );
+    }
+    if f.purgeable > 0 {
+        println!(
+            "The time to full counts {} that macOS frees by itself when it's needed (purgeable).",
+            bytes(f.purgeable)
+        );
+    }
+}
+
+/// What grew the most since `since` and what shrank the most (25 and 10
+/// owners at most), for the app's lists over a longer window.
+fn growth_json(store: &Store, since: i64) -> Result<Vec<Value>> {
+    let all = store.growth_since(since)?;
+    let grew = all.iter().take_while(|(_, b)| *b > 0).take(25);
+    let shrank = all.iter().rev().take_while(|(_, b)| *b < 0).take(10);
+    Ok(grew
+        .chain(shrank)
+        .map(|(o, b)| json!({"owner": o, "bytes": b}))
+        .collect())
 }
 
 /// Where the forecast rate comes from.

@@ -17,10 +17,21 @@ use crate::map::DATA_ROOT;
 
 static AVOID: AtomicBool = AtomicBool::new(false);
 
+/// Held by tests that switch [`avoid_prompts`] on, and by those that need it
+/// off: it is process-wide, and tests run in parallel.
+#[cfg(test)]
+pub(crate) static SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// From now on (`true`), skip what would show a prompt; set by background
 /// work that lacks Full Disk Access, and cleared once it has it.
 pub fn avoid_prompts(avoid: bool) {
     AVOID.store(avoid, Ordering::Relaxed);
+}
+
+/// Whether prompts are being avoided: then nothing may be looked up where
+/// it might be in a guarded folder, as a moved folder found by number.
+pub fn avoiding() -> bool {
+    AVOID.load(Ordering::Relaxed)
 }
 
 /// Whether `path` may be opened: always, unless prompts are being avoided
@@ -110,6 +121,7 @@ mod tests {
 
     #[test]
     fn avoided_only_when_asked() {
+        let _off_after = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
         let docs = Path::new("/Users/me/Documents/x");
         avoid_prompts(true);
         assert!(!may_open(docs));

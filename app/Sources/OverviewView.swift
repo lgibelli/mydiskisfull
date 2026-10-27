@@ -270,9 +270,12 @@ private struct NextSteps: View {
     }
 
     @ViewBuilder private var grewCard: some View {
-        let rows = (monitor.detail?.growth24h ?? []).filter { $0.bytes >= 100_000_000 }.prefix(3)
+        // Three days: a download or an update from the day before yesterday
+        // is still what filled the disk.
+        let threeDays = monitor.detail?.growth3d
+        let rows = (threeDays ?? monitor.detail?.growth24h ?? []).filter { $0.bytes >= 100_000_000 }.prefix(3)
         if !rows.isEmpty {
-            HubCard(pane: .trends, summary: "Grew the most in the last 24 hours") {
+            HubCard(pane: .trends, summary: "Grew the most in the last \(threeDays == nil ? "24 hours" : "3 days")") {
                 ForEach(Array(rows.enumerated()), id: \.offset) { n, g in
                     if n > 0 { Divider() }
                     let url = URL(fileURLWithPath: g.owner)

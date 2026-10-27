@@ -43,6 +43,13 @@ enum Format {
         return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
     }
 
+    /// "Oct 25".
+    static func day(_ ts: Int64) -> String {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMM d")
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+
     /// "4 min", "3 hours", "2 days".
     static func duration(_ secs: Int64) -> String {
         if secs >= 2 * 86_400 { return "\(secs / 86_400) days" }

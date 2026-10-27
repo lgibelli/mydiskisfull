@@ -204,9 +204,10 @@ type Prediction = (f64, f64, f64);
 
 fn old_method(pts: &[SpacePoint], p: &Params, hours: usize) -> Option<Prediction> {
     let last = pts.last()?;
-    let (r, _) = WINDOWS
+    let r = WINDOWS
         .iter()
-        .find_map(|&w| window_rate(pts, &[], last.ts - w, w, p))?;
+        .find_map(|&w| window_rate(pts, &[], None, last.ts - w, w, p))?
+        .rate;
     let k = hours as f64 / 24.0;
     Some((r.per_day * k, r.low * k, r.high * k))
 }

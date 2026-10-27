@@ -92,12 +92,19 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
 
     println!();
-    println!("{:>10} {:>10} {:>10}", "ON DISK", "PRIVATE", "CLOUD-ONLY");
+    println!(
+        "{:>10} {:>10} {:>10} {:>10}",
+        "ON DISK", "ONCE", "PRIVATE", "CLOUD-ONLY"
+    );
     print_node(m, &m.scan.root, 0, depth, true);
     println!();
     println!(
         "ON DISK = allocated blocks, what du and Finder add up (a clone is counted once per copy, a \
          hard link once)."
+    );
+    println!(
+        "ONCE = what it really takes: the blocks its clones share counted once (Chrome leaves \
+         copies of itself that share all of theirs)."
     );
     println!(
         "PRIVATE = freed immediately if deleted (not shared with a clone, a hard link elsewhere \
@@ -129,8 +136,9 @@ fn print_node(m: &DiskMap, n: &Node, level: usize, depth: usize, root: bool) {
         String::new()
     };
     println!(
-        "{:>10} {:>10} {:>10}  {}{}",
+        "{:>10} {:>10} {:>10} {:>10}  {}{}",
         bytes(t.allocated),
+        bytes(t.allocated - t.twice),
         bytes(t.private),
         cloud,
         "  ".repeat(level),
@@ -146,8 +154,9 @@ fn print_node(m: &DiskMap, n: &Node, level: usize, depth: usize, root: bool) {
     let rest = t.allocated.saturating_sub(shown);
     if !n.children.is_empty() && rest >= 1_000_000_000 {
         println!(
-            "{:>10} {:>10} {:>10}  {}(files here and smaller folders)",
+            "{:>10} {:>10} {:>10} {:>10}  {}(files here and smaller folders)",
             bytes(rest),
+            "",
             "",
             "",
             "  ".repeat(level + 1)
