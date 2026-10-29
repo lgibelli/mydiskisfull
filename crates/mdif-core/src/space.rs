@@ -22,7 +22,8 @@
 //!   bytes, down to what the scan found really used;
 //! - the other volumes (System, Preboot, Recovery, VM) are macOS's;
 //! - what the scan can't see (files only macOS can read, file-system
-//!   metadata, blocks only snapshots hold) is "Not measured", in Other.
+//!   metadata, blocks only snapshots hold) is "System data", in Other,
+//!   which says what's in it and offers to delete Time Machine's snapshots.
 //!
 //! Nothing here reads a file's contents: sizes come from the scan,
 //! when apps were last opened from Spotlight's metadata.
@@ -333,7 +334,7 @@ pub struct ComesBack {
     pub bytes: u64,
     pub how: String,
     /// The kind it's counted in, when it's known: the app draws it apart
-    /// from the rest of that kind. Purgeable is in Other's "Not measured"
+    /// from the rest of that kind. Purgeable is in Other's "System data"
     /// when local snapshots hold it; purgeable files are wherever they are.
     pub kind: Option<&'static str>,
 }
@@ -366,6 +367,9 @@ pub struct Item {
     /// Any of `unused`, `cold`, `build`, `cache`, `kept`, `regrows`.
     pub flags: Vec<&'static str>,
     pub note: Option<String>,
+    /// More than the note says, for what has no folder to look in: what's
+    /// in it and why.
+    pub detail: Option<String>,
     /// What `mdif clean` would do with it now.
     pub action: Option<Action>,
     /// The biggest folder in it that an app's handler knows
@@ -468,8 +472,6 @@ pub fn measure(home: &Path) -> Result<Measured> {
     Ok(m)
 }
 
-/// Of the big files a scan found, yours ([`clean::yours`]), as you know
-/// them, the biggest [`FILES`].
 /// After a clean-up: what changed is measured again and the kept
 /// measurement patched, so the breakdown follows in a second, not after a
 /// whole-disk scan. Each path is measured where the tree counts it: the
@@ -553,6 +555,13 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
     m.volume.total = st.total;
     m.volume.free = st.avail;
     m.volume.used = used;
+    m.volume.purgeable = purgeable(Path::new(DATA_ROOT), st.avail);
+    // Snapshots deleted: what they held isn't purgeable any more.
+    if paths.iter().any(|p| clean::snapshot_date(p).is_some())
+        && let Ok(s) = crate::apfs::local_snapshots(Path::new(&st.mount_point))
+    {
+        m.snapshots = s.len();
+    }
     Ok(())
 }
 
@@ -564,6 +573,8 @@ fn node_mut<'a>(d: &'a mut Dir, names: &[String]) -> Option<&'a mut Dir> {
     node_mut(c, rest)
 }
 
+/// Of the big files a scan found, yours ([`clean::yours`]), as you know
+/// them, the biggest [`FILES`].
 fn own_files(found: &[scan::BigFile], home: &Path) -> Vec<BigFile> {
     let mut files: Vec<BigFile> = found
         .iter()
@@ -1174,9 +1185,11 @@ fn visit(d: &Dir, path: PathBuf, up: &Owner, twice: i64, home: &Path, keep: &Kee
     }
 }
 
-/// Sorts what `m` measured into kinds, with what you keep now (`keep`).
-/// Actions are offered as `mdif clean` would take them now.
-pub fn report(m: &Measured, keep: &Keep) -> Report {
+/// Sorts what `m` measured into kinds, with what you keep now (`keep`) and
+/// the local snapshots there are now (`snapshots`, as `tmutil
+/// listlocalsnapshots` gives them). Actions are offered as `mdif clean`
+/// would take them now.
+pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
     let t = sort(m, keep);
     let home = m.home.as_path();
 
@@ -1283,6 +1296,7 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
             last_used: None,
             flags: Vec::new(),
             note: note.map(String::from),
+            detail: None,
             action: None,
             about: None,
         });
@@ -1301,29 +1315,9 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
         trash,
     };
     if unmeasured > 0 {
-        let mut note = "Files only macOS can read, and file-system metadata".to_string();
-        if m.snapshots > 0 {
-            note.push_str(&format!(
-                ", and what {} local snapshot{} hold{}",
-                m.snapshots,
-                if m.snapshots == 1 { "" } else { "s" },
-                if m.snapshots == 1 { "s" } else { "" },
-            ));
-        }
         let k = kinds.entry(Kind::Other).or_default();
         k.1 += unmeasured as u64;
-        k.0.push(Item {
-            path: String::new(),
-            name: "Not measured".into(),
-            bytes: unmeasured as u64,
-            frees: 0,
-            age: None,
-            last_used: None,
-            flags: Vec::new(),
-            note: Some(note),
-            action: None,
-            about: None,
-        });
+        k.0.push(unseen(unmeasured as u64, m, snapshots));
     } else if unmeasured < 0 {
         // Counted more than is used (the disk changed while it was
         // scanned): taken off the biggest kind.
@@ -1344,7 +1338,8 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
             items.retain(|i| i.bytes > 0);
             items.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
             items.truncate(ITEMS);
-            for i in &mut items {
+            // System data comes with its own (the snapshots').
+            for i in items.iter_mut().filter(|i| i.action.is_none()) {
                 i.action = action(i, home, keep, &t);
             }
             Some(KindReport {
@@ -1366,6 +1361,105 @@ pub fn report(m: &Measured, keep: &Keep) -> Report {
         comes_back: comes_back(m, &back),
         kinds: out,
         old_files: old_files(m, keep),
+    }
+}
+
+/// What the scan couldn't see, `bytes` of it, said in full: what Time
+/// Machine's local snapshots (of `snapshots`) hold, up to what macOS counts
+/// as purgeable, with the button that deletes them; and what macOS keeps
+/// where apps aren't let in, which nothing can measure or clean.
+fn unseen(bytes: u64, m: &Measured, snapshots: &[String]) -> Item {
+    let folders = format!(
+        "{} macOS keeps to itself (Spotlight's index, system logs, caches and databases) and \
+         the file system's own records. Apps aren't let in to measure or clean them: macOS \
+         looks after them itself.",
+        match m.unreadable_dirs {
+            0 => "folders".to_string(),
+            1 => "a folder".to_string(),
+            n => format!("{n} folders"),
+        }
+    );
+    let action = clean::snapshots_action(snapshots);
+    let (name, note, detail) = match &action {
+        None => (
+            "System data",
+            "Folders only macOS can read, and file-system metadata".to_string(),
+            format!("In {folders}"),
+        ),
+        Some(a) => {
+            let one = a.paths.len() == 1;
+            let oldest = a
+                .paths
+                .iter()
+                .filter_map(|p| clean::snapshot_date(Path::new(p)))
+                .min()
+                .map(clean::snapshot_when)
+                .unwrap_or_default();
+            let them = if one {
+                "1 Time Machine snapshot".to_string()
+            } else {
+                format!("{} Time Machine snapshots", a.paths.len())
+            };
+            let held = m.volume.purgeable.min(bytes);
+            let note = if held > 0 {
+                format!(
+                    "Up to {} in {them}, the rest in folders only macOS can read",
+                    crate::units::bytes(held)
+                )
+            } else {
+                format!("{them}, and folders only macOS can read")
+            };
+            let (it, they, their, keeps) = if one {
+                ("it", "it", "its", "keeps")
+            } else {
+                ("they", "them", "their", "keep")
+            };
+            let mut detail = format!(
+                "{} {oldest}, {keeps} every file that was there when {it} {} taken: a file \
+                 deleted since frees nothing until {it} {}. macOS deletes {they} after a day, or \
+                 sooner when it needs the room{}. Deleting {they} now frees {their} space at \
+                 once; backups on your backup disk aren't touched.",
+                if one {
+                    "A local Time Machine snapshot, from".to_string()
+                } else {
+                    format!(
+                        "{} local Time Machine snapshots, the oldest from",
+                        a.paths.len()
+                    )
+                },
+                if one { "was" } else { "were" },
+                if one { "goes" } else { "go" },
+                if held > 0 {
+                    format!(
+                        ", and counts what {it} {} as purgeable: up to {}",
+                        if one { "holds" } else { "hold" },
+                        crate::units::bytes(held)
+                    )
+                } else {
+                    String::new()
+                },
+            );
+            if held < bytes {
+                detail.push_str(&format!(
+                    "\n\nThe rest, {}, is in {folders}",
+                    crate::units::bytes(bytes - held)
+                ));
+            }
+            ("Snapshots and system data", note, detail)
+        }
+    };
+    Item {
+        path: String::new(),
+        name: name.into(),
+        bytes,
+        frees: 0,
+        age: None,
+        last_used: None,
+        flags: Vec::new(),
+        note: Some(note),
+        detail: Some(detail),
+        action,
+        about: None,
     }
 }
 
@@ -1569,6 +1663,7 @@ fn describe(
         last_used,
         flags,
         note,
+        detail: None,
         action: None,
         about,
     }
@@ -2579,11 +2674,11 @@ mod tests {
             2 * GB,
         );
         let keep = Keep::parse("~/Desktop/Storage\n", Path::new(HOME));
-        let r = report(&m, &keep);
+        let r = report(&m, &keep, &[]);
 
         let sum: u64 = r.kinds.iter().map(|k| k.bytes).sum();
         assert_eq!(sum, r.volume.used);
-        let unseen = named(&r, "other", "Not measured").bytes;
+        let unseen = named(&r, "other", "System data").bytes;
         assert_eq!(unseen, 2 * GB);
         assert_eq!(
             kind(&r, "macos").bytes,
@@ -2687,7 +2782,7 @@ mod tests {
             "~/devel/app/src-tauri/target\n/Library/Caches/*\n~/Library/Caches/com.spotify.client\n",
             Path::new(HOME),
         );
-        let r = report(&m, &keep);
+        let r = report(&m, &keep, &[]);
         let target = named(&r, "build", "app/src-tauri/target");
         assert!(target.flags.contains(&"kept"), "{target:?}");
         // Its incremental caches are inside what's kept.
@@ -2710,20 +2805,49 @@ mod tests {
         let mut m = measured(a_mac(), vec![volume("VM", 3 * GB)], 25 * GB);
         m.snapshots = 1;
         m.volume.purgeable = 10 * GB;
-        let r = report(&m, &Keep::default());
+        m.unreadable_dirs = 294;
+        let snap = "com.apple.TimeMachine.2026-10-27-231632.local".to_string();
+        // A macOS update's snapshot isn't Time Machine's: never deleted.
+        let listed = [snap.clone(), "com.apple.os.update-MSUPrepareUpdate".into()];
+        let r = report(&m, &Keep::default(), &listed);
         let back: Vec<(&str, u64)> = r.comes_back.iter().map(|c| (c.what, c.bytes)).collect();
         assert_eq!(
             back,
             [("purgeable", 10 * GB), ("swap", 3 * GB), ("trash", 2 * GB)]
         );
-        let unseen = named(&r, "other", "Not measured");
+        let unseen = named(&r, "other", "Snapshots and system data");
         assert_eq!(unseen.bytes, 25 * GB);
+        assert_eq!(
+            unseen.note.as_deref(),
+            Some(
+                "Up to 10.0 GB in 1 Time Machine snapshot, the rest in folders only macOS can read"
+            )
+        );
+        let detail = unseen.detail.as_deref().unwrap();
+        assert!(
+            detail.starts_with("A local Time Machine snapshot, from 2026-10-27 23:16, keeps"),
+            "{detail}"
+        );
+        assert!(detail.contains("up to 10.0 GB"), "{detail}");
+        assert!(
+            detail.contains("The rest, 15.0 GB, is in 294 folders macOS keeps to itself"),
+            "{detail}"
+        );
+        let a = unseen.action.as_ref().unwrap();
+        assert_eq!((a.kind, a.label.as_str()), ("snapshots", "Delete Snapshot"));
+        assert_eq!(a.paths, [snap]);
+        assert!(a.confirm.is_some(), "asked first: it can't be undone");
+
+        // None left: no button, and nothing said about snapshots.
+        let r = report(&m, &Keep::default(), &listed[1..]);
+        let unseen = named(&r, "other", "System data");
+        assert!(unseen.action.is_none());
         assert!(
             unseen
-                .note
+                .detail
                 .as_deref()
                 .unwrap()
-                .contains("1 local snapshot holds")
+                .starts_with("In 294 folders macOS keeps to itself")
         );
         // Drawn apart from the rest of Other, where the scan couldn't see.
         assert_eq!(r.comes_back[0].kind, Some("other"));
@@ -2764,7 +2888,7 @@ mod tests {
             version: "27.2".into(),
             bytes: 13 * GB,
         };
-        let r = report(&m, &Keep::default()).with_update(Some(&u));
+        let r = report(&m, &Keep::default(), &[]).with_update(Some(&u));
         let back: Vec<_> = r
             .comes_back
             .iter()
@@ -2787,8 +2911,9 @@ mod tests {
             )
         );
         // None waiting: as it was.
-        let before = serde_json::to_value(report(&m, &Keep::default())).unwrap();
-        let after = serde_json::to_value(report(&m, &Keep::default()).with_update(None)).unwrap();
+        let before = serde_json::to_value(report(&m, &Keep::default(), &[])).unwrap();
+        let after =
+            serde_json::to_value(report(&m, &Keep::default(), &[]).with_update(None)).unwrap();
         assert_eq!(before, after);
     }
 
@@ -2831,7 +2956,7 @@ mod tests {
         m.data_real = 9 * GB + 20 * MB + 5 * GB;
         m.data_in_use = m.data_real + GB;
         m.volume.used = m.data_in_use;
-        let r = report(&m, &Keep::default());
+        let r = report(&m, &Keep::default(), &[]);
         let sum: u64 = r.kinds.iter().map(|k| k.bytes).sum();
         assert_eq!(sum, r.volume.used);
         let cloud = kind(&r, "cloud");
@@ -2843,7 +2968,7 @@ mod tests {
             5 * GB,
             "no clones, nothing taken off"
         );
-        assert_eq!(named(&r, "other", "Not measured").bytes, GB);
+        assert_eq!(named(&r, "other", "System data").bytes, GB);
     }
 
     #[test]
@@ -2905,7 +3030,7 @@ mod tests {
         m.data_real = 2 * GB + 4 * GB + 9 * GB;
         m.data_in_use = m.data_real;
         m.volume.used = m.data_in_use;
-        let r = report(&m, &Keep::default());
+        let r = report(&m, &Keep::default(), &[]);
         assert_eq!(
             named(&r, "caches", "Temporary files").bytes,
             6 * GB,
@@ -2946,7 +3071,7 @@ mod tests {
             at("Kept", Some(NOW - 400 * DAY), None),
         ];
         let keep = Keep::parse("/Applications/Kept.app\n", Path::new(HOME));
-        let r = report(&m, &keep);
+        let r = report(&m, &keep, &[]);
         let old = named(&r, "apps", "Old");
         assert_eq!(old.flags, ["unused"]);
         assert_eq!(old.note.as_deref(), Some("Not opened since March"));
@@ -3008,7 +3133,7 @@ mod tests {
         // Named after the runtime it holds, when Xcode says.
         let mut m = measured(a_mac(), Vec::new(), 0);
         m.runtimes = rt;
-        let r = report(&m, &Keep::default());
+        let r = report(&m, &Keep::default(), &[]);
         let sim = named(&r, "dev", "iOS 27.0 Simulator");
         assert_eq!(sim.last_used, Some(1_792_132_973));
     }
@@ -3088,8 +3213,8 @@ mod tests {
         assert_eq!(back.apps, m.apps);
         assert_eq!(back.files, m.files);
         assert_eq!(
-            serde_json::to_value(report(&back, &Keep::default())).unwrap(),
-            serde_json::to_value(report(&m, &Keep::default())).unwrap()
+            serde_json::to_value(report(&back, &Keep::default(), &[])).unwrap(),
+            serde_json::to_value(report(&m, &Keep::default(), &[])).unwrap()
         );
     }
 
@@ -3185,7 +3310,7 @@ mod tests {
         ];
         std::fs::remove_file(h.join("Movies/trashed.mov")).unwrap();
         let keep = Keep::parse("~/Desktop/Storage\n", h);
-        let r = report(&m, &keep);
+        let r = report(&m, &keep, &[]);
         let old: Vec<(&str, bool)> = r
             .old_files
             .iter()
@@ -3235,7 +3360,7 @@ mod tests {
             accessed: now - 200 * DAY,
             modified: now - 800 * DAY,
         }];
-        let r = report(&m, &Keep::default());
+        let r = report(&m, &Keep::default(), &[]);
         let action = r.old_files[0].action.as_ref().expect("a button");
         assert_eq!(
             (action.kind, action.label.as_str()),
@@ -3245,7 +3370,7 @@ mod tests {
         assert_eq!(action.confirm, None, "the Trash gives it back");
         // Kept: listed, no button.
         let keep = Keep::parse(&format!("{}\n", h.join("Movies").display()), h);
-        let r = report(&m, &keep);
+        let r = report(&m, &keep, &[]);
         assert!(r.old_files[0].kept && r.old_files[0].action.is_none());
     }
 
@@ -3297,6 +3422,7 @@ mod tests {
                     last_used: None,
                     flags: vec!["build"],
                     note: None,
+                    detail: None,
                     action: Some(Action {
                         kind: "delete",
                         label: String::new(),

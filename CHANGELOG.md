@@ -23,9 +23,13 @@ All notable changes to this project are documented here. The format is based on
   instead of "Full in 13 days" over a rate that was going down.
 - Each category on Storage says what of it comes back by itself (purgeable, swap, a macOS
   update), so it adds up with the bar.
+- "Not measured" under Other is now "System data", and says what's in it: up to how much Time
+  Machine's local snapshots hold, with a button to delete them (a Terminal command in Lite), and
+  how many folders macOS keeps to itself. Its (i) explains both.
 
 ### Fixed
 - Folders whose names have dots in them (`group.com.apple.VoiceMemos.shared`) had no icon.
+- A folder named like a Markdown link showed as a link in the app's texts; it's plain text now.
 
 ## [0.1.4] - 2026-10-27
 

@@ -471,7 +471,7 @@ struct ItemRow: View {
     }
 
     private var hasAdvice: Bool {
-        (item.about != nil && !item.has("kept")) || item.note != nil || suggestion != nil
+        (item.about != nil && !item.has("kept")) || item.note != nil || item.detail != nil || suggestion != nil
     }
 }
 
@@ -536,6 +536,17 @@ private struct AdviceButton: View {
                     Text(Format.inline(note)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let detail = item.detail {
+                    Text(Format.inline(detail)).fixedSize(horizontal: false, vertical: true)
+                }
+                #if !APP_STORE
+                // What the scan couldn't see includes your own folders, then.
+                if item.path.isEmpty, Privacy.appHasFullDiskAccess == false {
+                    Text("Without Full Disk Access, some of your own folders are counted here too: MyDiskIsFull can't look inside them.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open Privacy Settings…") { Privacy.openSettings() }
+                }
+                #endif
                 if let about {
                     AboutBox(about: about, monitor: monitor)
                 }

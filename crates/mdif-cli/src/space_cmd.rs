@@ -38,7 +38,12 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
             m
         }
     };
-    let r = space::report(&m, &keep).with_update(mdif_core::os_update::staged().as_ref());
+    // The snapshots as they are now, not as they were at the scan: Time
+    // Machine takes and deletes them by the hour.
+    let snapshots =
+        mdif_core::apfs::local_snapshots(Path::new(mdif_core::map::DATA_ROOT)).unwrap_or_default();
+    let r =
+        space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
     // Again for the same measurement replaces it: nothing piles up.
     record(db, r.measured, &r);
     if json_out {
@@ -63,7 +68,8 @@ pub fn patch(db: &Path, paths: &[PathBuf]) {
         return;
     }
     if let Ok(keep) = crate::keep_cmd::load(db) {
-        record(db, unix_now(), &space::report(&m, &keep));
+        // What the disk is made of doesn't depend on the snapshots.
+        record(db, unix_now(), &space::report(&m, &keep, &[]));
     }
 }
 

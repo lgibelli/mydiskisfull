@@ -59,9 +59,13 @@ enum Format {
     }
 
     /// `mdif`'s texts mark commands and names with backticks: shown as code.
+    /// Never a link: names come from the disk, and a folder named like a
+    /// Markdown link stays text.
     static func inline(_ s: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: s, options: options)) ?? AttributedString(s)
+        var a = (try? AttributedString(markdown: s, options: options)) ?? AttributedString(s)
+        for r in a.runs.filter({ $0.link != nil }).map(\.range) { a[r].link = nil }
+        return a
     }
 
     /// "43%".

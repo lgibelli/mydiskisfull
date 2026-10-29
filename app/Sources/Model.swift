@@ -369,6 +369,11 @@ struct CleanAction: Decodable {
             return #"osascript -e 'tell application "Finder" to empty trash'"#
         case "trash":
             return "mv -n \(q) ~/.Trash/"
+        case "snapshots":
+            // tmutil takes the date in the name.
+            let dates = paths.map { $0.replacingOccurrences(of: "com.apple.TimeMachine.", with: "")
+                .replacingOccurrences(of: ".local", with: "") }
+            return dates.map { "tmutil deletelocalsnapshots \(Self.quote($0))" }.joined(separator: "; ")
         case "finder-trash":
             // Finder asks for the password these need.
             return #"osascript -e 'on run argv' -e 'repeat with p in argv' -e 'tell application "Finder" to delete (POSIX file (p as text) as alias)' -e 'end repeat' -e 'end run' "# + q
@@ -646,6 +651,9 @@ struct SpaceReport: Decodable {
         /// "unused", "cold", "build", "cache", "kept", "regrows".
         let flags: [String]
         let note: String?
+        /// More than the note, for what has no folder to look in (System
+        /// data): what's in it and why.
+        let detail: String?
         let action: CleanAction?
         /// What an app keeps in it, and where to make it smaller.
         let about: About?

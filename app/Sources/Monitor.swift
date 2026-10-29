@@ -294,7 +294,7 @@ final class Monitor: ObservableObject {
         var out: [String: Suggestion] = [:]
         var placed = Set<String>()
         for k in r.kinds {
-            // "Not measured" has no path: it's about nothing.
+            // System data has no path: it's about nothing.
             for i in k.items where !i.path.isEmpty {
                 let p = Self.dataless(i.path)
                 if let s = list.first(where: { s in

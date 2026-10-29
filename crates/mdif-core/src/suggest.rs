@@ -850,14 +850,10 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
     let snaps = apfs::local_snapshots(Path::new(mount)).unwrap_or_default();
     // Time Machine's own, by name; only a well-formed date goes into the
     // command.
-    let (names, dates): (Vec<&String>, Vec<&str>) = snaps
+    let dates: Vec<&str> = snaps
         .iter()
-        .filter_map(|s| clean::snapshot_date(Path::new(s)).map(|d| (s, d)))
-        .unzip();
-    let when = |d: &str| match (d.get(..10), d.get(11..13), d.get(13..15)) {
-        (Some(day), Some(h), Some(m)) => format!("{day} {h}:{m}"),
-        _ => d.to_string(),
-    };
+        .filter_map(|s| clean::snapshot_date(Path::new(s)))
+        .collect();
     if !dates.is_empty() {
         // What they hold takes root to measure, but macOS counts it as
         // purgeable, with the caches it would delete by itself: so at most
@@ -869,7 +865,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
                  since {} taken{}, and the disk is nearly full.",
                 dates.len(),
                 if dates.len() == 1 { "" } else { "s" },
-                when(dates[0]),
+                clean::snapshot_when(dates[0]),
                 if dates.len() == 1 { "s" } else { "" },
                 if dates.len() == 1 {
                     "it was"
@@ -895,26 +891,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
             space: (held > 0).then_some(held),
             per_day: None,
             path: None,
-            action: Some(Action {
-                kind: "snapshots",
-                label: if names.len() == 1 {
-                    "Delete Snapshot".into()
-                } else {
-                    format!("Delete {} Snapshots", names.len())
-                },
-                paths: names.iter().map(|n| n.to_string()).collect(),
-                confirm: Some(format!(
-                    "Delete {}? Backups on your backup disk aren't touched, but what changed \
-                     since the last backup loses its local copy: Time Machine can't restore it \
-                     from this Mac any more. This can't be undone.",
-                    if names.len() == 1 {
-                        "the local Time Machine snapshot".to_string()
-                    } else {
-                        format!("{} local Time Machine snapshots", names.len())
-                    }
-                )),
-                done: None,
-            }),
+            action: clean::snapshots_action(&snaps),
             title: Some(if dates.len() == 1 {
                 "A local Time Machine snapshot".into()
             } else {

@@ -379,6 +379,46 @@ pub fn snapshot(name: &Path, listed: &[String], volume: &Path) -> Result<Step, S
     })
 }
 
+/// The button that deletes Time Machine's own among `names` (as `tmutil
+/// listlocalsnapshots` gives them), asked first; none of them, no button.
+pub fn snapshots_action(names: &[String]) -> Option<Action> {
+    let names: Vec<String> = names
+        .iter()
+        .filter(|n| snapshot_date(Path::new(n)).is_some())
+        .cloned()
+        .collect();
+    let one = names.len() == 1;
+    (!names.is_empty()).then(|| Action {
+        kind: "snapshots",
+        label: if one {
+            "Delete Snapshot".into()
+        } else {
+            format!("Delete {} Snapshots", names.len())
+        },
+        confirm: Some(format!(
+            "Delete {}? Backups on your backup disk aren't touched, but what changed since the \
+             last backup loses its local copy: Time Machine can't restore it from this Mac any \
+             more. This can't be undone.",
+            if one {
+                "the local Time Machine snapshot".to_string()
+            } else {
+                format!("{} local Time Machine snapshots", names.len())
+            }
+        )),
+        paths: names,
+        done: None,
+    })
+}
+
+/// When a local snapshot was taken, from the date in its name
+/// (`2026-10-18-204720`): "2026-10-18 20:47".
+pub fn snapshot_when(date: &str) -> String {
+    match (date.get(..10), date.get(11..13), date.get(13..15)) {
+        (Some(day), Some(h), Some(m)) => format!("{day} {h}:{m}"),
+        _ => date.to_string(),
+    }
+}
+
 /// The date in a local Time Machine snapshot's name
 /// (`com.apple.TimeMachine.2026-10-18-204720.local`), when the name is just
 /// that: only a well-formed date goes into `tmutil`.

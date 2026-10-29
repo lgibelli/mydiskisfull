@@ -396,7 +396,9 @@ enum Recommendations {
             // Clean-ups with nothing more to say: three or more go as one
             // row, which opens the category.
             var plain: [Recommendation] = []
-            for i in listed {
+            // System data's button (the snapshots') is here only when the
+            // disk is tight, as a suggestion: macOS deletes them by itself.
+            for i in listed where !i.path.isEmpty {
                 // Inside one that is listed: it's counted there.
                 let inside = listed.contains { o in
                     i.path.hasPrefix(o.path + "/") && (o.action != nil || m.suggestion(about: o) != nil)
