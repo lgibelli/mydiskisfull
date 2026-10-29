@@ -274,6 +274,8 @@ final class Monitor: ObservableObject {
                                    r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
                 }
                 timeMachine = timeMachine?.marking(r.done, backedUp: backedUp)
+                // Those kept out weren't measured: their sizes, now.
+                if backedUp, !r.done.isEmpty { await loadTimeMachine() }
             } catch {
                 TweakFlow.show(.warning, "Nothing was changed", error.localizedDescription)
             }

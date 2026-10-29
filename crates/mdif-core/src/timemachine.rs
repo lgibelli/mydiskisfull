@@ -352,6 +352,33 @@ pub struct Folder {
     pub what: &'static str,
     pub bytes: u64,
     pub backed_up: bool,
+    /// The git checkout it's in (a worktree's own folder), and the project
+    /// that checkout belongs to: they differ for a worktree.
+    pub checkout: String,
+    pub project: String,
+}
+
+/// Where `dir` is: the nearest folder above it with a `.git` (its
+/// checkout), and the nearest with a `.git` folder (its project). A
+/// worktree's or a submodule's `.git` is a file, so an agent's worktree
+/// inside its repository (`.claude/worktrees/x`) is that repository's; one
+/// elsewhere is its own project. Without either, the folder above `dir`.
+pub fn project(dir: &Path, home: &Path) -> (PathBuf, PathBuf) {
+    let mut checkout = None;
+    for p in dir.ancestors().skip(1) {
+        if p == home || !p.starts_with(home) {
+            break;
+        }
+        match p.join(".git").symlink_metadata() {
+            Ok(m) if m.is_dir() => {
+                return (checkout.unwrap_or_else(|| p.to_path_buf()), p.to_path_buf());
+            }
+            Ok(_) if checkout.is_none() => checkout = Some(p.to_path_buf()),
+            _ => {}
+        }
+    }
+    let checkout = checkout.unwrap_or_else(|| dir.parent().unwrap_or(dir).to_path_buf());
+    (checkout.clone(), checkout)
 }
 
 /// Whether `dir` is a folder its project makes again, and which kind:
@@ -441,7 +468,7 @@ pub struct Report {
     /// Folders a build or an install makes again, biggest first; those
     /// kept out already aren't measured (0).
     pub rebuildable: Vec<Folder>,
-    /// What the settings leave out, as you know the paths.
+    /// What the settings leave out, whole paths.
     pub skipped: Vec<String>,
 }
 
@@ -476,12 +503,14 @@ pub fn glance(home: &Path, now: i64) -> Report {
         None
     };
 
-    let home_text = home.to_string_lossy();
+    // System Settings writes the ones you add as `~/Downloads`.
     let skipped = prefs
         .skip
         .iter()
-        .map(|p| match p.strip_prefix(&*home_text) {
-            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        .map(|p| match p.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                format!("{}{rest}", home.to_string_lossy())
+            }
             _ => p.clone(),
         })
         .collect();
@@ -575,6 +604,7 @@ pub fn report(
                 .get(&p)
                 .copied()
                 .unwrap_or_else(|| !mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false));
+            let (checkout, project) = project(&p, home);
             Folder {
                 bytes: match backed_up {
                     true => measured
@@ -586,6 +616,8 @@ pub fn report(
                 path: p.to_string_lossy().into_owned(),
                 what,
                 backed_up,
+                checkout: checkout.to_string_lossy().into_owned(),
+                project: project.to_string_lossy().into_owned(),
             }
         })
         .collect();
@@ -632,6 +664,33 @@ pub fn set_excluded(
             (p.clone(), done)
         })
         .collect()
+}
+
+/// `paths` as [`set_excluded`] takes them: a folder a build makes again as
+/// it is, a project (or any folder) as the ones inside it; one with none
+/// inside as it is, to be refused.
+pub fn expand(paths: &[PathBuf], home: &Path) -> Vec<PathBuf> {
+    let mut found: Option<Vec<PathBuf>> = None;
+    let mut out = Vec::new();
+    for p in paths {
+        if rebuildable(p).is_some() || !p.is_dir() {
+            out.push(p.clone());
+            continue;
+        }
+        let all = found.get_or_insert_with(|| {
+            crate::tidy::artifact_folders(home)
+                .into_par_iter()
+                .filter(|f| rebuildable(f).is_some())
+                .collect()
+        });
+        let inside: Vec<PathBuf> = all.iter().filter(|f| f.starts_with(p)).cloned().collect();
+        if inside.is_empty() {
+            out.push(p.clone());
+        } else {
+            out.extend(inside);
+        }
+    }
+    out
 }
 
 /// Starts a backup now, as Back Up Now in the menu does.
@@ -707,6 +766,8 @@ mod tests {
                 what: "build",
                 bytes: 1,
                 backed_up: true,
+                checkout: String::new(),
+                project: String::new(),
             }],
             skipped: vec![String::new()],
         })
@@ -835,6 +896,8 @@ mod tests {
             what: "dependencies",
             bytes: 0,
             backed_up,
+            checkout: String::new(),
+            project: String::new(),
         };
         let folders = [
             folder("/w/agent-1/node_modules", false),
@@ -844,6 +907,43 @@ mod tests {
         ];
         assert_eq!(kept_out(Path::new("/w/agent-1"), &folders), 2);
         assert_eq!(kept_out(Path::new("/w/agent-2"), &folders), 0);
+    }
+
+    #[test]
+    fn a_folder_belongs_to_its_repository_worktrees_inside_it_too() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mk = |p: &str| std::fs::create_dir_all(h.join(p)).unwrap();
+        mk("devel/app/.git");
+        mk("devel/app/apps/web/dist");
+        mk("devel/app/.claude/worktrees/w/node_modules");
+        std::fs::write(h.join("devel/app/.claude/worktrees/w/.git"), "gitdir: x").unwrap();
+        mk("devel/elsewhere/.git");
+        mk("devel/elsewhere-wt/build");
+        std::fs::write(h.join("devel/elsewhere-wt/.git"), "gitdir: x").unwrap();
+        mk("loose/x/build");
+
+        let at = |p: &str| {
+            let (checkout, project) = project(&h.join(p), h);
+            (
+                checkout.strip_prefix(h).unwrap().to_owned(),
+                project.strip_prefix(h).unwrap().to_owned(),
+            )
+        };
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(
+            at("devel/app/apps/web/dist"),
+            (p("devel/app"), p("devel/app"))
+        );
+        assert_eq!(
+            at("devel/app/.claude/worktrees/w/node_modules"),
+            (p("devel/app/.claude/worktrees/w"), p("devel/app"))
+        );
+        assert_eq!(
+            at("devel/elsewhere-wt/build"),
+            (p("devel/elsewhere-wt"), p("devel/elsewhere-wt"))
+        );
+        assert_eq!(at("loose/x/build"), (p("loose/x"), p("loose/x")));
     }
 
     #[test]
@@ -934,7 +1034,8 @@ mod tests {
     #[test]
     fn build_output_git_ignores_is_rebuildable_what_git_tracks_is_not() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().canonicalize().unwrap().join("app");
+        let home = dir.path().canonicalize().unwrap();
+        let repo = home.join("devel/app");
         std::fs::create_dir_all(repo.join("ios/build/Debug")).unwrap();
         std::fs::create_dir_all(repo.join("docs/build")).unwrap();
         std::fs::create_dir_all(repo.join("notes")).unwrap();
@@ -985,5 +1086,12 @@ mod tests {
         let r = set_excluded(&[repo.join("ios/build")], false, &keep);
         assert_eq!(r[0].1, Ok(()));
         assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
+        // A project stands for its folders a build makes again; a folder
+        // with none in it stays itself, to be refused.
+        assert_eq!(
+            expand(std::slice::from_ref(&repo), &home),
+            [repo.join("ios/build")]
+        );
+        assert_eq!(expand(&[repo.join("notes")], &home), [repo.join("notes")]);
     }
 }

@@ -46,6 +46,29 @@ enum TimeMachineText {
         kind == "dependencies" ? "Downloaded packages" : "Build output"
     }
 
+    /// What Finder calls it: "Final Cut Pro" for Final Cut Pro.app.
+    static func name(_ path: String) -> String {
+        let n = (path as NSString).lastPathComponent
+        return n.hasSuffix(".app") ? String(n.dropLast(4)) : n
+    }
+
+    /// Where it is, short: an agent's worktree is "Worktree of <repository>",
+    /// what comes with macOS "macOS", anything else the folder it's in.
+    static func place(_ path: String) -> String {
+        let parent = (path as NSString).deletingLastPathComponent
+        if (parent as NSString).lastPathComponent == "worktrees",
+           let repo = (parent as NSString).pathComponents.dropLast().last(where: { !$0.hasPrefix(".") && $0 != "/" }) {
+            return "Worktree of \(repo)"
+        }
+        if path.hasPrefix("/System/") { return "macOS" }
+        return Format.path(parent)
+    }
+
+    /// `path` from inside `folder`: "apps/web/dist".
+    static func inside(_ folder: String, _ path: String) -> String {
+        path.hasPrefix(folder + "/") ? String(path.dropFirst(folder.count + 1)) : name(path)
+    }
+
     /// System Settings, at Time Machine.
     static func openSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.Time-Machine-Settings.extension") {
@@ -248,8 +271,10 @@ private struct ChangesSection: View {
                 HStack(spacing: 10) {
                     FileIcon(path: c.path)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(Format.path(c.path)).lineLimit(1).truncationMode(.middle)
-                        Text(state(c)).font(.subheadline).foregroundStyle(.secondary)
+                        Text(TimeMachineText.name(c.path))
+                        Text("\(TimeMachineText.place(c.path)) · \(state(c))")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
                     }
                     Spacer(minLength: 10)
                     Text((c.bytes >= 0 ? "+" : "−") + Format.bytes(abs(c.bytes)))
@@ -257,6 +282,7 @@ private struct ChangesSection: View {
                         .foregroundStyle(c.bytes >= 0 ? Color.primary : Color.secondary)
                     PathMenu(path: c.path)
                 }
+                .help(Format.path(c.path))
             }
         } header: {
             Text("Since the Last Backup")
@@ -270,9 +296,44 @@ private struct ChangesSection: View {
         if c.backedUp == false { return "Not backed up" }
         if c.bytes < 0 { return "Deleted: held by the snapshots until the next backup" }
         if c.keptOut > 0 {
-            return "Goes into the next backup, but not the \(c.keptOut) build folder\(c.keptOut == 1 ? "" : "s") in it"
+            return "Goes into the next backup, except its \(c.keptOut) build folder\(c.keptOut == 1 ? "" : "s")"
         }
         return "Goes into the next backup"
+    }
+}
+
+/// One project's build folders: a repository with its worktrees, so a
+/// project with forty `node_modules` and `dist` is one row.
+private struct Project: Identifiable {
+    let path: String
+    let folders: [TimeMachineReport.Folder]
+    var id: String { path }
+    var bytes: Int64 { folders.reduce(0) { $0 + $1.bytes } }
+    var worktrees: Int { Set(folders.map(\.checkout)).subtracting([path]).count }
+
+    /// Biggest first; those not measured (kept out) by how many.
+    static func of(_ folders: [TimeMachineReport.Folder]) -> [Project] {
+        Dictionary(grouping: folders, by: \.project)
+            .map { Project(path: $0.key, folders: $0.value.sorted { ($0.bytes, $1.path) > ($1.bytes, $0.path) }) }
+            .sorted { ($0.bytes, $0.folders.count, $1.path) > ($1.bytes, $1.folders.count, $0.path) }
+    }
+
+    /// "48 folders: node_modules, dist, build · 14 worktrees", or for one
+    /// folder, where it is and what: ".venv · Downloaded packages".
+    var detail: String {
+        if folders.count == 1, let f = folders.first {
+            return "\(TimeMachineText.inside(path, f.path)) · \(TimeMachineText.what(f.what))"
+        }
+        var seen: [String: (bytes: Int64, count: Int)] = [:]
+        for f in folders {
+            let n = TimeMachineText.name(f.path)
+            seen[n, default: (0, 0)].bytes += f.bytes
+            seen[n, default: (0, 0)].count += 1
+        }
+        let names = seen.sorted { ($0.value.bytes, $0.value.count, $1.key) > ($1.value.bytes, $1.value.count, $0.key) }.map(\.key)
+        let kinds = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? "…" : "")
+        let w = worktrees
+        return "\(folders.count) folders: \(kinds)" + (w == 0 ? "" : " · \(w) worktree\(w == 1 ? "" : "s")")
     }
 }
 
@@ -280,11 +341,13 @@ private struct RebuildableSection: View {
     let r: TimeMachineReport
     @ObservedObject var monitor: Monitor
     @State private var all = false
-    private static let first = 8
+    private static let first = 6
 
     var body: some View {
-        let backed = r.rebuildable.filter(\.backedUp)
-        let out = r.rebuildable.filter { !$0.backedUp }
+        let backed = Project.of(r.rebuildable.filter(\.backedUp))
+        let out = Project.of(r.rebuildable.filter { !$0.backedUp })
+        let count = backed.reduce(0) { $0 + $1.folders.count }
+        let outCount = r.rebuildable.count - count
         let total = backed.reduce(0) { $0 + $1.bytes }
         let shown = all ? backed : Array(backed.prefix(Self.first))
         Section {
@@ -294,22 +357,19 @@ private struct RebuildableSection: View {
                     Text(monitor.timeMachineLoading ? "Looking through your code folders…" : "No build output or packages in your code folders.")
                         .foregroundStyle(.secondary)
                 }
-            } else if backed.isEmpty {
-                Label("All of them are kept out already.", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
+            } else if !backed.isEmpty {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(Format.bytes(total)) in \(backed.count) folder\(backed.count == 1 ? "" : "s")")
+                        Text("\(Format.bytes(total)) in \(count) folder\(count == 1 ? "" : "s")")
                             .font(.headline).monospacedDigit()
-                        Text("Backed up, though their next build or install makes them again.")
+                        Text("\(backed.count == 1 ? "In 1 project" : "In \(backed.count) projects"): backed up, though their next build or install makes them again.")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Keep All Out") { monitor.setBackedUp(backed.map(\.path), false) }
-                        .disabled(!monitor.backupChanging.isDisjoint(with: backed.map(\.path)))
+                    Button("Keep All Out") { monitor.setBackedUp(backed.flatMap { $0.folders.map(\.path) }, false) }
+                        .disabled(!monitor.backupChanging.isDisjoint(with: backed.flatMap { $0.folders.map(\.path) }))
                 }
-                ForEach(shown) { FolderRow(folder: $0, monitor: monitor) }
+                ForEach(shown) { ProjectRow(project: $0, monitor: monitor) }
                 if backed.count > Self.first {
                     Button(all ? "Show Fewer" : "Show \(backed.count - Self.first) More") {
                         withAnimation(.snappy) { all.toggle() }
@@ -326,8 +386,19 @@ private struct RebuildableSection: View {
                 .disabled(monitor.tidyBusy.contains(t.id))
             }
             if !out.isEmpty {
-                DisclosureGroup("\(out.count) kept out already") {
-                    ForEach(out) { FolderRow(folder: $0, monitor: monitor) }
+                DisclosureGroup {
+                    ForEach(out) { ProjectRow(project: $0, monitor: monitor) }
+                } label: {
+                    let projects = out.count == 1 ? "1 project" : "\(out.count) projects"
+                    if backed.isEmpty {
+                        Label {
+                            Text("All \(outCount) kept out, in \(projects)")
+                        } icon: {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        }
+                    } else {
+                        Text("\(outCount) kept out already, in \(projects)")
+                    }
                 }
             }
         } header: {
@@ -339,30 +410,79 @@ private struct RebuildableSection: View {
     }
 }
 
+/// A project: its name, how much and what, and one button for all its
+/// folders; more than one, and they're listed inside.
+private struct ProjectRow: View {
+    let project: Project
+    @ObservedObject var monitor: Monitor
+
+    var body: some View {
+        if project.folders.count == 1 {
+            row
+        } else {
+            DisclosureGroup {
+                ForEach(project.folders) { FolderRow(folder: $0, monitor: monitor) }
+            } label: {
+                row
+            }
+        }
+    }
+
+    private var row: some View {
+        let p = project
+        let paths = p.folders.map(\.path)
+        let backedUp = p.folders.first?.backedUp ?? false
+        return HStack(spacing: 10) {
+            FileIcon(path: p.path)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(TimeMachineText.name(p.path))
+                Text(p.detail).font(.subheadline).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 10)
+            if backedUp {
+                Text(Format.bytes(p.bytes)).monospacedDigit()
+            }
+            if !monitor.backupChanging.isDisjoint(with: paths) {
+                ProgressView().controlSize(.small)
+            } else {
+                Button(backedUp ? "Keep Out" : "Back Up") { monitor.setBackedUp(paths, !backedUp) }
+            }
+            PathMenu(path: p.path)
+        }
+        .help(Format.path(p.path))
+        .contextMenu { PathMenuItems(path: p.path) }
+    }
+}
+
+/// One folder inside a project: where in it, and in which worktree.
 private struct FolderRow: View {
     let folder: TimeMachineReport.Folder
     @ObservedObject var monitor: Monitor
 
     var body: some View {
         let f = folder
-        let busy = monitor.backupChanging.contains(f.path)
+        let worktree = f.checkout != f.project ? "Worktree \(TimeMachineText.name(f.checkout)) · " : ""
         HStack(spacing: 10) {
-            FileIcon(path: f.path)
+            FileIcon(path: f.path, size: 20)
             VStack(alignment: .leading, spacing: 1) {
-                Text(Format.path(f.path)).lineLimit(1).truncationMode(.middle)
-                Text(TimeMachineText.what(f.what)).font(.subheadline).foregroundStyle(.secondary)
+                Text(TimeMachineText.inside(f.checkout, f.path)).lineLimit(1).truncationMode(.middle)
+                Text(worktree + TimeMachineText.what(f.what))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 10)
             if f.backedUp {
                 Text(Format.bytes(f.bytes)).monospacedDigit()
             }
-            if busy {
+            if monitor.backupChanging.contains(f.path) {
                 ProgressView().controlSize(.small)
             } else {
                 Button(f.backedUp ? "Keep Out" : "Back Up") { monitor.setBackedUp([f.path], !f.backedUp) }
             }
             PathMenu(path: f.path)
         }
+        .help(Format.path(f.path))
         .contextMenu { PathMenuItems(path: f.path) }
     }
 }
@@ -376,8 +496,16 @@ private struct SkippedSection: View {
                 ForEach(r.skipped, id: \.self) { p in
                     HStack(spacing: 10) {
                         FileIcon(path: p)
-                        Text(p).lineLimit(1).truncationMode(.middle)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(TimeMachineText.name(p))
+                            Text(TimeMachineText.place(p) + (missingApp(p) ? " · Not installed" : ""))
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 10)
+                        PathMenu(path: p)
                     }
+                    .help(Format.path(p))
                 }
             }
             Button("Time Machine Settings…") { TimeMachineText.openSettings() }
@@ -387,6 +515,12 @@ private struct SkippedSection: View {
             Text("macOS also leaves out caches, the Trash and its own files.")
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// An app left out by name that isn't on this Mac (only apps are
+    /// looked for: a folder in Desktop would ask for permission).
+    private func missingApp(_ path: String) -> Bool {
+        path.hasSuffix(".app") && !FileManager.default.fileExists(atPath: path)
     }
 }
 #endif

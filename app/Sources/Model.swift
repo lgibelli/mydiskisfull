@@ -868,7 +868,15 @@ struct TimeMachineReport: Decodable {
         let what: String
         let bytes: Int64
         let backedUp: Bool
+        /// The git checkout it's in (a worktree's own folder), and the
+        /// project that checkout belongs to: they differ for a worktree.
+        let checkout: String
+        let project: String
         var id: String { path }
+
+        func marked(backedUp: Bool) -> Folder {
+            Folder(path: path, what: what, bytes: bytes, backedUp: backedUp, checkout: checkout, project: project)
+        }
     }
 }
 
@@ -903,7 +911,7 @@ extension TimeMachineReport {
     func marking(_ paths: [String], backedUp: Bool) -> TimeMachineReport {
         let done = Set(paths)
         return with(changes: changes, rebuildable: rebuildable.map { f in
-            done.contains(f.path) ? Folder(path: f.path, what: f.what, bytes: f.bytes, backedUp: backedUp) : f
+            done.contains(f.path) ? f.marked(backedUp: backedUp) : f
         })
     }
 }

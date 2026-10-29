@@ -2,7 +2,7 @@
 //! it's turned on (see mdif_core::tidy). The switches and what each did
 //! last are kept in the history.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use mdif_core::keep::Keep;
@@ -125,11 +125,7 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
         let o = tidy::run(id, &home, &keep, now, dry_run);
         if !dry_run {
             tidy::record(&store, id, &o.last(now))?;
-            if !o.done.is_empty() {
-                crate::watch_cmd::record_cleanup(&store, now, o.freed());
-                let changed: Vec<_> = o.done.iter().map(|d| d.path.clone()).collect();
-                crate::space_cmd::patch(db, &changed);
-            }
+            cleaned(&store, db, now, &o);
         }
         ran.push((id, o));
     }
@@ -149,17 +145,33 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
         return Ok(());
     }
     let freed: u64 = ran.iter().map(|(_, o)| o.freed()).sum();
+    let out = ran
+        .iter()
+        .flat_map(|(_, o)| &o.done)
+        .filter(|d| d.what == "excluded")
+        .count();
+    let frees = ran.iter().any(|(id, _)| *id != Id::Backups);
     for (id, o) in &ran {
         print_outcome(*id, o, dry_run);
     }
     println!();
+    let folders = |n: usize| format!("{n} folder{}", if n == 1 { "" } else { "s" });
+    let mut said = Vec::new();
+    match (dry_run, frees) {
+        (true, true) => said.push(format!("That would free about {}.", bytes(freed))),
+        (false, true) => said.push(format!("Freed {}.", bytes(freed))),
+        _ => {}
+    }
+    match (dry_run, out) {
+        (_, 0) => {}
+        (true, n) => said.push(format!("{} would be kept out of Time Machine.", folders(n))),
+        (false, n) => said.push(format!("Kept {} out of Time Machine.", folders(n))),
+    }
     if dry_run {
-        println!(
-            "That would free about {}. Nothing was changed.",
-            bytes(freed)
-        );
-    } else {
-        println!("Freed {}.", bytes(freed));
+        said.push("Nothing was changed.".into());
+    }
+    if !said.is_empty() {
+        println!("{}", said.join(" "));
     }
     Ok(())
 }
@@ -171,11 +183,17 @@ fn print_outcome(id: Id, o: &Outcome, dry_run: bool) {
     for d in &o.done {
         let verb = match (dry_run, d.what) {
             (true, "emptied") => "Would empty",
+            (true, "excluded") => "Would keep out of Time Machine",
             (true, _) => "Would delete",
             (false, "emptied") => "Emptied",
+            (false, "excluded") => "Kept out of Time Machine",
             (false, _) => "Deleted",
         };
-        println!("  {verb}: {} ({})", shown(&d.path), bytes(d.bytes));
+        if d.what == "excluded" {
+            println!("  {verb}: {}", shown(&d.path));
+        } else {
+            println!("  {verb}: {} ({})", shown(&d.path), bytes(d.bytes));
+        }
     }
     for (path, why) in &o.skipped {
         println!("  Left alone: {} ({})", shown(path), printable(why));
@@ -250,11 +268,23 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
         if let Err(e) = tidy::record(store, id, &o.last(now)) {
             eprintln!("{} tidy {}: {e:#}", stamp(), id.id());
         }
-        if !o.done.is_empty() {
-            crate::watch_cmd::record_cleanup(store, now, o.freed());
-            let changed: Vec<_> = o.done.iter().map(|d| d.path.clone()).collect();
-            crate::space_cmd::patch(db, &changed);
-        }
+        cleaned(store, db, now, &o);
+    }
+}
+
+/// What a tidy-up deleted or emptied, into the history (the forecast leaves
+/// it out) and the kept measurement. Folders only kept out of Time Machine
+/// changed neither.
+fn cleaned(store: &Store, db: &Path, start: i64, o: &Outcome) {
+    let changed: Vec<PathBuf> = o
+        .done
+        .iter()
+        .filter(|d| d.what != "excluded")
+        .map(|d| d.path.clone())
+        .collect();
+    if !changed.is_empty() {
+        crate::watch_cmd::record_cleanup(store, start, o.freed());
+        crate::space_cmd::patch(db, &changed);
     }
 }
 

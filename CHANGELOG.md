@@ -11,11 +11,12 @@ All notable changes to this project are documented here. The format is based on
   local snapshots, which one the next backup starts from and why they hold space (they cover the
   whole disk, excluded folders too); what changed since the last backup; the build folders and
   downloaded packages that are still backed up though a build or an install makes them again,
-  with Keep Out and Keep All Out; and what Time Machine's settings leave out. Back Up Now, and a
+  one row per project (a repository with its worktrees), with Keep Out and Keep All Out; and
+  what Time Machine's settings leave out. Back Up Now, and a
   link to change how often. Overview says when backups keep failing. Not in Lite.
 - `mdif timemachine` (`--quick` without the folders), `mdif timemachine exclude|include <folder>`
-  (only folders a build or an install makes again, never what you keep) and `mdif timemachine
-  back-up`.
+  (only folders a build or an install makes again, never what you keep; a project's folder for
+  all of its own) and `mdif timemachine back-up`.
 - A tidy-up, off until you turn it on, that keeps new build folders out of Time Machine every 6
   hours, agents' worktrees too.
 

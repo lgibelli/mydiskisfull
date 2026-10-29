@@ -502,7 +502,10 @@ struct FileIcon: View {
         if let done = cache[key] { return done }
         let image: NSImage
         if ext == "app" {
-            image = NSWorkspace.shared.icon(forFile: path)
+            // One that isn't installed (left out of the backups by name)
+            // would be a blank page.
+            image = FileManager.default.fileExists(atPath: path)
+                ? NSWorkspace.shared.icon(forFile: path) : NSWorkspace.shared.icon(for: .applicationBundle)
         } else {
             image = NSWorkspace.shared.icon(for: type ?? (folder ? .folder : .data))
         }

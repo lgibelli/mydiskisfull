@@ -83,23 +83,80 @@
       "path": "/Users/me/devel/app/.claude/worktrees/agent-1/node_modules",
       "what": "dependencies",
       "bytes": 880000000,
-      "backed_up": true
+      "backed_up": true,
+      "checkout": "/Users/me/devel/app/.claude/worktrees/agent-1",
+      "project": "/Users/me/devel/app"
     },
     {
       "path": "/Users/me/devel/app/ios/build",
       "what": "build",
       "bytes": 551000000,
-      "backed_up": true
+      "backed_up": true,
+      "checkout": "/Users/me/devel/app",
+      "project": "/Users/me/devel/app"
+    },
+    {
+      "path": "/Users/me/devel/app/.claude/worktrees/agent-1/apps/web/dist",
+      "what": "build",
+      "bytes": 52000000,
+      "backed_up": true,
+      "checkout": "/Users/me/devel/app/.claude/worktrees/agent-1",
+      "project": "/Users/me/devel/app"
+    },
+    {
+      "path": "/Users/me/devel/app/apps/web/dist",
+      "what": "build",
+      "bytes": 13000000,
+      "backed_up": true,
+      "checkout": "/Users/me/devel/app",
+      "project": "/Users/me/devel/app"
+    },
+    {
+      "path": "/Users/me/devel/model/.venv",
+      "what": "dependencies",
+      "bytes": 1000000000,
+      "backed_up": true,
+      "checkout": "/Users/me/devel/model",
+      "project": "/Users/me/devel/model"
+    },
+    {
+      "path": "/Users/me/devel/site/dist",
+      "what": "build",
+      "bytes": 22000000,
+      "backed_up": true,
+      "checkout": "/Users/me/devel/site",
+      "project": "/Users/me/devel/site"
     },
     {
       "path": "/Users/me/devel/tool/target",
       "what": "build",
       "bytes": 0,
-      "backed_up": false
+      "backed_up": false,
+      "checkout": "/Users/me/devel/tool",
+      "project": "/Users/me/devel/tool"
+    },
+    {
+      "path": "/Users/me/devel/app/node_modules",
+      "what": "dependencies",
+      "bytes": 0,
+      "backed_up": false,
+      "checkout": "/Users/me/devel/app",
+      "project": "/Users/me/devel/app"
+    },
+    {
+      "path": "/Users/me/devel/app/.claude/worktrees/agent-2/node_modules",
+      "what": "dependencies",
+      "bytes": 0,
+      "backed_up": false,
+      "checkout": "/Users/me/devel/app/.claude/worktrees/agent-2",
+      "project": "/Users/me/devel/app"
     }
   ],
   "skipped": [
-    "~/Downloads",
-    "/Applications/Xcode.app"
+    "/Users/me/Downloads",
+    "/Applications/Xcode.app",
+    "/Applications/Final Cut Pro.app",
+    "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app",
+    "/Users/me/Movies"
   ]
 }

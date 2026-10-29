@@ -3,6 +3,7 @@
 //! `exclude` and `include` keep folders a build or an install makes again
 //! out of the backups or let them back in; `back-up` starts one now.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -47,6 +48,7 @@ pub fn set(db: &Path, paths: &[PathBuf], exclude: bool, json_out: bool) -> Resul
         .iter()
         .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
         .collect();
+    let paths = timemachine::expand(&paths, &home());
     let done = timemachine::set_excluded(&paths, exclude, &keep);
     if json_out {
         let out = json!({
@@ -202,24 +204,44 @@ fn print(r: &Report) {
             );
         }
     }
-    let backed: Vec<_> = r.rebuildable.iter().filter(|f| f.backed_up).collect();
+    let backed: Vec<&Folder> = r.rebuildable.iter().filter(|f| f.backed_up).collect();
     if !backed.is_empty() {
         let total: u64 = backed.iter().map(|f| f.bytes).sum();
         println!(
-            "\nBacked up, though a build or an install makes them again ({}; `mdif timemachine \
-             exclude <path>`):",
-            bytes(total)
+            "\nBacked up, though a build or an install makes them again ({} in {} folders; \
+             `mdif timemachine exclude <folder or project>`):",
+            bytes(total),
+            backed.len()
         );
-        let (big, small): (Vec<&&Folder>, Vec<&&Folder>) =
-            backed.iter().partition(|f| f.bytes >= 10_000_000);
-        for f in &big {
-            println!("  {:>9}  {}", bytes(f.bytes), printable(&tilde(&f.path)));
+        let mut projects: BTreeMap<&str, Vec<&Folder>> = BTreeMap::new();
+        for f in &backed {
+            projects.entry(&f.project).or_default().push(f);
+        }
+        let mut projects: Vec<(&str, u64, Vec<&Folder>)> = projects
+            .into_iter()
+            .map(|(p, fs)| (p, fs.iter().map(|f| f.bytes).sum(), fs))
+            .collect();
+        projects.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let (big, small): (Vec<_>, Vec<_>) = projects
+            .iter()
+            .partition(|(_, size, _)| *size >= 10_000_000);
+        for (project, size, folders) in &big {
+            match folders.as_slice() {
+                [f] => println!("  {:>9}  {}", bytes(f.bytes), printable(&tilde(&f.path))),
+                _ => println!(
+                    "  {:>9}  {}  ({} folders)",
+                    bytes(*size),
+                    printable(&tilde(project)),
+                    folders.len()
+                ),
+            }
         }
         if !small.is_empty() {
             println!(
-                "  {:>9}  in {} smaller ones",
-                bytes(small.iter().map(|f| f.bytes).sum()),
-                small.len()
+                "  {:>9}  in {} smaller project{}",
+                bytes(small.iter().map(|(_, size, _)| size).sum()),
+                small.len(),
+                if small.len() == 1 { "" } else { "s" }
             );
         }
     }
@@ -230,7 +252,7 @@ fn print(r: &Report) {
     if !r.skipped.is_empty() {
         println!("\nLeft out in Time Machine's settings:");
         for p in &r.skipped {
-            println!("  {}", printable(p));
+            println!("  {}", printable(&tilde(p)));
         }
     }
 }
