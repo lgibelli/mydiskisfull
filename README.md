@@ -102,7 +102,9 @@ disk is and whether the watcher is watching at its foot, and each page's title i
   data, caches, media, Mail and Messages, virtual machines, macOS, your files), opening to its
   biggest items with what may not be needed marked: apps not opened in months, files unchanged
   for a year, build output, caches. A fix shows with what it's about (its growth as bars, how
-  much it frees, its button). Under them, what comes back without deleting anything: purgeable
+  much it frees, its button; Docker's lists what `docker system prune` would remove, item by
+  item, and the images no container uses, and removes only what you tick). Under them, what
+  comes back without deleting anything: purgeable
   space (macOS removes it when space is needed, Time Machine's local snapshots included), swap
   (removed when the Mac restarts), a macOS update waiting for the restart that installs it, and
   the Trash. Folder by folder: the disk map, as a sunburst, a treemap (tile size is space) or a
@@ -170,6 +172,7 @@ cargo build --release
 ./target/release/mdif tidy             # clean-ups the watcher does once a day, once turned on
 ./target/release/mdif timemachine      # what goes into the backups, what the snapshots hold
 ./target/release/mdif timemachine exclude <folder>   # keep a build folder or a cache out of the backups
+./target/release/mdif docker           # what docker system prune would remove, item by item
 ./target/release/mdif agent status
 ```
 

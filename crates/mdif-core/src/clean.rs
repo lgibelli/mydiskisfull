@@ -30,6 +30,9 @@
 //! - The folders macOS updates leave in `/Users/Shared` ([`relocated`]) go
 //!   to the Trash through Finder, which asks for an administrator's
 //!   password: they belong to the system.
+//! - What Docker can remove ([`docker`](crate::docker)), each item you
+//!   picked from its list: by id, without forcing, so Docker refuses what's
+//!   in use by then.
 //!
 //! What you keep ([`Keep`]) is never touched, and anything else is refused.
 
@@ -45,7 +48,8 @@ use crate::worktrees::{self, Finished};
 /// What a button does, offered with a suggestion.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Action {
-    /// `worktrees`, `trash`, `delete`, `empty`, `restart` or `snapshots`.
+    /// `worktrees`, `trash`, `delete`, `empty`, `restart`, `snapshots` or
+    /// `docker` (its list first: what to remove is picked from it).
     pub kind: &'static str,
     /// "Move to Trash", "Remove 8 Worktrees".
     pub label: String,
@@ -96,6 +100,11 @@ pub enum Step {
         date: String,
         volume: PathBuf,
     },
+    /// One of Docker's items (`docker:image:<id>`), removed as checked.
+    Docker {
+        name: PathBuf,
+        removal: crate::docker::Removal,
+    },
 }
 
 impl Step {
@@ -108,7 +117,7 @@ impl Step {
             | Step::EmptyTrash(path)
             | Step::FinderTrash(path) => path,
             Step::Restart { app, .. } => app,
-            Step::DeleteSnapshot { name, .. } => name,
+            Step::DeleteSnapshot { name, .. } | Step::Docker { name, .. } => name,
         }
     }
 }
@@ -117,7 +126,7 @@ impl Step {
 pub struct Done {
     pub path: PathBuf,
     /// `removed`, `trashed`, `deleted`, `emptied`, `erased` (the Trash),
-    /// `restarted` or `released` (a snapshot).
+    /// `restarted`, `released` (a snapshot) or `docker`.
     pub how: &'static str,
     /// Where it went in the Trash.
     pub to: Option<PathBuf>,
@@ -358,6 +367,13 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 to: None,
             })
         }
+        Step::Docker { name, removal } => crate::docker::remove(removal, home)
+            .map(|()| Done {
+                path: name.clone(),
+                how: "docker",
+                to: None,
+            })
+            .map_err(|why| format!("{}: {why}", crate::text::printable(&name.to_string_lossy()))),
     }
 }
 

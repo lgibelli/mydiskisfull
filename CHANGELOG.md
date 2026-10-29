@@ -24,6 +24,14 @@ All notable changes to this project are documented here. The format is based on
   in a tool's git checkout, only what git ignores. 10 MB or more.
 - A tidy-up, off until you turn it on, that keeps new build folders and caches out of Time
   Machine every 6 hours, agents' worktrees too. What you let back in with Back Up stays in.
+- Docker's clean-up, instead of a command to copy: Review… lists what `docker system prune`
+  would remove (stopped containers, untagged images, unused networks, build cache), item by item
+  with sizes, and the images no container uses, which only `-a` removes; you tick what goes.
+  It's removed one by one by id, without forcing, after asking Docker again, so only what you
+  saw goes and Docker refuses what's in use by then; volumes are never offered. The disk image
+  gives the space back a few seconds later, and what was freed is counted then. `mdif docker`
+  lists the same, `mdif clean docker:<kind>:<id>` removes one. Not in Lite, which shows the
+  command.
 
 ### Changed
 - The main window is laid out like Apple's own apps, in five pages instead of seven: Overview,

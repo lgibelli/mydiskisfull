@@ -635,10 +635,18 @@ struct FixActions: View {
 struct CleanButton: View {
     let action: CleanAction
     @ObservedObject var monitor: Monitor
+    @State private var reviewing = false
 
     var body: some View {
-        let busy = action.paths.first.map { monitor.cleaning.contains($0) } ?? false
-        if let done = action.done {
+        // Docker's items are picked from its list, so none are named here.
+        let docker = action.kind == "docker"
+        let busy = docker ? monitor.cleaning.contains { $0.hasPrefix("docker:") }
+                          : action.paths.first.map { monitor.cleaning.contains($0) } ?? false
+        if docker, !busy {
+            Button(action.label) { reviewing = true }
+                .fixedSize()
+                .sheet(isPresented: $reviewing) { DockerReview(monitor: monitor) }
+        } else if let done = action.done {
             // Pressing it again would do nothing more until the watcher has
             // seen whether it worked.
             Label("Restarted at \(Format.time(done))", systemImage: "checkmark.circle")

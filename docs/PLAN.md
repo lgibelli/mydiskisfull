@@ -206,7 +206,7 @@ than in the week before (from the watcher's history).
 | Homebrew, Gradle caches | retention settings | tweaks: `HOMEBREW_CLEANUP_MAX_AGE_DAYS=30` in `~/.homebrew/brew.env`; a Gradle init script (14 days, from Gradle 8.0). Cargo cleans its own cache since 1.88. | no |
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
 | Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
-| Docker disk image | prune it; cap it in Docker's settings | `docker system prune`. Shrinking the image deletes its contents, so no tweak. | no |
+| Docker disk image | prune it; cap it in Docker's settings | Review… (`mdif docker`): what `docker system prune` would remove, item by item, and the images no container uses (`-a`), asked from Docker since it has no dry run; what you tick goes through `mdif clean`, by id and unforced, after asking Docker again; volumes never. Shrinking the image deletes its contents, so no tweak. The command in Lite. | no |
 | Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | Delete Snapshots (`mdif clean`, `tmutil deletelocalsnapshots <date>` after a confirmation); the command in Lite. Sized by what macOS counts as purgeable, and ranked by it | no |
 | Swap | restart | shown with its size when the disk is tight | no |
 | A macOS update prepared, waiting for its restart (the running macOS's cryptexes kept beside the update's in Preboot, its staging on the Update volume, its download in AssetsV2) | restart to install it | shown with what the restart frees, measured (clones once), beside purgeable and swap | no |

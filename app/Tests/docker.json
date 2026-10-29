@@ -1,0 +1,53 @@
+{
+  "running": true,
+  "why": null,
+  "disk": 13300000000,
+  "containers": [
+    {
+      "name": "docker:container:7185107c3261e393732a218940febb8dac8d1c4655c11082dba754d4c2556cb4",
+      "title": "db-old",
+      "detail": "Exited (0) 2 days ago · postgres:16",
+      "bytes": 12300
+    }
+  ],
+  "dangling": [
+    {
+      "name": "docker:image:sha256:4105e2bb7b57b01eaf420afd4f7970386183f64f4d244bca3d684fa9737e0670",
+      "title": "Untagged image 4105e2bb7b57",
+      "detail": "Made 3 weeks ago",
+      "bytes": 139000000
+    }
+  ],
+  "networks": [
+    {
+      "name": "docker:network:63b2abd332b3",
+      "title": "old-net",
+      "detail": "A network no container uses",
+      "bytes": 0
+    }
+  ],
+  "cache": {
+    "name": "docker:build-cache",
+    "title": "Build cache",
+    "detail": "12 entries no build is using: the next build is slower",
+    "bytes": 300000000
+  },
+  "unused": [
+    {
+      "name": "docker:image:sha256:7ed511951558d11de6d1f96e48bc7bd79ad5ab8d501d398e7844cb36c834ebd0",
+      "title": "registry.example/shop-builder:0a88d893",
+      "detail": "Made 2 days ago · also shop-builder:m1",
+      "bytes": 2051000000
+    },
+    {
+      "name": "docker:image:sha256:c2747b924301d8cd7384d927f40370958c17ddfbff06dbb27464945d3b14c568",
+      "title": "api:dev",
+      "detail": "Made 2 weeks ago",
+      "bytes": 948000000
+    }
+  ],
+  "cache_total": 10490000000,
+  "cache_shared": 10190000000,
+  "volumes": 1,
+  "reclaimable": 3438012300
+}

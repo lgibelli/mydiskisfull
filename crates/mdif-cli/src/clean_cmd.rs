@@ -9,7 +9,7 @@ use mdif_core::clean::{self, Done, Step};
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
 use mdif_core::watch::unix_now;
-use mdif_core::{scan, worktrees};
+use mdif_core::{docker, scan, worktrees};
 use serde_json::json;
 
 use crate::watch_cmd::{home, tilde};
@@ -23,14 +23,20 @@ pub fn clean(
 ) -> Result<()> {
     let home = home();
     let keep = crate::keep_cmd::load(db)?;
-    // A local snapshot goes by its name, which isn't a path.
+    // A local snapshot and Docker's items go by their names, not paths.
     let paths: Vec<PathBuf> = paths
         .iter()
         .map(|p| match clean::snapshot_date(p) {
+            _ if docker::is_item(p) => p.clone(),
             Some(_) => p.clone(),
             None => std::path::absolute(p).unwrap_or_else(|_| p.clone()),
         })
         .collect();
+    // Docker, asked once, right before: only what's still as shown goes.
+    let docker_now = paths
+        .iter()
+        .any(|p| docker::is_item(p))
+        .then(|| docker::report(&home));
     // Only worth running tmutil when one of them is a snapshot.
     let snapshots = if paths.iter().any(|p| clean::snapshot_date(p).is_some()) {
         mdif_core::apfs::local_snapshots(volume).map_err(|e| format!("{e:#}"))
@@ -55,12 +61,19 @@ pub fn clean(
     let mut steps: Vec<Step> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     for p in &paths {
-        let step = match &snapshots {
+        let step = match (&snapshots, &docker_now) {
+            (_, Some(now)) if docker::is_item(p) => match &now.why {
+                Some(why) => Err(why.clone()),
+                None => docker::check(p, now).map(|removal| Step::Docker {
+                    name: p.clone(),
+                    removal,
+                }),
+            },
             _ if clean::snapshot_date(p).is_none() => {
                 clean::plan(p, &home, &keep, &finished, &churning)
             }
-            Ok(listed) => clean::snapshot(p, listed, volume),
-            Err(why) => Err(why.clone()),
+            (Ok(listed), _) => clean::snapshot(p, listed, volume),
+            (Err(why), _) => Err(why.clone()),
         };
         match step {
             Ok(s) => steps.push(s),
@@ -89,6 +102,7 @@ pub fn clean(
                     Step::FinderTrash(_) => "Would move to the Trash with Finder",
                     Step::Restart { .. } => "Would restart a helper of",
                     Step::DeleteSnapshot { .. } => "Would delete the local snapshot",
+                    Step::Docker { .. } => "Would remove from Docker",
                 };
                 println!("{verb}: {}", printable(&tilde(&s.path().to_string_lossy())));
             }
@@ -100,6 +114,7 @@ pub fn clean(
     }
 
     let before = mdif_macos::fs::statfs(volume)?.avail;
+    let docker_disk = docker_now.as_ref().and_then(|r| r.disk);
     let mut done: Vec<(Done, Option<u64>)> = Vec::new();
     // What goes through Finder goes at once: one password, not one each.
     let (finder, steps): (Vec<Step>, Vec<Step>) = steps
@@ -136,6 +151,12 @@ pub fn clean(
             Err(why) => failed.push((s.path().to_path_buf(), why)),
         }
     }
+    // Docker Desktop gives back what went from its disk image a few seconds
+    // later: waited for, so what's freed is counted.
+    let from_docker = done.iter().any(|(d, _)| d.how == "docker");
+    if let Some(disk) = docker_disk.filter(|_| from_docker) {
+        docker::settle(&home, disk);
+    }
     // Nothing done frees nothing, whatever else changed on the disk meanwhile.
     let freed = if done.is_empty() {
         0
@@ -145,9 +166,16 @@ pub fn clean(
     if !done.is_empty() {
         crate::watch_cmd::record_clean(db, freed);
         // What went to the Trash is there now too.
-        let mut changed: Vec<PathBuf> = done.iter().map(|(d, _)| d.path.clone()).collect();
+        let mut changed: Vec<PathBuf> = done
+            .iter()
+            .filter(|(d, _)| d.how != "docker")
+            .map(|(d, _)| d.path.clone())
+            .collect();
         if done.iter().any(|(d, _)| d.how == "trashed") {
             changed.push(home.join(".Trash"));
+        }
+        if from_docker {
+            changed.push(home.join(docker::FOLDER));
         }
         crate::space_cmd::patch(db, &changed);
     }
@@ -182,6 +210,7 @@ pub fn clean(
                 "erased" => println!("Emptied the Trash"),
                 "restarted" => println!("Restarted a helper of {shown}"),
                 "released" => println!("Deleted the local snapshot {shown}"),
+                "docker" => println!("Removed from Docker: {shown}"),
                 _ => println!("Removed: {shown} (its branch stays)"),
             }
         }
@@ -209,6 +238,7 @@ fn how(s: &Step) -> &'static str {
         Step::FinderTrash(_) => "finder-trash",
         Step::Restart { .. } => "restart",
         Step::DeleteSnapshot { .. } => "snapshots",
+        Step::Docker { .. } => "docker",
     }
 }
 

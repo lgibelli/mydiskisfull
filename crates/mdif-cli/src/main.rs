@@ -3,6 +3,7 @@
 mod agent_cmd;
 mod alerts_cmd;
 mod clean_cmd;
+mod docker_cmd;
 mod keep_cmd;
 mod map_cmd;
 mod owners_cmd;
@@ -112,10 +113,12 @@ enum Cmd {
     },
     /// Do the clean-ups a suggestion offers: remove finished worktrees,
     /// delete build output, move what an app left behind to the Trash,
-    /// delete local Time Machine snapshots. Each is checked again first
+    /// delete local Time Machine snapshots, remove what Docker can. Each is
+    /// checked again first
     Clean {
         /// What a suggestion offers to clean (its action's paths; a local
-        /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it)
+        /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it;
+        /// Docker's items as `mdif docker` lists them)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         /// Show what would be done, and do nothing
@@ -149,6 +152,13 @@ enum Cmd {
         /// History database (where the switches and the last runs are kept)
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
+    },
+    /// Docker: what `docker system prune` would remove, item by item, and
+    /// the images no container uses (`-a`). `mdif clean <item>` removes one
+    Docker {
+        /// Print the list as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Time Machine: what goes into the backups, what the local snapshots
     /// hold and why, and the build folders and caches still backed up
@@ -390,6 +400,7 @@ fn main() -> Result<()> {
             Some(TidyAction::Off { id }) => tidy_cmd::set(&db, &id, false, json)?,
             Some(TidyAction::Run { ids, dry_run }) => tidy_cmd::run(&db, &ids, dry_run, json)?,
         },
+        Cmd::Docker { json } => docker_cmd::show(json)?,
         Cmd::Timemachine {
             action,
             quick,

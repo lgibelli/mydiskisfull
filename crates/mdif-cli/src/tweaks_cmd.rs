@@ -425,7 +425,12 @@ pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
             _ => "Fix",
         };
         println!("    {label}: {}", fix_line(&s.fix));
-        if let Some(a) = &s.action {
+        if s.action.as_ref().is_some_and(|a| a.kind == "docker") {
+            println!(
+                "    Or `mdif docker`: what it would remove, item by item; `mdif clean <item>` \
+                 removes one, after checking again."
+            );
+        } else if let Some(a) = &s.action {
             let paths: Vec<String> = a.paths.iter().map(|p| shell_quote(p)).collect();
             println!(
                 "    Or `mdif clean {}`: {}, after checking again.",

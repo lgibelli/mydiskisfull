@@ -936,7 +936,14 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
             space: Some(size),
             per_day: None,
             path: Some(docker_disk.to_string_lossy().into_owned()),
-            action: None,
+            // The app asks Docker what can go, and you pick (`mdif docker`).
+            action: Some(Action {
+                kind: "docker",
+                label: "Review…".into(),
+                paths: Vec::new(),
+                confirm: None,
+                done: None,
+            }),
             title: Some("Docker's disk image".into()),
             measured: Measured::default(),
             rank: (2, 0),

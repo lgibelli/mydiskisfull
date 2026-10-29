@@ -57,6 +57,9 @@ enum Contract {
                 case "timemachine":
                     let r = try check(TimeMachineReport.self, path)
                     summary = "\(r.tries.count) tries, \(r.snapshots.count) snapshots, \(r.rebuildable.count) build folders"
+                case "docker":
+                    let r = try check(DockerReport.self, path)
+                    summary = r.running ? "\(r.pruned.count) to prune, \(r.unused.count) unused images" : "not running: \(r.why ?? "")"
                 case "exclusion":
                     let r = try check(BackupExclusion.self, path)
                     summary = "\(r.done.count) done, \(r.refused.count) refused"

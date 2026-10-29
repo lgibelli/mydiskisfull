@@ -142,6 +142,8 @@ jobs:
           # The same for clean-ups: the store edition may only read the disk.
           strings "$full" | grep -q "once you empty the Trash"
           if strings "$store" | grep -q "once you empty the Trash"; then exit 1; fi
+          strings "$full" | grep -q "Asking Docker what it can remove"
+          if strings "$store" | grep -q "Asking Docker what it can remove"; then exit 1; fi
           strings "$store" | grep -q "Get the Free Full Version"
           # The App Store updates it: no Sparkle, no feed.
           test ! -e "$lite/Contents/Frameworks/Sparkle.framework"

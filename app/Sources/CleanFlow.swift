@@ -44,6 +44,10 @@ enum CleanFlow {
             lines.append(released == 1 ? "Deleted the local snapshot. Your backups on the backup disk are as they were."
                                        : "Deleted \(released) local snapshots. Your backups on the backup disk are as they were.")
         }
+        let docker = r.done.filter { $0.how == "docker" }.count
+        if docker > 0 {
+            lines.append("Removed \(docker == 1 ? "1 item" : "\(docker) items") from Docker. It downloads or builds an image again when it's needed.")
+        }
         if r.done.contains(where: { $0.how == "erased" }) {
             lines.append("Emptied the Trash.")
         }

@@ -26,6 +26,7 @@
 pub mod alerts;
 pub mod apfs;
 pub mod clean;
+pub mod docker;
 pub mod forecast;
 pub mod handlers;
 pub mod incidents;

@@ -374,6 +374,9 @@ struct CleanAction: Decodable {
             let dates = paths.map { $0.replacingOccurrences(of: "com.apple.TimeMachine.", with: "")
                 .replacingOccurrences(of: ".local", with: "") }
             return dates.map { "tmutil deletelocalsnapshots \(Self.quote($0))" }.joined(separator: "; ")
+        case "docker":
+            // It lists what it removes, and asks.
+            return "docker system prune"
         case "finder-trash":
             // Finder asks for the password these need.
             return #"osascript -e 'on run argv' -e 'repeat with p in argv' -e 'tell application "Finder" to delete (POSIX file (p as text) as alias)' -e 'end repeat' -e 'end run' "# + q
@@ -396,6 +399,7 @@ struct CleanAction: Decodable {
         case "finder-trash": "Waiting for Finder…"
         case "restart": "Restarting…"
         case "snapshots": "Deleting the snapshots…"
+        case "docker": "Removing from Docker…"
         default: "Removing…"
         }
     }
@@ -407,7 +411,7 @@ struct Cleaned: Decodable {
     struct Item: Decodable {
         let path: String
         /// "removed", "trashed", "deleted", "emptied", "erased" (the Trash),
-        /// "restarted" or "released" (a local snapshot).
+        /// "restarted", "released" (a local snapshot) or "docker".
         let how: String
         /// What went to the Trash, which still takes its space there.
         let size: Int64?
@@ -780,6 +784,42 @@ struct AlertSettings: Decodable {
     let notifyForecast: Bool
     let notifyGrowth: Bool
     let notifyChurn: Bool
+}
+
+// MARK: - mdif docker --json
+
+/// What Docker can remove: what `docker system prune` would, item by item,
+/// and the images no container uses, which only `-a` removes. Volumes are
+/// counted, never offered. See mdif_core::docker.
+struct DockerReport: Decodable {
+    /// Whether Docker answered; when it didn't, why.
+    let running: Bool
+    let why: String?
+    /// What Docker Desktop's disk image takes on this disk.
+    let disk: Int64?
+    let containers: [Item]
+    let dangling: [Item]
+    let networks: [Item]
+    let cache: Item?
+    let unused: [Item]
+    /// The build cache, and what of it the images share (it goes with them).
+    let cacheTotal: Int64
+    let cacheShared: Int64
+    let volumes: Int
+    /// What `docker system prune -a` would free, as Docker counts it.
+    let reclaimable: Int64
+
+    struct Item: Decodable, Identifiable {
+        /// What `mdif clean` takes: "docker:image:sha256:…".
+        let name: String
+        let title: String
+        let detail: String
+        let bytes: Int64
+        var id: String { name }
+    }
+
+    /// What `docker system prune` removes.
+    var pruned: [Item] { containers + dangling + networks + (cache.map { [$0] } ?? []) }
 }
 
 // MARK: - mdif timemachine --json
