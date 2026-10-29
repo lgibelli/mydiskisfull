@@ -168,7 +168,7 @@ is kept in the history's `meta` table with its switch; what it deleted goes to t
 **What apps keep** (`handlers.rs`): a catalogue of folders by their place under the home folder
 (`*` for one name), each with what it is, how to make it smaller in its app or in macOS, and the
 app or Settings page to open. `mdif space` gives an item the biggest one found in it (`about`),
-and the Space page shows it with the item when its kind is opened on the bar. A handler can also say the folder
+and the Storage page shows it with the item in its category. A handler can also say the folder
 itself can go to the Trash (`trash`: a cloud folder left behind), which `mdif clean` then takes. Only ways known to work are given; a
 handler that can do it safely itself becomes a clean kind instead.
 
@@ -232,7 +232,7 @@ don't have to be deleted, only moved somewhere you can still reach.
 - **Excluded:** files that are cold by nature (app bundles, system assets, the Photos library
   internals, mail stores), and what you keep (`mdif keep`).
 
-**Built: Cruft (big old files).** The whole-disk scan behind `mdif space` also lists every file
+**Built: Old Files (big old files).** The whole-disk scan behind `mdif space` also lists every file
 of 50 MB or more (`scan::Options::big_files`, with its access and modification times from the
 same `getattrlistbulk` call), and keeps the biggest 3,000 of yours (`clean::yours`: in the home
 folder or `/Users/Shared`, not in `~/Library`, `~/Applications`, a developer tool's folder, a
@@ -430,24 +430,26 @@ mydiskisfull/
     (2 ms for 1,000 events); listing is the cost, and six folders of 6k–40k entries (a browser
     cache, Rust `deps`) were 80% of one listing.
 - **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
-  - A main window with a sidebar (the capacity ring, the forecast in one sentence led by
-    whatever fills the disk soonest, purgeable and swap, the Trash, the watcher's state)
-    and seven pages: Overview (what needs attention with its fix, then the top three from each
-    page with See All), Space (where the space goes: `mdif space`, a cached whole-disk scan
-    sorted into kinds, each with its biggest items and what may not be needed marked, a
-    suggestion shown with its item; patched in place after a clean-up), Cruft (forgotten folders
-    and big old files), Disk Usage
-    (% used over time with the forecast, its plausible range, the alert floor and the cleanups;
-    what grew most), Disk Map (a storage bar, then sunburst, treemap or list, click to
-    zoom; coloured by folder or, like a market heatmap, by each folder's growth in the last 24
-    hours), Disk Wear (written each day, from `writes_daily`: the store's writes summed per local
-    day; and the biggest writers) and Prevent (keep tidy, and the tweaks, each a switch that applies or undoes it after showing what it
-    changes and what you give up). One visual system (`Theme.swift`).
-  - The sidebar groups the pages under Monitor and Clean, the Overview above both. The menu
-    bar: a plain menu (free space, forecast and the last day as text, what needs attention, Open,
-    Check for Updates, About, Settings, Quit). The app is in the Dock like any app; with Settings
-    → Show in the Dock off (or Hide from Dock in its Dock menu), it joins the Dock while a window
-    is open and leaves it when the last one closes. Opened by the login item, it opens no window.
+  - A main window laid out like Apple's own apps (System Settings → Storage, Activity
+    Monitor, Finder's tables): a sidebar of five pages, with the disk's bar, what's available
+    and the watcher's state at its foot; each page's title and controls in the toolbar; the
+    pages grouped lists (Form) and tables. Overview (the disk's railway bar, the forecast in
+    a sentence, what needs attention with its fix, recommendations biggest first with a
+    category's small clean-ups as one row, what changed lately), Storage (by category: the
+    railway bar, `mdif space`'s kinds opening to their biggest items with what may not be
+    needed marked and a suggestion shown with its item, and what comes back by itself; or
+    folder by folder: the disk map as sunburst, treemap or list, click to zoom, coloured by
+    folder or by each folder's growth in the last 24 hours), Old Files (forgotten folders and
+    big old files in one sortable table), History (% used over time with the forecast, its
+    plausible range, the alert floor and the cleanups; what grew and shrank most; and Writes:
+    written each day, from `writes_daily`, and the biggest writers) and Prevention (keep tidy,
+    and the tweaks, each a switch that applies or undoes it after showing what it changes and
+    what you give up). ⌘1 to ⌘5. One visual system (`Theme.swift`).
+  - The menu bar: a plain menu (free space, forecast and the last day as text, what needs
+    attention, Open, Check for Updates, About, Settings, Quit). The app is in the Dock like any
+    app; with Settings → Show in the Dock off (or Hide from Dock in its Dock menu), it joins the
+    Dock while a window is open and leaves it when the last one closes. Opened by the login
+    item, it opens no window.
   - Settings (a grouped form), a welcome for the first launch, and About with the watcher's
     measured cost.
   - Notifications: a new incident (with "Apply Fix…" or "Copy Command"), the forecast crossing

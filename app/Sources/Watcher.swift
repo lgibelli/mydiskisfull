@@ -45,7 +45,7 @@ final class WatcherService: ObservableObject {
         default:
             hasCommandLineAgent
                 ? "The one from `mdif agent install` is running; turning this on moves it into the app."
-                : "Off. Nothing is watched while it's off."
+                : "Nothing is watched while it's off."
         }
     }
 

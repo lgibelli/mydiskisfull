@@ -89,42 +89,41 @@ The first launch starts the watcher (a LaunchAgent inside the app running the sa
 as below; one started with `mdif agent install` is stopped, and the history carries on), asks for
 Full Disk Access and for notifications.
 
-The app has a main window with these pages:
+The app has a main window laid out like Apple's own: a sidebar of five pages, with how full the
+disk is and whether the watcher is watching at its foot, and each page's title in the toolbar.
 
-- **Overview**: anything that needs attention (a runaway filler, a tweak something undid, the
-  watcher stopped), each with what to do; then the top three from each page below, each with its
-  button. How full the disk is and where it's heading is in the sidebar, on every page, with what's
-  purgeable (macOS removes it when space is needed, Time Machine's local snapshots included), swap
-  (removed when the Mac restarts), a macOS update waiting for the restart that installs it, and the
-  Trash.
-- **Space**: where your space goes: one bar for the disk split by kind (apps, build output,
-  developer tools, cloud copies, app data, caches, media, Mail and Messages, virtual machines,
-  macOS, your files), each kind biggest first and opening to its biggest items, with what may not
-  be needed marked: apps not opened in months, files unchanged for a year, build output, caches.
-  A fix shows with what it's about (its growth as bars, how much it frees, its button).
-- **Cruft**: what nothing has opened or changed for a long time (you pick how big, from 50 MB,
-  and how long, from six months to five years): forgotten folders (apps not opened, folders
-  unchanged), then your big files, biggest first, each with Show in Finder, Keep It and Move to
-  Trash.
-- **Disk Usage**: how full the disk is over time (% used), in layers by kind (macOS, apps, build
-  output, caches, the Trash, snapshots…), where the trend goes and how sure it is, what the disk
-  filled or freed in the last hour, day and week, the cleanups and one-off arrivals (a download,
-  a macOS update) left out of the trend, and what grew and shrank the most over the span shown.
-- **Disk Wear**: what was written each day, and which apps wrote the most in the last day,
-  against the disk's size: writing
-  doesn't fill the disk, but it wears an SSD out.
-- **Disk Map**: where the space is now, as a sunburst, as a treemap (tile size is space) or as a
-  list, coloured by folder or, like a stock-market heatmap, by how much each folder grew or shrank
-  in the last day; click a folder to zoom in. It measures while you look at it (when the page opens, if the
-  last map is over 30 minutes old, and every hour while it stays open).
-- **Prevent**: clean-ups the watcher can do once a day, each off until you turn it on (old
+- **Overview**: the disk as one bar split by category, each named like a station on a railway
+  map (click one to open it), and where the disk is heading in a sentence; anything that needs
+  attention (a runaway filler, a tweak something undid, the watcher stopped), each with what to
+  do; recommendations, biggest first, each with its button (a category's many small clean-ups
+  as one row that opens it); and what the disk filled or freed in the last day and week.
+- **Storage**: where your space goes, by category or folder by folder. By category: the same
+  bar, then each category biggest first (apps, build output, developer tools, cloud copies, app
+  data, caches, media, Mail and Messages, virtual machines, macOS, your files), opening to its
+  biggest items with what may not be needed marked: apps not opened in months, files unchanged
+  for a year, build output, caches. A fix shows with what it's about (its growth as bars, how
+  much it frees, its button). Under them, what comes back without deleting anything: purgeable
+  space (macOS removes it when space is needed, Time Machine's local snapshots included), swap
+  (removed when the Mac restarts), a macOS update waiting for the restart that installs it, and
+  the Trash. Folder by folder: the disk map, as a sunburst, a treemap (tile size is space) or a
+  list, coloured by folder or, like a stock-market heatmap, by how much each folder grew or
+  shrank in the last day; click a folder to zoom in. It measures while you look at it (when it
+  opens, if the last map is over 30 minutes old, and every hour while it stays open).
+- **Old Files**: a table of what nothing has opened or changed for a long time (you pick how big,
+  from 50 MB, and how long, from six months to five years): forgotten folders (apps not opened,
+  folders unchanged) and your big files, sorted by size, place or when they were last used. What
+  you select goes to the Trash or is kept.
+- **History**: how full the disk is over time, in layers by kind (macOS, apps, build output,
+  caches, the Trash, snapshots…), where the trend goes and how sure it is, and what grew and
+  shrank the most over the span shown; the one-off arrivals (a download, a macOS update) are left
+  out of the trend. Writes: what was written each day, and which apps wrote the most in the last
+  day: writing doesn't fill the disk, but it wears an SSD out.
+- **Prevention**: clean-ups the watcher can do once a day, each off until you turn it on (old
   simulators, build folders and `node_modules` nothing has used for two weeks, old Rust build
-  caches, caches apps
-  stopped using), and the
-  tweaks, which apply and undo with a switch after saying what they change and what you give up.
+  caches, caches apps stopped using), and the tweaks, which apply and undo with a switch after
+  saying what they change and what you give up.
 
-The sidebar groups the pages: the Overview, then Monitor (Disk Usage, Disk Wear, Disk Map) and Clean
-(Space, Cruft, Prevent). The menu bar has a plain menu: free space, the forecast and the last day
+The menu bar has a plain menu: free space, the forecast and the last day
 in a line each, what needs attention, then Open, Check for Updates, About, Settings and Quit. The
 app is in the Dock too, unless you turn that off in Settings or with Hide from Dock in its Dock
 menu. Notifications
@@ -286,8 +285,9 @@ other processes' I/O counters (which apps write the most, write churn) and chang
 settings (the tweaks). Releases are Developer ID signed and notarized, and update themselves.
 
 MyDiskIsFull Lite is the App Store edition. `app/build.sh --app-store` builds it into
-`build/AppStore`: the same app in the App Sandbox, without the tweaks and the per-app writes
-(their code isn't compiled in, and a note where they would be links the full version). The
+`build/AppStore`: the same app in the App Sandbox, without the tweaks, the clean-ups and the
+per-app writes (their code isn't compiled in, and a note where they would be links the full
+version; Prevention and Writes are left out). The
 sandbox changes three more things:
 
 - **The watcher runs while the app does.** It's a child of the app rather than a LaunchAgent,

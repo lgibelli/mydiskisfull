@@ -50,7 +50,7 @@ final class WatcherService: ObservableObject {
     var caption: String {
         isOn
             ? "Running while \(Edition.name) is open. It samples free space every 5 minutes, and which folders grew every 30."
-            : "Off. Nothing is watched while it's off."
+            : "Nothing is watched while it's off."
     }
 
     func refresh() {

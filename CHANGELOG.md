@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Changed
+- The main window is laid out like Apple's own apps, in five pages instead of seven: Overview,
+  Storage, Old Files, History and Prevention (⌘1 to ⌘5). Each page's title is in the toolbar,
+  the pages are grouped lists and tables, and the sidebar only holds the pages, with the disk
+  and the watcher at its foot.
+- Space and Disk Map are now Storage, by category or folder by folder. Disk Usage and Disk Wear
+  are now History, as Space Used and Writes. Cruft is now Old Files, a sortable table where
+  several files can go to the Trash at once.
+- Overview shows the disk's bar with each category's name and size, and recommendations biggest
+  first. Many small clean-ups in a category (caches, build folders) are one row that opens it,
+  and a folder inside one already listed isn't listed again.
+- Suggestions have short titles: "Docker's disk image", not the first line of a sentence cut in
+  half.
+- A forecast with no steady pace says "Could be full in about 13 days" and how likely that is,
+  instead of "Full in 13 days" over a rate that was going down.
+- Each category on Storage says what of it comes back by itself (purgeable, swap, a macOS
+  update), so it adds up with the bar.
+
+### Fixed
+- Folders whose names have dots in them (`group.com.apple.VoiceMemos.shared`) had no icon.
+
 ## [0.1.4] - 2026-10-27
 
 ### Fixed

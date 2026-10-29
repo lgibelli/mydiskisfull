@@ -26,9 +26,9 @@ struct MyDiskIsFullApp: App {
         Window(Edition.name, id: "main") {
             MainWindow(monitor: monitor)
         }
-        .defaultSize(width: 1120, height: 780)
+        .defaultSize(width: 1040, height: 740)
         .defaultPosition(.center)
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands { AppCommands(monitor: monitor) }
 
         Window("Welcome to \(Edition.name)", id: "welcome") {
@@ -48,7 +48,7 @@ struct MyDiskIsFullApp: App {
 }
 
 /// The app's menus: About and updates where macOS puts them, the pages in
-/// View (⌘1 to ⌘7) and Refresh (⌘R), Settings (⌘,) as a sheet of the
+/// View (⌘1 to ⌘5) and Refresh (⌘R), Settings (⌘,) as a sheet of the
 /// main window, nothing to create, and no Hide
 /// Sidebar: the sidebar holds the disk's state.
 struct AppCommands: Commands {

@@ -668,7 +668,7 @@ fn from_history(store: &Store, home: &Path, now: i64, out: &mut Vec<Suggestion>)
             per_day: None,
             path: Some(r.owner.clone()),
             action: None,
-            title: None,
+            title: Some(format!("{} fills up again", name_of(&r.owner))),
             measured: Measured::followed(true),
             rank: (1, u64::MAX - r.back.max(0) as u64),
         });
@@ -697,29 +697,30 @@ fn from_tweaks(
             .as_ref()
             .and_then(|c| c.size_now())
             .or_else(|| t.size(home));
-        let mut push = |cause: String, fix: Fix, path: Option<PathBuf>, rank: (u8, u64)| {
-            // The one with a path is Chrome's model, left behind once its
-            // tweak is in: `mdif clean` moves it to the Trash.
-            let action = path.as_ref().map(|p| Action {
-                kind: "trash",
-                done: None,
-                label: "Move to Trash".into(),
-                paths: vec![p.to_string_lossy().into_owned()],
-                confirm: None,
-            });
-            out.push(Suggestion {
-                cause,
-                fix,
-                space: size,
-                per_day: None,
-                path: path.map(|p| p.to_string_lossy().into_owned()),
-                action,
-                title: None,
-                measured: Measured::default(),
-                rank,
-                key: format!("tweak:{}", t.id),
-            })
-        };
+        let mut push =
+            |title: String, cause: String, fix: Fix, path: Option<PathBuf>, rank: (u8, u64)| {
+                // The one with a path is Chrome's model, left behind once its
+                // tweak is in: `mdif clean` moves it to the Trash.
+                let action = path.as_ref().map(|p| Action {
+                    kind: "trash",
+                    done: None,
+                    label: "Move to Trash".into(),
+                    paths: vec![p.to_string_lossy().into_owned()],
+                    confirm: None,
+                });
+                out.push(Suggestion {
+                    cause,
+                    fix,
+                    space: size,
+                    per_day: None,
+                    path: path.map(|p| p.to_string_lossy().into_owned()),
+                    action,
+                    title: Some(title),
+                    measured: Measured::default(),
+                    rank,
+                    key: format!("tweak:{}", t.id),
+                })
+            };
         match status {
             Status::Absent(_) => {}
             // A tweak clears out what it is about: not what you keep.
@@ -728,6 +729,7 @@ fn from_tweaks(
             Status::NotApplied | Status::Partial => {
                 if let Some(c) = &check {
                     push(
+                        format!("Undone: {}", t.title),
                         format!(
                             "\"{}\" was applied {} ago and has been undone since, by an update \
                              or by the app itself.",
@@ -751,7 +753,7 @@ fn from_tweaks(
                     _ => t.why.to_string(),
                 };
                 let rank = size.map_or((2, 0), |s| (1, u64::MAX - s));
-                push(cause, Fix::Tweak(t.id), None, rank);
+                push(t.title.to_string(), cause, Fix::Tweak(t.id), None, rank);
             }
             Status::Pending => {
                 let app = match t.after {
@@ -759,6 +761,7 @@ fn from_tweaks(
                     _ => "the app",
                 };
                 push(
+                    format!("Waiting for approval: {}", t.title),
                     format!("\"{}\" is waiting for your approval.", t.title),
                     Fix::Steps(format!(
                         "In System Settings → {}, install the MyDiskIsFull profile, then quit \
@@ -772,6 +775,7 @@ fn from_tweaks(
             Status::Applied => {
                 if check.as_ref().is_some_and(|c| c.restart_pending) {
                     push(
+                        format!("After a restart: {}", t.title),
                         format!("\"{}\" takes effect after a restart.", t.title),
                         Fix::Steps("Restart the Mac when it suits you.".into()),
                         None,
@@ -780,6 +784,7 @@ fn from_tweaks(
                 } else if t.id == "chrome-ai-model" && size.is_some_and(|s| s >= GB) {
                     let dir = home.join(CHROME_MODEL);
                     push(
+                        "Chrome's leftover AI model".into(),
                         format!(
                             "Chrome no longer downloads its AI model, but the copy it has \
                              still takes {}.",
@@ -910,7 +915,11 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
                 )),
                 done: None,
             }),
-            title: None,
+            title: Some(if dates.len() == 1 {
+                "A local Time Machine snapshot".into()
+            } else {
+                format!("{} local Time Machine snapshots", dates.len())
+            }),
             measured: Measured::default(),
             // Among what was measured, by size: the biggest thing to free
             // when they hold tens of GB.
@@ -951,7 +960,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
             per_day: None,
             path: Some(docker_disk.to_string_lossy().into_owned()),
             action: None,
-            title: None,
+            title: Some("Docker's disk image".into()),
             measured: Measured::default(),
             rank: (2, 0),
             key: "docker".into(),
@@ -1108,7 +1117,11 @@ fn from_worktrees(
             per_day: None,
             path: path.map(|p| p.to_string_lossy().into_owned()),
             action: Some(action),
-            title: None,
+            title: Some(if n == 1 {
+                format!("A merged worktree of {}", name_of(repo))
+            } else {
+                format!("{n} merged worktrees of {}", name_of(repo))
+            }),
             measured: Measured {
                 frees: Some(private),
                 age: mean_age(&measured, now),
@@ -1260,6 +1273,15 @@ pub(crate) fn display(path: &Path, home: &Path) -> String {
 fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// A path's last part, for a title ("target", "myapp").
+fn name_of(path: impl AsRef<Path>) -> String {
+    let p = path.as_ref();
+    let name = p
+        .file_name()
+        .map_or_else(|| p.to_string_lossy(), |n| n.to_string_lossy());
+    crate::text::printable(&name).into_owned()
 }
 
 fn ago(secs: i64) -> String {
