@@ -124,12 +124,13 @@ disk is and whether the watcher is watching at its foot, and each page's title i
   (they cover the whole disk, excluded folders too); what changed since the last backup, so what
   the next one sends; the build folders and downloaded packages still backed up (a build or an
   install makes them again: Rust's `target`, Xcode's `build`, `node_modules` in agents'
-  worktrees, `.venv`, `Pods`), kept out with a button, or by themselves as new ones appear; and
+  worktrees, `.venv`, `Pods`) and the caches tools download into (what the tool tags or names a
+  cache: bun's, Dart's), kept out with a button, or by themselves as new ones appear; and
   what Time Machine's settings leave out. Back Up Now, and a link to change how often.
 - **Prevention**: clean-ups the watcher can do once a day, each off until you turn it on (old
   simulators, build folders and `node_modules` nothing has used for two weeks, old Rust build
-  caches, caches apps stopped using, build folders kept out of Time Machine), and the tweaks,
-  which apply and undo with a switch after saying what they change and what you give up.
+  caches, caches apps stopped using, build folders and caches kept out of Time Machine), and the
+  tweaks, which apply and undo with a switch after saying what they change and what you give up.
 
 The menu bar has a plain menu: free space, the forecast and the last day
 in a line each, what needs attention, then Open, Check for Updates, About, Settings and Quit. The
@@ -168,7 +169,7 @@ cargo build --release
 ./target/release/mdif keep add ~/VMs   # never suggest deleting, cleaning or moving it
 ./target/release/mdif tidy             # clean-ups the watcher does once a day, once turned on
 ./target/release/mdif timemachine      # what goes into the backups, what the snapshots hold
-./target/release/mdif timemachine exclude <folder>   # keep a build folder out of the backups
+./target/release/mdif timemachine exclude <folder>   # keep a build folder or a cache out of the backups
 ./target/release/mdif agent status
 ```
 

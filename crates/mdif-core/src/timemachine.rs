@@ -14,15 +14,16 @@
 //!   holds everything since the last good backup ([`Backlog`]).
 //! - What goes in: what changed since the last backup (the watcher's
 //!   history), and the folders a build or an install makes again
-//!   ([`rebuildable`]) still backed up. Keeping those out (`exclude`) means
-//!   less to send over the network and less room on the backup disk; not
-//!   less in the snapshots.
+//!   ([`rebuildable`]) or their tool downloads again ([`download_cache`])
+//!   still backed up. Keeping those out (`exclude`) means less to send over
+//!   the network and less room on the backup disk; not less in the
+//!   snapshots.
 //!
 //! Whether something is backed up is `tmutil isexcluded`'s answer, which
 //! knows the settings' list and macOS's own exclusions (caches, the Trash).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -32,7 +33,7 @@ use serde::Serialize;
 use crate::clean::{self, Action};
 use crate::keep::Keep;
 use crate::map::DATA_ROOT;
-use crate::owners::ARTIFACTS;
+use crate::owners::{ARTIFACTS, CODE_ROOTS};
 use crate::store::Store;
 use crate::{privacy, scan, space, worktrees};
 
@@ -46,6 +47,11 @@ const TRIES: usize = 12;
 const TRIES_SPAN: i64 = 14 * DAY;
 /// What changed since the last backup: folders that changed this much.
 const CHANGE_MIN: i64 = 100_000_000;
+/// A tool's cache smaller than this isn't worth keeping out.
+pub const CACHE_MIN: u64 = 10_000_000;
+/// The mark on a folder you let back into the backups, so the tidy-up
+/// doesn't keep it out again; it goes where the folder goes.
+pub const LET_IN: &str = "io.github.lgibelli.mydiskisfull.backed-up";
 const CHANGES: usize = 8;
 
 /// What Time Machine's settings say.
@@ -339,21 +345,24 @@ pub struct Change {
     /// snapshots until then).
     pub bytes: i64,
     pub backed_up: Option<bool>,
-    /// Build folders inside it that Time Machine skips: a new worktree is
-    /// mostly its node_modules, so less goes into the backup than it grew.
+    /// Folders made again inside it that Time Machine skips: a new
+    /// worktree is mostly its node_modules, so less goes into the backup
+    /// than it grew.
     pub kept_out: usize,
 }
 
-/// A folder a build or an install makes again.
+/// A folder a build, an install or its tool makes again.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Folder {
     pub path: String,
-    /// `build` (output) or `dependencies` (downloaded packages).
+    /// `build` (output), `dependencies` (downloaded packages) or `cache` (a
+    /// tool's downloads).
     pub what: &'static str,
     pub bytes: u64,
     pub backed_up: bool,
     /// The git checkout it's in (a worktree's own folder), and the project
-    /// that checkout belongs to: they differ for a worktree.
+    /// that checkout belongs to: they differ for a worktree. A tool's cache
+    /// is in the tool's folder ([`tool_folder`]), both.
     pub checkout: String,
     pub project: String,
 }
@@ -405,6 +414,73 @@ pub fn rebuildable(dir: &Path) -> Option<&'static str> {
         "node_modules" | ".venv" | "Pods" => "dependencies",
         _ => "build",
     })
+}
+
+/// The folders in the home folder that are macOS's or yours, not a tool's:
+/// no tool's cache is looked for in them, nor in the code folders
+/// ([`CODE_ROOTS`]), whose projects have build folders instead.
+const NOT_TOOLS: &[&str] = &[
+    "Applications",
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Library",
+    "Movies",
+    "Music",
+    "Pictures",
+    "Public",
+    "Sites",
+    ".Trash",
+];
+
+/// The tool's folder in the home folder that `dir` is in (`~/.bun` for
+/// `~/.bun/install/cache`), or `dir` itself; none for what's in macOS's or
+/// your folders ([`NOT_TOOLS`]) or the code folders.
+pub fn tool_folder(dir: &Path, home: &Path) -> Option<PathBuf> {
+    let Some(Component::Normal(name)) = dir.strip_prefix(home).ok()?.components().next() else {
+        return None;
+    };
+    let name = name.to_str()?;
+    (!NOT_TOOLS.contains(&name) && !CODE_ROOTS.contains(&name)).then(|| home.join(name))
+}
+
+/// Whether a folder's name says it's a cache: `cache`, `Caches`, npm's
+/// `_cacache`, Dart's `.pub-cache`, `marketplace-cache`, Chromium's `Code
+/// Cache` and `GPUCache`, and `~/.cache`, where the XDG spec puts caches.
+fn named_cache(name: &str) -> bool {
+    let n = name.trim_start_matches(['.', '_']).to_ascii_lowercase();
+    matches!(n.as_str(), "cache" | "caches" | "cacache")
+        || ["-cache", "_cache", ".cache", " cache"]
+            .iter()
+            .any(|end| n.ends_with(end))
+        || name.ends_with("Cache")
+}
+
+/// Whether `dir` is a tool's download cache: what it keeps so it downloads
+/// nothing twice, and fetches again when it's gone. Only its tool can say
+/// (a cache and an install look the same), and it does: it tagged the
+/// folder with a `CACHEDIR.TAG` (the standard tar, borg and restic leave
+/// out, and Time Machine doesn't), or named it a cache ([`named_cache`]).
+/// Only in a tool's folder ([`tool_folder`]); in a git checkout there
+/// (Flutter's `bin/cache`), only what git ignores and tracks nothing in.
+pub fn download_cache(dir: &Path, home: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if tool_folder(dir, home).is_none()
+        || !privacy::may_open(dir)
+        || !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        || !(named_cache(name) || dir.join("CACHEDIR.TAG").is_file())
+    {
+        return false;
+    }
+    let in_checkout = dir
+        .ancestors()
+        .skip(1)
+        .take_while(|a| a.starts_with(home) && *a != home)
+        .any(|a| a.join(".git").symlink_metadata().is_ok());
+    !in_checkout
+        || worktrees::ignores(dir) == Some(true) && worktrees::tracks_files_in(dir) == Some(false)
 }
 
 /// Which of `paths` Time Machine backs up, by `tmutil isexcluded`: the
@@ -465,8 +541,8 @@ pub struct Report {
     pub delete: Option<Action>,
     /// What changed most since the last backup, biggest first.
     pub changes: Vec<Change>,
-    /// Folders a build or an install makes again, biggest first; those
-    /// kept out already aren't measured (0).
+    /// Folders a build, an install or their tool makes again, biggest
+    /// first; those kept out already aren't measured (0).
     pub rebuildable: Vec<Folder>,
     /// What the settings leave out, whole paths.
     pub skipped: Vec<String>,
@@ -581,6 +657,14 @@ pub fn report(
         .into_par_iter()
         .filter(|p| keep.covering(p).is_none())
         .filter_map(|p| rebuildable(&p).map(|what| (p, what)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .chain(
+            crate::tidy::tool_caches(home)
+                .into_iter()
+                .filter(|p| keep.covering(p).is_none())
+                .map(|p| (p, "cache")),
+        )
         .collect();
 
     let asked: Vec<PathBuf> = changes
@@ -604,7 +688,13 @@ pub fn report(
                 .get(&p)
                 .copied()
                 .unwrap_or_else(|| !mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false));
-            let (checkout, project) = project(&p, home);
+            let (checkout, project) = match what {
+                "cache" => {
+                    let tool = tool_folder(&p, home).unwrap_or_else(|| p.clone());
+                    (tool.clone(), tool)
+                }
+                _ => project(&p, home),
+            };
             Folder {
                 bytes: match backed_up {
                     true => measured
@@ -621,6 +711,7 @@ pub fn report(
             }
         })
         .collect();
+    rebuildable.retain(|f| f.what != "cache" || !f.backed_up || f.bytes >= CACHE_MIN);
     rebuildable.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
     for c in &mut changes {
         c.kept_out = kept_out(Path::new(&c.path), &rebuildable);
@@ -640,12 +731,15 @@ fn kept_out(dir: &Path, folders: &[Folder]) -> usize {
 }
 
 /// Keeps `paths` out of the backups (`exclude`) or lets them back in: only
-/// folders a build or an install makes again ([`rebuildable`]), and never
-/// what you keep. Each comes back done, or refused and why.
+/// folders a build or an install makes again ([`rebuildable`]) or their
+/// tool downloads again ([`download_cache`]), and never what you keep. One
+/// let back in is marked ([`LET_IN`]). Each comes back done, or refused and
+/// why.
 pub fn set_excluded(
     paths: &[PathBuf],
     exclude: bool,
     keep: &Keep,
+    home: &Path,
 ) -> Vec<(PathBuf, Result<(), String>)> {
     paths
         .iter()
@@ -653,12 +747,13 @@ pub fn set_excluded(
             let shown = crate::text::printable(&p.to_string_lossy()).into_owned();
             let done = if exclude && keep.covering(p).is_some() {
                 Err(format!("{shown} is on your keep list."))
-            } else if rebuildable(p).is_none() {
+            } else if rebuildable(p).is_none() && !download_cache(p, home) {
                 Err(format!(
-                    "{shown} isn't a folder a build or an install makes again."
+                    "{shown} isn't a folder a build, an install or its tool makes again."
                 ))
             } else {
                 mdif_macos::fs::set_excluded_from_backup(p, exclude)
+                    .and_then(|()| mdif_macos::fs::set_mark(p, LET_IN, !exclude))
                     .map_err(|e| format!("{shown}: {e}"))
             };
             (p.clone(), done)
@@ -666,22 +761,24 @@ pub fn set_excluded(
         .collect()
 }
 
-/// `paths` as [`set_excluded`] takes them: a folder a build makes again as
-/// it is, a project (or any folder) as the ones inside it; one with none
-/// inside as it is, to be refused.
+/// `paths` as [`set_excluded`] takes them: a folder made again as it is, a
+/// project or a tool's folder (or any folder) as the ones inside it; one
+/// with none inside as it is, to be refused.
 pub fn expand(paths: &[PathBuf], home: &Path) -> Vec<PathBuf> {
     let mut found: Option<Vec<PathBuf>> = None;
     let mut out = Vec::new();
     for p in paths {
-        if rebuildable(p).is_some() || !p.is_dir() {
+        if rebuildable(p).is_some() || download_cache(p, home) || !p.is_dir() {
             out.push(p.clone());
             continue;
         }
         let all = found.get_or_insert_with(|| {
-            crate::tidy::artifact_folders(home)
+            let mut all: Vec<PathBuf> = crate::tidy::artifact_folders(home)
                 .into_par_iter()
                 .filter(|f| rebuildable(f).is_some())
-                .collect()
+                .collect();
+            all.extend(crate::tidy::tool_caches(home));
+            all
         });
         let inside: Vec<PathBuf> = all.iter().filter(|f| f.starts_with(p)).cloned().collect();
         if inside.is_empty() {
@@ -1077,13 +1174,13 @@ mod tests {
         assert_eq!(rebuildable(&repo.join("notes")), None);
         // Refused, with the reason, and nothing marked.
         let keep = Keep::default();
-        let r = set_excluded(&[repo.join("docs/build")], true, &keep);
+        let r = set_excluded(&[repo.join("docs/build")], true, &keep, &home);
         assert!(r[0].1.is_err());
         assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("docs/build")).unwrap());
-        let r = set_excluded(&[repo.join("ios/build")], true, &keep);
+        let r = set_excluded(&[repo.join("ios/build")], true, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
         assert!(mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
-        let r = set_excluded(&[repo.join("ios/build")], false, &keep);
+        let r = set_excluded(&[repo.join("ios/build")], false, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
         assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
         // A project stands for its folders a build makes again; a folder
@@ -1093,5 +1190,111 @@ mod tests {
             [repo.join("ios/build")]
         );
         assert_eq!(expand(&[repo.join("notes")], &home), [repo.join("notes")]);
+    }
+
+    #[test]
+    fn a_tool_says_which_of_its_folders_are_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        for d in [
+            ".bun/install/cache/react@18.2.0@@@1",
+            ".bun/bin",
+            ".cargo/registry/src",
+            ".cargo/bin",
+            ".pub-cache/hosted/pub.dev",
+            ".cache/uv",
+            ".tool/cache-notes",
+            ".gradle/caches",
+            ".sdk/bin/cache",
+            ".sdk/lib/cache",
+            "Documents/cache",
+            "devel/app/cache",
+        ] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join(".cargo/registry/CACHEDIR.TAG"), b"x").unwrap();
+        // A tool's own checkout: what git ignores in it is a cache, what it
+        // tracks isn't.
+        let sdk = home.join(".sdk");
+        std::fs::write(sdk.join("lib/cache/kept.txt"), b"x").unwrap();
+        std::fs::write(sdk.join(".gitignore"), b"bin/cache/\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&sdk)
+                    .args(args)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "t",
+        ]);
+        std::fs::create_dir_all(sdk.join(".git/lfs/cache")).unwrap();
+        // Kept out already: so is what's in it.
+        mdif_macos::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
+
+        // Tagged, named one by its tool, or in an XDG cache home; the
+        // outermost only. Not in .git, macOS's or your folders, or projects.
+        let found: Vec<PathBuf> = [
+            ".bun/install/cache",
+            ".cache",
+            ".cargo/registry",
+            ".pub-cache",
+            ".sdk/bin/cache",
+        ]
+        .iter()
+        .map(|d| home.join(d))
+        .collect();
+        assert_eq!(crate::tidy::tool_caches(&home), found);
+        assert_eq!(
+            tool_folder(&home.join(".bun/install/cache"), &home),
+            Some(home.join(".bun"))
+        );
+        assert_eq!(tool_folder(&home.join("Documents/cache"), &home), None);
+
+        // Only those are marked; a tool's folder stands for its caches.
+        let keep = Keep::default();
+        let r = set_excluded(&[home.join(".bun/bin")], true, &keep, &home);
+        assert!(r[0].1.is_err());
+        assert_eq!(
+            expand(&[home.join(".bun")], &home),
+            [home.join(".bun/install/cache")]
+        );
+        let cache = home.join(".bun/install/cache");
+        let r = set_excluded(std::slice::from_ref(&cache), true, &keep, &home);
+        assert_eq!(r[0].1, Ok(()));
+        assert!(mdif_macos::fs::excluded_from_backup(&cache).unwrap());
+
+        // The tidy-up keeps out the big ones, but not one you let back in.
+        let pubs = home.join(".pub-cache");
+        std::fs::write(cache.join("react.tgz"), vec![1u8; 11_000_000]).unwrap();
+        std::fs::write(
+            pubs.join("hosted/pub.dev/http.tar.gz"),
+            vec![1u8; 11_000_000],
+        )
+        .unwrap();
+        let r = set_excluded(std::slice::from_ref(&cache), false, &keep, &home);
+        assert_eq!(r[0].1, Ok(()));
+        let o = crate::tidy::run(crate::tidy::Id::Backups, &home, &keep, 0, false);
+        let done: Vec<&Path> = o.done.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(done, [pubs.as_path()]);
+        assert!(!mdif_macos::fs::excluded_from_backup(&cache).unwrap());
+        assert!(mdif_macos::fs::excluded_from_backup(&pubs).unwrap());
     }
 }

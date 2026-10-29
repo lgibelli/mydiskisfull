@@ -128,6 +128,38 @@
       "project": "/Users/me/devel/site"
     },
     {
+      "path": "/Users/me/.bun/install/cache",
+      "what": "cache",
+      "bytes": 1934000000,
+      "backed_up": true,
+      "checkout": "/Users/me/.bun",
+      "project": "/Users/me/.bun"
+    },
+    {
+      "path": "/Users/me/.pub-cache",
+      "what": "cache",
+      "bytes": 793000000,
+      "backed_up": true,
+      "checkout": "/Users/me/.pub-cache",
+      "project": "/Users/me/.pub-cache"
+    },
+    {
+      "path": "/Users/me/.codex/cache",
+      "what": "cache",
+      "bytes": 102000000,
+      "backed_up": true,
+      "checkout": "/Users/me/.codex",
+      "project": "/Users/me/.codex"
+    },
+    {
+      "path": "/Users/me/.codex/plugins/cache",
+      "what": "cache",
+      "bytes": 50000000,
+      "backed_up": true,
+      "checkout": "/Users/me/.codex",
+      "project": "/Users/me/.codex"
+    },
+    {
       "path": "/Users/me/devel/tool/target",
       "what": "build",
       "bytes": 0,
@@ -150,6 +182,14 @@
       "backed_up": false,
       "checkout": "/Users/me/devel/app/.claude/worktrees/agent-2",
       "project": "/Users/me/devel/app"
+    },
+    {
+      "path": "/Users/me/.cargo/registry",
+      "what": "cache",
+      "bytes": 0,
+      "backed_up": false,
+      "checkout": "/Users/me/.cargo",
+      "project": "/Users/me/.cargo"
     }
   ],
   "skipped": [

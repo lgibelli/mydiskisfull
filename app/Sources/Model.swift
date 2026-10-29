@@ -857,19 +857,20 @@ struct TimeMachineReport: Decodable {
         /// Grew (into the next backup) or shrank (held by the snapshots).
         let bytes: Int64
         let backedUp: Bool?
-        /// Build folders inside it that Time Machine skips.
+        /// Folders made again inside it that Time Machine skips.
         let keptOut: Int
         var id: String { path }
     }
 
     struct Folder: Decodable, Identifiable {
         let path: String
-        /// "build" or "dependencies".
+        /// "build", "dependencies" or "cache" (a tool's downloads).
         let what: String
         let bytes: Int64
         let backedUp: Bool
         /// The git checkout it's in (a worktree's own folder), and the
-        /// project that checkout belongs to: they differ for a worktree.
+        /// project that checkout belongs to: they differ for a worktree. A
+        /// tool's cache: the tool's folder in the home folder, both.
         let checkout: String
         let project: String
         var id: String { path }

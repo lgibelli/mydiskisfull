@@ -14,9 +14,10 @@
 //! - `caches`: app and tool caches of 50 MB or more that nothing has written
 //!   to or read for 30 days, emptied while their app is closed.
 //! - `backups`: folders a build or an install makes again
-//!   ([`timemachine::rebuildable`]) kept out of Time Machine's backups, new
-//!   ones too: every 6 hours, not once a day, so few get into a backup first.
-//!   Nothing is deleted.
+//!   ([`timemachine::rebuildable`]) and tools' download caches of 10 MB or
+//!   more ([`timemachine::download_cache`]) kept out of Time Machine's
+//!   backups, new ones too: every 6 hours, not once a day, so few get into a
+//!   backup first. Nothing is deleted.
 //!
 //! Files go only through [`clean::plan`] and [`clean::run`], which check each
 //! folder again; what you keep ([`Keep`]) is never touched, and a simulator
@@ -61,6 +62,9 @@ pub const CACHE_MIN: u64 = 50_000_000;
 
 /// How many folders below a code folder a project's `target` is looked for.
 const PROJECT_DEPTH: usize = 6;
+/// How many folders below the home folder a tool's cache is looked for:
+/// `~/fvm/versions/<version>/bin/cache` is 5.
+const TOOL_DEPTH: usize = 5;
 
 /// Tool caches that hold what the tool doesn't download again by itself
 /// (Playwright's and Puppeteer's browsers, LM Studio's models), or only by
@@ -112,7 +116,7 @@ impl Id {
             Id::Dependencies => "Old node_modules",
             Id::Incremental => "Old Rust build caches",
             Id::Caches => "Caches apps stopped using",
-            Id::Backups => "Build folders out of Time Machine",
+            Id::Backups => "Build folders and caches out of Time Machine",
         }
     }
 
@@ -142,8 +146,9 @@ impl Id {
             }
             Id::Backups => {
                 "Keeps the folders a build or an install makes again (target, build, \
-                 node_modules, .venv, Pods) out of Time Machine's backups, new ones too: less to \
-                 send over the network and less room on the backup disk. Nothing is deleted."
+                 node_modules, .venv, Pods) and the caches tools download into out of Time \
+                 Machine's backups, new ones too: less to send over the network and less room on \
+                 the backup disk. Nothing is deleted."
             }
         }
     }
@@ -357,17 +362,26 @@ pub fn run(id: Id, home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome
     }
 }
 
-/// The folders a build or an install makes again that are still backed
-/// up, marked to stay out ([`timemachine::set_excluded`]). Sizes aren't
-/// measured: nothing is freed.
+/// The folders a build, an install or their tool makes again that are
+/// still backed up, marked to stay out ([`timemachine::set_excluded`]), but
+/// not one you let back in ([`timemachine::LET_IN`]), nor a cache under
+/// [`timemachine::CACHE_MIN`]. Nothing is freed.
 fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     let id = Id::Backups;
     let mut o = Outcome::default();
-    // The mark first: it's a read, git only for what isn't marked yet.
-    let found = artifact_dirs(home, |d| {
+    // The marks first: they're reads, git only for what isn't marked yet.
+    fn unmarked(d: &Path) -> bool {
         !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true)
-            && crate::timemachine::rebuildable(d).is_some()
+            && !mdif_macos::fs::has_mark(d, crate::timemachine::LET_IN).unwrap_or(true)
+    }
+    let mut found = artifact_dirs(home, |d| {
+        unmarked(d) && crate::timemachine::rebuildable(d).is_some()
     });
+    found.extend(
+        tool_caches(home)
+            .into_iter()
+            .filter(|d| unmarked(d) && holds_at_least(d, crate::timemachine::CACHE_MIN)),
+    );
     // In one marked already, or in another found: excluded with it.
     let found: Vec<PathBuf> = found
         .iter()
@@ -383,7 +397,7 @@ fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
             o.did(id, p, 0);
             continue;
         }
-        match crate::timemachine::set_excluded(std::slice::from_ref(&p), true, keep)
+        match crate::timemachine::set_excluded(std::slice::from_ref(&p), true, keep, home)
             .remove(0)
             .1
         {
@@ -818,6 +832,51 @@ fn artifact_dirs(home: &Path, take: fn(&Path) -> bool) -> Vec<PathBuf> {
     out
 }
 
+/// The tools' download caches ([`timemachine::download_cache`]) in their
+/// folders in the home folder ([`timemachine::tool_folder`]), the outermost
+/// only. Never into `.git`, another volume, a cloud placeholder, or a
+/// folder kept out of the backups already: what's in it is out too.
+pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, home: &Path, dev: u64, out: &mut Vec<PathBuf>) {
+        for (name, path) in subdirs(dir) {
+            if name == ".git" || !privacy::may_open(&path) {
+                continue;
+            }
+            let Ok(m) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if m.dev() != dev || dataless(&m) {
+                continue;
+            }
+            if crate::timemachine::download_cache(&path, home) {
+                out.push(path);
+            } else if depth < TOOL_DEPTH
+                && !mdif_macos::fs::excluded_from_backup(&path).unwrap_or(true)
+            {
+                walk(&path, depth + 1, home, dev, out);
+            }
+        }
+    }
+    let Ok(dev) = std::fs::symlink_metadata(home).map(|m| m.dev()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (_, tool) in subdirs(home) {
+        if crate::timemachine::tool_folder(&tool, home).is_none() {
+            continue;
+        }
+        if crate::timemachine::download_cache(&tool, home) {
+            out.push(tool);
+        } else if privacy::may_open(&tool)
+            && !mdif_macos::fs::excluded_from_backup(&tool).unwrap_or(true)
+        {
+            walk(&tool, 2, home, dev, &mut out);
+        }
+    }
+    out.sort();
+    out
+}
+
 // ---------------------------------------------------------------------------
 // A Rust build's incremental caches.
 
@@ -1063,6 +1122,39 @@ fn subdirs(dir: &Path) -> Vec<(std::ffi::OsString, PathBuf)> {
 
 fn real_dir(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+}
+
+/// Whether `dir` holds at least `min` bytes (allocated), counted until it
+/// does: for a big cache, a few folders' worth of looking, not all of it.
+/// Not into a link, another volume or a cloud placeholder.
+fn holds_at_least(dir: &Path, min: u64) -> bool {
+    let Ok(dev) = std::fs::symlink_metadata(dir).map(|m| m.dev()) else {
+        return false;
+    };
+    let mut total = 0;
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            // An entry's metadata is the link's, not what it points to.
+            let Ok(m) = e.metadata() else {
+                continue;
+            };
+            if m.is_dir() {
+                if m.dev() == dev && !dataless(&m) {
+                    todo.push(e.path());
+                }
+            } else {
+                total += m.blocks() * 512;
+                if total >= min {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// A folder whose contents aren't on this disk (a cloud placeholder):

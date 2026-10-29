@@ -286,9 +286,14 @@ Time Machine's settings plist (readable without admin: destinations, quota and u
 backups and tries, the reference snapshot, SkipPaths), Back Up Now (`tmutil startbackup`), the
 local snapshots with the reference marked and what they hold (up to purgeable), what changed since
 the last backup (the history's growth), and the rebuildable folders still backed up (build output,
-packages, and any folder named as build output that git ignores and tracks nothing in), with
-exclusion by `NSURLIsExcludedFromBackupKey` (the sticky mark, instant, unlike `tmutil
-addexclusion`) and a tidy-up that keeps new ones out every 6 hours. The failing-backups clause is
+packages, and any folder named as build output that git ignores and tracks nothing in; and the
+tools' download caches, by what the tool says: a `CACHEDIR.TAG`, or a folder it named a cache, in
+the tools' folders in the home folder, 10 MB or more), with exclusion by
+`NSURLIsExcludedFromBackupKey` (the sticky mark, instant, unlike `tmutil addexclusion`) and a
+tidy-up that keeps new ones out every 6 hours, but not what you let back in (a mark of ours on the
+folder, `io.github.lgibelli.mydiskisfull.backed-up`). A package store's shape (many
+`name-1.2.3` folders, several versions side by side) was tried and left out: it found nothing the
+tool's own word missed, and it matches installs too (VS Code's extensions). The failing-backups clause is
 app-side for now (two tries in a row unfinished, or no backup for twice the interval, a day at
 least): an alert on Overview, no notification yet. Still to do: per-backup sizes, the failure
 reasons from the TM log, re-applying from FSEvents instead of every 6 hours, a notification.

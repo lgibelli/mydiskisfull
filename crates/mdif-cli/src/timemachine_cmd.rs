@@ -1,7 +1,8 @@
 //! `mdif timemachine`: what goes into Time Machine's backups, what the local
 //! snapshots hold and why, and what helps (see mdif_core::timemachine).
-//! `exclude` and `include` keep folders a build or an install makes again
-//! out of the backups or let them back in; `back-up` starts one now.
+//! `exclude` and `include` keep folders a build, an install or their tool
+//! makes again out of the backups or let them back in; `back-up` starts one
+//! now.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,8 +49,9 @@ pub fn set(db: &Path, paths: &[PathBuf], exclude: bool, json_out: bool) -> Resul
         .iter()
         .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
         .collect();
-    let paths = timemachine::expand(&paths, &home());
-    let done = timemachine::set_excluded(&paths, exclude, &keep);
+    let home = home();
+    let paths = timemachine::expand(&paths, &home);
+    let done = timemachine::set_excluded(&paths, exclude, &keep, &home);
     if json_out {
         let out = json!({
             "done": done.iter().filter(|(_, r)| r.is_ok()).map(|(p, _)| p).collect::<Vec<_>>(),
@@ -190,7 +192,7 @@ fn print(r: &Report) {
             let state = match (c.backed_up, c.bytes >= 0) {
                 (Some(false), _) => "not backed up".to_string(),
                 (_, true) if c.kept_out > 0 => format!(
-                    "goes into the next backup, but not the {} build folder{} in it",
+                    "goes into the next backup, but not the {} folder{} kept out in it",
                     c.kept_out,
                     if c.kept_out == 1 { "" } else { "s" }
                 ),
@@ -208,8 +210,8 @@ fn print(r: &Report) {
     if !backed.is_empty() {
         let total: u64 = backed.iter().map(|f| f.bytes).sum();
         println!(
-            "\nBacked up, though a build or an install makes them again ({} in {} folders; \
-             `mdif timemachine exclude <folder or project>`):",
+            "\nBacked up, though a build, an install or their tool makes them again ({} in {} \
+             folders; `mdif timemachine exclude <folder, project or tool's folder>`):",
             bytes(total),
             backed.len()
         );

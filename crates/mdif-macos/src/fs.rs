@@ -273,9 +273,77 @@ pub fn excluded_from_backup(path: &Path) -> io::Result<bool> {
     })
 }
 
+/// Puts the extended attribute `name` on `path` (links aren't followed), or
+/// takes it off: a mark that goes where the item is moved.
+pub fn set_mark(path: &Path, name: &str, on: bool) -> io::Result<()> {
+    let p = CString::new(path.as_os_str().as_bytes())?;
+    let n = CString::new(name)?;
+    // SAFETY: both are NUL-terminated and outlive the call; the value is
+    // one byte, its length given.
+    let r = unsafe {
+        if on {
+            libc::setxattr(
+                p.as_ptr(),
+                n.as_ptr(),
+                b"1".as_ptr().cast(),
+                1,
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        } else {
+            libc::removexattr(p.as_ptr(), n.as_ptr(), libc::XATTR_NOFOLLOW)
+        }
+    };
+    match r {
+        0 => Ok(()),
+        _ => match io::Error::last_os_error() {
+            e if !on && e.raw_os_error() == Some(libc::ENOATTR) => Ok(()),
+            e => Err(e),
+        },
+    }
+}
+
+/// Whether `path` carries the extended attribute `name`.
+pub fn has_mark(path: &Path, name: &str) -> io::Result<bool> {
+    let p = CString::new(path.as_os_str().as_bytes())?;
+    let n = CString::new(name)?;
+    // SAFETY: as above; a null buffer of length 0 asks only for the size.
+    let r = unsafe {
+        libc::getxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    match r {
+        0.. => Ok(true),
+        _ => match io::Error::last_os_error() {
+            e if e.raw_os_error() == Some(libc::ENOATTR) => Ok(false),
+            e => Err(e),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mark_goes_on_and_comes_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("cache");
+        std::fs::create_dir(&d).unwrap();
+        let name = "io.github.lgibelli.mydiskisfull.test";
+        assert!(!has_mark(&d, name).unwrap());
+        set_mark(&d, name, true).unwrap();
+        assert!(has_mark(&d, name).unwrap());
+        set_mark(&d, name, false).unwrap();
+        set_mark(&d, name, false).unwrap();
+        assert!(!has_mark(&d, name).unwrap());
+    }
 
     #[test]
     fn a_folder_kept_out_of_backups_says_so_and_comes_back_in() {

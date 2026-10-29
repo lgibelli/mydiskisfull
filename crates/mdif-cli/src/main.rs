@@ -151,7 +151,7 @@ enum Cmd {
         db: PathBuf,
     },
     /// Time Machine: what goes into the backups, what the local snapshots
-    /// hold and why, and the build folders still backed up
+    /// hold and why, and the build folders and caches still backed up
     Timemachine {
         #[command(subcommand)]
         action: Option<TimeMachineAction>,
@@ -279,7 +279,8 @@ enum TidyAction {
 
 #[derive(Subcommand)]
 enum TimeMachineAction {
-    /// Keep folders a build or an install makes again out of the backups
+    /// Keep folders a build, an install or their tool makes again out of the
+    /// backups (a project or a tool's folder: those in it)
     Exclude {
         #[arg(required = true)]
         paths: Vec<PathBuf>,

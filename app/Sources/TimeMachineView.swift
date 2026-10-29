@@ -43,7 +43,11 @@ enum TimeMachineText {
     }
 
     static func what(_ kind: String) -> String {
-        kind == "dependencies" ? "Downloaded packages" : "Build output"
+        switch kind {
+        case "dependencies": "Downloaded packages"
+        case "cache": "Download cache"
+        default: "Build output"
+        }
     }
 
     /// What Finder calls it: "Final Cut Pro" for Final Cut Pro.app.
@@ -296,20 +300,31 @@ private struct ChangesSection: View {
         if c.backedUp == false { return "Not backed up" }
         if c.bytes < 0 { return "Deleted: held by the snapshots until the next backup" }
         if c.keptOut > 0 {
-            return "Goes into the next backup, except its \(c.keptOut) build folder\(c.keptOut == 1 ? "" : "s")"
+            return "Goes into the next backup, except \(c.keptOut) folder\(c.keptOut == 1 ? "" : "s") kept out"
         }
         return "Goes into the next backup"
     }
 }
 
 /// One project's build folders: a repository with its worktrees, so a
-/// project with forty `node_modules` and `dist` is one row.
+/// project with forty `node_modules` and `dist` is one row. Or a tool's
+/// caches, in its folder in the home folder.
 private struct Project: Identifiable {
     let path: String
     let folders: [TimeMachineReport.Folder]
     var id: String { path }
     var bytes: Int64 { folders.reduce(0) { $0 + $1.bytes } }
     var worktrees: Int { Set(folders.map(\.checkout)).subtracting([path]).count }
+    var tool: Bool { folders.allSatisfy { $0.what == "cache" } }
+
+    /// "3 projects", "2 tools", "3 projects and 2 tools".
+    static func count(_ all: [Project]) -> String {
+        let tools = all.filter(\.tool).count
+        let projects = all.count - tools
+        let p = projects == 1 ? "1 project" : "\(projects) projects"
+        let t = tools == 1 ? "1 tool" : "\(tools) tools"
+        return tools == 0 ? p : projects == 0 ? t : "\(p) and \(t)"
+    }
 
     /// Biggest first; those not measured (kept out) by how many.
     static func of(_ folders: [TimeMachineReport.Folder]) -> [Project] {
@@ -319,21 +334,23 @@ private struct Project: Identifiable {
     }
 
     /// "48 folders: node_modules, dist, build · 14 worktrees", or for one
-    /// folder, where it is and what: ".venv · Downloaded packages".
+    /// folder, where it is and what: ".venv · Downloaded packages". A
+    /// tool's caches by where they are: "2 caches: cache, plugins/cache".
     var detail: String {
         if folders.count == 1, let f = folders.first {
-            return "\(TimeMachineText.inside(path, f.path)) · \(TimeMachineText.what(f.what))"
+            let what = TimeMachineText.what(f.what)
+            return f.path == path ? what : "\(TimeMachineText.inside(path, f.path)) · \(what)"
         }
         var seen: [String: (bytes: Int64, count: Int)] = [:]
         for f in folders {
-            let n = TimeMachineText.name(f.path)
+            let n = tool ? TimeMachineText.inside(path, f.path) : TimeMachineText.name(f.path)
             seen[n, default: (0, 0)].bytes += f.bytes
             seen[n, default: (0, 0)].count += 1
         }
         let names = seen.sorted { ($0.value.bytes, $0.value.count, $1.key) > ($1.value.bytes, $1.value.count, $0.key) }.map(\.key)
         let kinds = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? "…" : "")
         let w = worktrees
-        return "\(folders.count) folders: \(kinds)" + (w == 0 ? "" : " · \(w) worktree\(w == 1 ? "" : "s")")
+        return "\(folders.count) \(tool ? "caches" : "folders"): \(kinds)" + (w == 0 ? "" : " · \(w) worktree\(w == 1 ? "" : "s")")
     }
 }
 
@@ -354,7 +371,7 @@ private struct RebuildableSection: View {
             if r.rebuildable.isEmpty {
                 HStack(spacing: 8) {
                     if monitor.timeMachineLoading { ProgressView().controlSize(.small) }
-                    Text(monitor.timeMachineLoading ? "Looking through your code folders…" : "No build output or packages in your code folders.")
+                    Text(monitor.timeMachineLoading ? "Looking through your code and tools' folders…" : "No build output, packages or caches in your code and tools' folders.")
                         .foregroundStyle(.secondary)
                 }
             } else if !backed.isEmpty {
@@ -362,7 +379,7 @@ private struct RebuildableSection: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(Format.bytes(total)) in \(count) folder\(count == 1 ? "" : "s")")
                             .font(.headline).monospacedDigit()
-                        Text("\(backed.count == 1 ? "In 1 project" : "In \(backed.count) projects"): backed up, though their next build or install makes them again.")
+                        Text("In \(Project.count(backed)): backed up, though \(backed.allSatisfy(\.tool) ? "each tool downloads what it needs again" : backed.contains(where: \.tool) ? "a build, an install or the tool makes them again" : "their next build or install makes them again").")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -380,7 +397,7 @@ private struct RebuildableSection: View {
             if let t = monitor.tidies?.first(where: { $0.id == "backups" }) {
                 Toggle(isOn: Binding(get: { t.on }, set: { monitor.setTidy(t.id, on: $0) })) {
                     Text("Keep new ones out by themselves")
-                    Text("MyDiskIsFull looks for new ones every 6 hours, agents' worktrees too. Nothing is deleted.")
+                    Text("MyDiskIsFull looks for new ones every 6 hours, agents' worktrees too, and leaves in what you back up. Nothing is deleted.")
                 }
                 .toggleStyle(.switch)
                 .disabled(monitor.tidyBusy.contains(t.id))
@@ -389,7 +406,7 @@ private struct RebuildableSection: View {
                 DisclosureGroup {
                     ForEach(out) { ProjectRow(project: $0, monitor: monitor) }
                 } label: {
-                    let projects = out.count == 1 ? "1 project" : "\(out.count) projects"
+                    let projects = Project.count(out)
                     if backed.isEmpty {
                         Label {
                             Text("All \(outCount) kept out, in \(projects)")
@@ -402,7 +419,7 @@ private struct RebuildableSection: View {
                 }
             }
         } header: {
-            Text("Build Folders in the Backups")
+            Text("Build Folders and Caches in the Backups")
         } footer: {
             Text("Keeping them out means less to send over the network and less room on the backup disk. It doesn't make the local snapshots smaller: those cover the whole disk.")
                 .foregroundStyle(.secondary)

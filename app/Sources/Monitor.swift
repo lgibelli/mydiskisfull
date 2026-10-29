@@ -334,7 +334,7 @@ final class Monitor: ObservableObject {
             var lines: [String] = []
             if id == "backups" {
                 // Nothing is freed: folders are kept out of the backups.
-                lines.append(r.done.isEmpty ? "Every build folder was kept out already."
+                lines.append(r.done.isEmpty ? "Every build folder and cache was kept out already."
                              : "Kept \(r.done.count) folder\(r.done.count == 1 ? "" : "s") out of Time Machine.")
             } else {
                 lines.append(r.done.isEmpty ? "Nothing needed tidying." : "The disk has \(Format.bytes(r.freed)) more free.")
