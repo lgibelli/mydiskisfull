@@ -116,6 +116,31 @@ pub fn tracks_files_in(dir: &Path) -> Option<bool> {
     Some(tracked)
 }
 
+/// Whether the repository holding `dir` ignores it (its `.gitignore`):
+/// `None` when no repository holds it or git can't be asked.
+pub fn ignores(dir: &Path) -> Option<bool> {
+    let (parent, name) = (dir.parent()?, dir.file_name()?);
+    parent.ancestors().find(|a| a.join(".git").exists())?;
+    let git = Git::find()?;
+    // `check-ignore -q` says it by its exit status: 0 ignored, 1 not.
+    let status = git
+        .cmd(parent)
+        .args([
+            OsStr::new("check-ignore"),
+            "-q".as_ref(),
+            "--".as_ref(),
+            name,
+        ])
+        .stdout(Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// Projects in the code folders with linked worktrees.
 fn repos(home: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = CODE_ROOTS

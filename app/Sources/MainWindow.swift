@@ -14,14 +14,16 @@
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case overview, storage, oldFiles, history, prevention
+    case overview, storage, oldFiles, history, timeMachine, prevention
 
     var id: String { rawValue }
 
-    /// The pages this edition has. The App Store one leaves out Prevention:
-    /// the sandbox rules out all it does (tweaks, clean-ups), and a page that
-    /// only points at the full version reads as a placeholder.
-    static let shown: [Pane] = Edition.appStore ? allCases.filter { $0 != .prevention } : allCases
+    /// The pages this edition has. The App Store one leaves out Prevention
+    /// and Time Machine: the sandbox rules out all they do (tweaks,
+    /// clean-ups, reading Time Machine's settings, marking folders), and a
+    /// page that only points at the full version reads as a placeholder.
+    static let shown: [Pane] = Edition.appStore
+        ? allCases.filter { $0 != .prevention && $0 != .timeMachine } : allCases
 
     var title: String {
         switch self {
@@ -29,6 +31,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .storage: "Storage"
         case .oldFiles: "Old Files"
         case .history: "History"
+        case .timeMachine: "Time Machine"
         case .prevention: "Prevention"
         }
     }
@@ -39,11 +42,12 @@ enum Pane: String, CaseIterable, Identifiable {
         case .storage: "internaldrive"
         case .oldFiles: "clock.arrow.circlepath"
         case .history: "chart.xyaxis.line"
+        case .timeMachine: "externaldrive.badge.timemachine"
         case .prevention: "checkmark.shield"
         }
     }
 
-    /// ⌘1 to ⌘5 (⌘4 in the App Store edition).
+    /// ⌘1 to ⌘6 (⌘4 in the App Store edition).
     var key: KeyEquivalent {
         KeyEquivalent(Character("\((Pane.shown.firstIndex(of: self) ?? 0) + 1)"))
     }
@@ -88,6 +92,12 @@ struct MainWindow: View {
                 case .storage: StoragePage(monitor: monitor)
                 case .oldFiles: OldFilesPage(monitor: monitor)
                 case .history: HistoryPage(monitor: monitor)
+                case .timeMachine:
+                    #if APP_STORE
+                    EmptyView()
+                    #else
+                    TimeMachinePage(monitor: monitor)
+                    #endif
                 case .prevention: PreventionPage(monitor: monitor)
                 }
             }

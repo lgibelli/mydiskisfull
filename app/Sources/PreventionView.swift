@@ -22,7 +22,7 @@ struct PreventionPage: View {
             } header: {
                 Text("Automatic Clean-ups")
             } footer: {
-                Text("MyDiskIsFull does these once a day, while it watches. Never anything you keep.")
+                Text("MyDiskIsFull does these once a day while it watches (the Time Machine one every 6 hours). Never anything you keep.")
                     .foregroundStyle(.secondary)
             }
             Section {

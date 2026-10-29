@@ -540,6 +540,13 @@ private struct AdviceButton: View {
                     Text(Format.inline(detail)).fixedSize(horizontal: false, vertical: true)
                 }
                 #if !APP_STORE
+                // Snapshots: their page says what they hold and what helps.
+                if item.path.isEmpty, item.action?.kind == "snapshots" {
+                    Button("Time Machine…") {
+                        shown = false
+                        Navigator.shared.pane = .timeMachine
+                    }
+                }
                 // What the scan couldn't see includes your own folders, then.
                 if item.path.isEmpty, Privacy.appHasFullDiskAccess == false {
                     Text("Without Full Disk Access, some of your own folders are counted here too: MyDiskIsFull can't look inside them.")

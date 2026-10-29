@@ -89,7 +89,7 @@ The first launch starts the watcher (a LaunchAgent inside the app running the sa
 as below; one started with `mdif agent install` is stopped, and the history carries on), asks for
 Full Disk Access and for notifications.
 
-The app has a main window laid out like Apple's own: a sidebar of five pages, with how full the
+The app has a main window laid out like Apple's own: a sidebar of six pages, with how full the
 disk is and whether the watcher is watching at its foot, and each page's title in the toolbar.
 
 - **Overview**: the disk as one bar split by category, each named like a station on a railway
@@ -118,10 +118,18 @@ disk is and whether the watcher is watching at its foot, and each page's title i
   shrank the most over the span shown; the one-off arrivals (a download, a macOS update) are left
   out of the trend. Writes: what was written each day, and which apps wrote the most in the last
   day: writing doesn't fill the disk, but it wears an SSD out.
+- **Time Machine**: where it backs up, how often, and the latest tries, finished or not (with an
+  alert when backups keep failing, as the snapshot it started from then holds everything deleted
+  since); the local snapshots, which one the next backup starts from, what they hold and why
+  (they cover the whole disk, excluded folders too); what changed since the last backup, so what
+  the next one sends; the build folders and downloaded packages still backed up (a build or an
+  install makes them again: Rust's `target`, Xcode's `build`, `node_modules` in agents'
+  worktrees, `.venv`, `Pods`), kept out with a button, or by themselves as new ones appear; and
+  what Time Machine's settings leave out. Back Up Now, and a link to change how often.
 - **Prevention**: clean-ups the watcher can do once a day, each off until you turn it on (old
   simulators, build folders and `node_modules` nothing has used for two weeks, old Rust build
-  caches, caches apps stopped using), and the tweaks, which apply and undo with a switch after
-  saying what they change and what you give up.
+  caches, caches apps stopped using, build folders kept out of Time Machine), and the tweaks,
+  which apply and undo with a switch after saying what they change and what you give up.
 
 The menu bar has a plain menu: free space, the forecast and the last day
 in a line each, what needs attention, then Open, Check for Updates, About, Settings and Quit. The
@@ -159,6 +167,8 @@ cargo build --release
 ./target/release/mdif clean <path>     # do a clean-up a suggestion offers, checked again first
 ./target/release/mdif keep add ~/VMs   # never suggest deleting, cleaning or moving it
 ./target/release/mdif tidy             # clean-ups the watcher does once a day, once turned on
+./target/release/mdif timemachine      # what goes into the backups, what the snapshots hold
+./target/release/mdif timemachine exclude <folder>   # keep a build folder out of the backups
 ./target/release/mdif agent status
 ```
 
@@ -287,7 +297,7 @@ settings (the tweaks). Releases are Developer ID signed and notarized, and updat
 MyDiskIsFull Lite is the App Store edition. `app/build.sh --app-store` builds it into
 `build/AppStore`: the same app in the App Sandbox, without the tweaks, the clean-ups and the
 per-app writes (their code isn't compiled in, and a note where they would be links the full
-version; Prevention and Writes are left out). The
+version; Prevention, Time Machine and Writes are left out). The
 sandbox changes three more things:
 
 - **The watcher runs while the app does.** It's a child of the app rather than a LaunchAgent,

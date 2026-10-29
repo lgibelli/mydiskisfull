@@ -281,6 +281,18 @@ every file, wait for the cloud provider's database to confirm each file is synce
 original.
 
 ### 7. Time Machine monitor
+Built (the Time Machine page, `mdif timemachine`, mdif_core::timemachine): backup status from
+Time Machine's settings plist (readable without admin: destinations, quota and use, finished
+backups and tries, the reference snapshot, SkipPaths), Back Up Now (`tmutil startbackup`), the
+local snapshots with the reference marked and what they hold (up to purgeable), what changed since
+the last backup (the history's growth), and the rebuildable folders still backed up (build output,
+packages, and any folder named as build output that git ignores and tracks nothing in), with
+exclusion by `NSURLIsExcludedFromBackupKey` (the sticky mark, instant, unlike `tmutil
+addexclusion`) and a tidy-up that keeps new ones out every 6 hours. The failing-backups clause is
+app-side for now (two tries in a row unfinished, or no backup for twice the interval, a day at
+least): an alert on Overview, no notification yet. Still to do: per-backup sizes, the failure
+reasons from the TM log, re-applying from FSEvents instead of every 6 hours, a notification.
+
 - Backup status, destination usage vs quota, and how big each backup is (TM logs).
 - Which owners went into each backup (FSEvents plus exclusion state), e.g. "node_modules added
   3 GB to your backups this week".
@@ -431,7 +443,7 @@ mydiskisfull/
     cache, Rust `deps`) were 80% of one listing.
 - **M4 – Menu bar app (in progress).** Built so far, in native Swift like Idlewild:
   - A main window laid out like Apple's own apps (System Settings → Storage, Activity
-    Monitor, Finder's tables): a sidebar of five pages, with the disk's bar, what's available
+    Monitor, Finder's tables): a sidebar of six pages, with the disk's bar, what's available
     and the watcher's state at its foot; each page's title and controls in the toolbar; the
     pages grouped lists (Form) and tables. Overview (the disk's railway bar, the forecast in
     a sentence, what needs attention with its fix, recommendations biggest first with a
@@ -442,9 +454,11 @@ mydiskisfull/
     folder or by each folder's growth in the last 24 hours), Old Files (forgotten folders and
     big old files in one sortable table), History (% used over time with the forecast, its
     plausible range, the alert floor and the cleanups; what grew and shrank most; and Writes:
-    written each day, from `writes_daily`, and the biggest writers) and Prevention (keep tidy,
+    written each day, from `writes_daily`, and the biggest writers), Time Machine (§7: the
+    backups and their tries, the local snapshots and why they hold space, what changed since
+    the last backup, the build folders still backed up with Keep Out) and Prevention (keep tidy,
     and the tweaks, each a switch that applies or undoes it after showing what it changes and
-    what you give up). ⌘1 to ⌘5. One visual system (`Theme.swift`).
+    what you give up). ⌘1 to ⌘6. One visual system (`Theme.swift`).
   - The menu bar: a plain menu (free space, forecast and the last day as text, what needs
     attention, Open, Check for Updates, About, Settings, Quit). The app is in the Dock like any
     app; with Settings → Show in the Dock off (or Hide from Dock in its Dock menu), it joins the

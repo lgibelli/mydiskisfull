@@ -1803,6 +1803,14 @@ fn container_name(c: &str) -> String {
         .unwrap_or_else(|| bare.to_string())
 }
 
+impl Measured {
+    /// What the folder at `path` (as you know it) took when it was
+    /// measured, if the tree keeps it: folders as big as [`TREE`] keeps.
+    pub fn size_at(&self, path: &Path) -> Option<u64> {
+        dir_of(self, path).map(|d| d.allocated)
+    }
+}
+
 /// The item's folder in the tree.
 fn dir_of<'a>(m: &'a Measured, item: &Path) -> Option<&'a Dir> {
     let mut d = &m.tree;

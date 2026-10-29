@@ -1,0 +1,105 @@
+{
+  "set_up": true,
+  "auto": true,
+  "interval": 86400,
+  "destinations": [
+    {
+      "name": "Backups",
+      "server": "NAS",
+      "quota": 649000000000,
+      "used": 482580426752,
+      "available": 166419574784
+    }
+  ],
+  "last_backup": 1792622972,
+  "running": {
+    "done": 0.42,
+    "phase": "Copying"
+  },
+  "tries": [
+    {
+      "started": 1792790992,
+      "finished": null
+    },
+    {
+      "started": 1792780992,
+      "finished": null
+    },
+    {
+      "started": 1792620992,
+      "finished": 1792622972
+    }
+  ],
+  "backlog": {
+    "since": 1792622972,
+    "failed": 2,
+    "held": 25000000000
+  },
+  "snapshots": [
+    {
+      "name": "com.apple.TimeMachine.2026-10-27-231632.local",
+      "taken": 1792620992,
+      "reference": true
+    },
+    {
+      "name": "com.apple.TimeMachine.2026-10-29-091521.local",
+      "taken": 1792786521,
+      "reference": false
+    }
+  ],
+  "held": 25000000000,
+  "delete": {
+    "kind": "snapshots",
+    "label": "Delete 2 Snapshots",
+    "paths": [
+      "com.apple.TimeMachine.2026-10-27-231632.local",
+      "com.apple.TimeMachine.2026-10-29-091521.local"
+    ],
+    "confirm": "Delete 2 local Time Machine snapshots? Backups on your backup disk aren't touched, but what changed since the last backup loses its local copy: Time Machine can't restore it from this Mac any more. This can't be undone.",
+    "done": null
+  },
+  "changes": [
+    {
+      "path": "/Users/me/devel/app/.claude/worktrees/agent-1",
+      "bytes": 1300000000,
+      "backed_up": true,
+      "kept_out": 6
+    },
+    {
+      "path": "/Users/me/Library/Caches/ms-playwright",
+      "bytes": 560000000,
+      "backed_up": false,
+      "kept_out": 0
+    },
+    {
+      "path": "/Users/me/Desktop/Exports",
+      "bytes": -2100000000,
+      "backed_up": null,
+      "kept_out": 0
+    }
+  ],
+  "rebuildable": [
+    {
+      "path": "/Users/me/devel/app/.claude/worktrees/agent-1/node_modules",
+      "what": "dependencies",
+      "bytes": 880000000,
+      "backed_up": true
+    },
+    {
+      "path": "/Users/me/devel/app/ios/build",
+      "what": "build",
+      "bytes": 551000000,
+      "backed_up": true
+    },
+    {
+      "path": "/Users/me/devel/tool/target",
+      "what": "build",
+      "bytes": 0,
+      "backed_up": false
+    }
+  ],
+  "skipped": [
+    "~/Downloads",
+    "/Applications/Xcode.app"
+  ]
+}

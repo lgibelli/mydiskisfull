@@ -781,3 +781,129 @@ struct AlertSettings: Decodable {
     let notifyGrowth: Bool
     let notifyChurn: Bool
 }
+
+// MARK: - mdif timemachine --json
+
+/// What goes into Time Machine's backups, what its local snapshots hold,
+/// and the folders a build or an install makes again that are still backed
+/// up. `--quick` leaves the folders and the changes empty.
+struct TimeMachineReport: Decodable {
+    /// Whether it has a backup disk.
+    let setUp: Bool
+    /// Whether it backs up by itself.
+    let auto: Bool
+    /// Seconds between automatic backups.
+    let interval: Int64
+    let destinations: [Destination]
+    /// When the last backup finished.
+    let lastBackup: Int64?
+    let running: Running?
+    /// The latest tries, newest first.
+    let tries: [Try]
+    /// Backups failing while the snapshots hold what changed since.
+    let backlog: Backlog?
+    /// Oldest first.
+    let snapshots: [Snapshot]
+    /// What macOS counts as purgeable: the snapshots hold at most that.
+    let held: Int64
+    /// The button that deletes the snapshots.
+    let delete: CleanAction?
+    /// What changed most since the last backup, biggest first.
+    let changes: [Change]
+    /// Biggest first; those kept out already aren't measured (0).
+    let rebuildable: [Folder]
+    /// What Time Machine's settings leave out.
+    let skipped: [String]
+
+    struct Destination: Decodable {
+        let name: String
+        /// A network one's server ("NAS").
+        let server: String?
+        let quota: Int64?
+        let used: Int64?
+        let available: Int64?
+    }
+
+    struct Running: Decodable {
+        /// 0 to 1, when it says.
+        let done: Double?
+        let phase: String?
+    }
+
+    struct Try: Decodable, Identifiable {
+        let started: Int64
+        let finished: Int64?
+        var id: Int64 { started }
+    }
+
+    struct Backlog: Decodable {
+        /// When the last backup finished; nil, never.
+        let since: Int64?
+        /// Tries since that didn't finish.
+        let failed: Int
+        let held: Int64
+    }
+
+    struct Snapshot: Decodable, Identifiable {
+        let name: String
+        let taken: Int64
+        /// The one the next backup starts from.
+        let reference: Bool
+        var id: String { name }
+    }
+
+    struct Change: Decodable, Identifiable {
+        let path: String
+        /// Grew (into the next backup) or shrank (held by the snapshots).
+        let bytes: Int64
+        let backedUp: Bool?
+        /// Build folders inside it that Time Machine skips.
+        let keptOut: Int
+        var id: String { path }
+    }
+
+    struct Folder: Decodable, Identifiable {
+        let path: String
+        /// "build" or "dependencies".
+        let what: String
+        let bytes: Int64
+        let backedUp: Bool
+        var id: String { path }
+    }
+}
+
+/// `mdif timemachine exclude|include <paths> --json`.
+struct BackupExclusion: Decodable {
+    let done: [String]
+    let refused: [Refused]
+
+    struct Refused: Decodable {
+        let path: String
+        let why: String
+    }
+}
+
+/// `mdif timemachine back-up --json`.
+struct BackupStarted: Decodable {
+    let started: Bool
+    let why: String?
+}
+
+extension TimeMachineReport {
+    /// The same, with these folders and changes (a quick look keeps what
+    /// the last full one found).
+    func with(changes: [Change], rebuildable: [Folder]) -> TimeMachineReport {
+        TimeMachineReport(setUp: setUp, auto: auto, interval: interval, destinations: destinations,
+                          lastBackup: lastBackup, running: running, tries: tries, backlog: backlog,
+                          snapshots: snapshots, held: held, delete: delete, changes: changes,
+                          rebuildable: rebuildable, skipped: skipped)
+    }
+
+    /// With `paths` marked backed up or kept out, as `mdif` just did.
+    func marking(_ paths: [String], backedUp: Bool) -> TimeMachineReport {
+        let done = Set(paths)
+        return with(changes: changes, rebuildable: rebuildable.map { f in
+            done.contains(f.path) ? Folder(path: f.path, what: f.what, bytes: f.bytes, backedUp: backedUp) : f
+        })
+    }
+}

@@ -54,6 +54,12 @@ enum Contract {
                 case "map":
                     let m = try check(DiskMap.self, path)
                     summary = "\(m.scan.root.children?.count ?? 0) top folders"
+                case "timemachine":
+                    let r = try check(TimeMachineReport.self, path)
+                    summary = "\(r.tries.count) tries, \(r.snapshots.count) snapshots, \(r.rebuildable.count) build folders"
+                case "exclusion":
+                    let r = try check(BackupExclusion.self, path)
+                    summary = "\(r.done.count) done, \(r.refused.count) refused"
                 default:
                     print("unknown kind \(kind)"); exit(2)
                 }

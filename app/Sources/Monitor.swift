@@ -26,6 +26,14 @@ final class Monitor: ObservableObject {
     @Published private(set) var measuring = false
     /// Clean-ups the watcher does once a day, when they're on.
     @Published private(set) var tidies: [Tidy]?
+    /// Time Machine: the backups, the snapshots, and (once its page was
+    /// open) the folders.
+    @Published private(set) var timeMachine: TimeMachineReport?
+    @Published private(set) var timeMachineLoading = false
+    /// Folders being kept out of the backups or let back in.
+    @Published private(set) var backupChanging: Set<String> = []
+    @Published private(set) var backupStarting = false
+    private var timeMachineAt: Date?
     /// Being switched or run, by id.
     @Published private(set) var tidyBusy: Set<String> = []
     /// Where the space goes, from a whole-disk scan `mdif` caches.
@@ -154,6 +162,13 @@ final class Monitor: ObservableObject {
         if measuredAt.map({ Date().timeIntervalSince($0) > Self.measureEvery }) ?? true {
             Task { await measure() }
         }
+        #if !APP_STORE
+        // Whether backups keep failing, for Needs Attention: a second's look.
+        if timeMachineAt.map({ Date().timeIntervalSince($0) > Self.measureEvery }) ?? true {
+            timeMachineAt = Date()
+            Task { await loadTimeMachine(quick: true) }
+        }
+        #endif
     }
 
     /// The series behind the charts, from the same history: milliseconds.
@@ -227,6 +242,59 @@ final class Monitor: ObservableObject {
         }
     }
 
+    /// `quick`: the backups and the snapshots only, in a second; the
+    /// folders keep what the last full look found.
+    func loadTimeMachine(quick: Bool = false) async {
+        guard !timeMachineLoading else { return }
+        timeMachineLoading = true
+        defer { timeMachineLoading = false }
+        let args = ["timemachine"] + (quick ? ["--quick"] : [])
+        guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
+        if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
+            timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
+        } else {
+            timeMachine = r
+        }
+    }
+
+    #if !APP_STORE
+    /// Keeps folders out of Time Machine's backups, or lets them back in
+    /// (`mdif timemachine exclude|include`, which checks each again).
+    func setBackedUp(_ paths: [String], _ backedUp: Bool) {
+        let paths = paths.filter { !backupChanging.contains($0) }
+        guard !paths.isEmpty else { return }
+        backupChanging.formUnion(paths)
+        Task {
+            defer { backupChanging.subtract(paths) }
+            do {
+                let r = try await Core.json(BackupExclusion.self,
+                                            ["timemachine", backedUp ? "include" : "exclude"] + paths, timeout: 120)
+                if !r.refused.isEmpty {
+                    TweakFlow.show(.warning, backedUp ? "Not backed up again" : "Not kept out",
+                                   r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
+                }
+                timeMachine = timeMachine?.marking(r.done, backedUp: backedUp)
+            } catch {
+                TweakFlow.show(.warning, "Nothing was changed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Back Up Now, as in Time Machine's menu.
+    func backUpNow() {
+        guard !backupStarting else { return }
+        backupStarting = true
+        Task {
+            defer { backupStarting = false }
+            let r = try? await Core.json(BackupStarted.self, ["timemachine", "back-up"], timeout: 60)
+            if r?.started != true {
+                TweakFlow.show(.warning, "Time Machine didn't start", r?.why ?? "mdif couldn't ask it.")
+            }
+            await loadTimeMachine(quick: true)
+        }
+    }
+    #endif
+
     func loadTidies() async {
         if let list = try? await Core.json(TidyList.self, ["tidy"], timeout: 30) {
             tidies = list.tidies
@@ -262,12 +330,19 @@ final class Monitor: ObservableObject {
                 return
             }
             var lines: [String] = []
-            lines.append(r.done.isEmpty ? "Nothing needed tidying." : "The disk has \(Format.bytes(r.freed)) more free.")
+            if id == "backups" {
+                // Nothing is freed: folders are kept out of the backups.
+                lines.append(r.done.isEmpty ? "Every build folder was kept out already."
+                             : "Kept \(r.done.count) folder\(r.done.count == 1 ? "" : "s") out of Time Machine.")
+            } else {
+                lines.append(r.done.isEmpty ? "Nothing needed tidying." : "The disk has \(Format.bytes(r.freed)) more free.")
+            }
             if !r.failed.isEmpty {
                 lines.append("Not done:\n" + r.failed.map { "• \($0.why)" }.joined(separator: "\n"))
             }
             TweakFlow.show(.informational, r.done.isEmpty ? "All tidy" : "Tidied", lines.joined(separator: "\n\n"))
             await loadTidies()
+            if id == "backups" { await loadTimeMachine() }
             if !r.done.isEmpty {
                 measuredAt = nil
                 await refresh()
@@ -380,7 +455,7 @@ final class Monitor: ObservableObject {
     /// How many things the overview asks someone to look at.
     var attentionCount: Int {
         (status?.incidents.count ?? 0) + undone.count + (watcherProblem == nil ? 0 : 1)
-            + (lacksFullDiskAccess ? 1 : 0)
+            + (lacksFullDiskAccess ? 1 : 0) + (timeMachine?.backlog == nil ? 0 : 1)
     }
 
     /// Tweaks this app applied that something undid (none in the App Store

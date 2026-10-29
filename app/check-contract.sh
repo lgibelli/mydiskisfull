@@ -37,6 +37,10 @@ db="$T/history.sqlite3"
 "$MDIF" tidy --json --db "$db" > "$T/tidy.json"
 "$MDIF" tidy run --dry-run --json --db "$db" > "$T/tidy-run.json"
 "$MDIF" alerts --json --db "$db" > "$T/alerts.json"
+"$MDIF" timemachine --json --db "$db" > "$T/timemachine.json"
+"$MDIF" timemachine --quick --json --db "$db" > "$T/timemachine-quick.json"
+# Refused (it isn't a build folder), so nothing is marked.
+"$MDIF" timemachine exclude "$T" --json --db "$db" > "$T/exclude.json"
 
 # The fixture must have the fields the real command prints, no more, no fewer.
 if ! diff <(jq -S 'keys' "$T/status.json") <(jq -S 'keys' app/Tests/status-incidents.json); then
@@ -58,6 +62,9 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     tidy="$T/tidy.json" \
     tidyrun="$T/tidy-run.json" \
     alerts="$T/alerts.json" \
+    timemachine="$T/timemachine.json" \
+    timemachine="$T/timemachine-quick.json" \
+    exclusion="$T/exclude.json" \
     status=app/Tests/status-incidents.json \
     apply=app/Tests/apply-profile.json \
     revert=app/Tests/revert.json \
@@ -65,4 +72,5 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     space=app/Tests/space.json \
     tidy=app/Tests/tidy.json \
     tidyrun=app/Tests/tidy-run.json \
-    alerts=app/Tests/alerts.json
+    alerts=app/Tests/alerts.json \
+    timemachine=app/Tests/timemachine.json

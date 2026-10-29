@@ -56,6 +56,21 @@
         "failed": 1,
         "note": null
       }
+    },
+    {
+      "id": "backups",
+      "title": "Build folders out of Time Machine",
+      "detail": "Keeps the folders a build or an install makes again (target, build, node_modules, .venv, Pods) out of Time Machine's backups, new ones too: less to send over the network and less room on the backup disk. Nothing is deleted.",
+      "on": true,
+      "available": true,
+      "unavailable_why": null,
+      "last": {
+        "at": 1792610800,
+        "freed": 0,
+        "done": 4,
+        "failed": 0,
+        "note": "Kept 4 folders out of Time Machine"
+      }
     }
   ]
 }

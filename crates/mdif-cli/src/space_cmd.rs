@@ -86,7 +86,7 @@ fn record(db: &Path, ts: i64, r: &Report) {
 }
 
 /// A kept measurement, if there is one this version can read.
-fn load(file: &Path) -> Option<Measured> {
+pub(crate) fn load(file: &Path) -> Option<Measured> {
     let text = std::fs::read(file).ok()?;
     serde_json::from_slice::<Measured>(&text)
         .ok()

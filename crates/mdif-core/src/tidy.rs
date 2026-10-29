@@ -13,6 +13,10 @@
 //!   touched for 30 days.
 //! - `caches`: app and tool caches of 50 MB or more that nothing has written
 //!   to or read for 30 days, emptied while their app is closed.
+//! - `backups`: folders a build or an install makes again
+//!   ([`timemachine::rebuildable`]) kept out of Time Machine's backups, new
+//!   ones too: every 6 hours, not once a day, so few get into a backup first.
+//!   Nothing is deleted.
 //!
 //! Files go only through [`clean::plan`] and [`clean::run`], which check each
 //! folder again; what you keep ([`Keep`]) is never touched, and a simulator
@@ -40,7 +44,8 @@ use crate::suggest::display;
 
 const DAY: i64 = 86_400;
 
-/// A tidy-up runs again once this long has passed since it last ran.
+/// A tidy-up runs again once this long has passed since it last ran
+/// ([`Id::every`]).
 pub const EVERY: i64 = DAY;
 /// Simulator runtimes not used for this many days go.
 pub const SIMULATOR_DAYS: u32 = 60;
@@ -72,15 +77,17 @@ pub enum Id {
     Dependencies,
     Incremental,
     Caches,
+    Backups,
 }
 
 impl Id {
-    pub const ALL: [Id; 5] = [
+    pub const ALL: [Id; 6] = [
         Id::Simulators,
         Id::Builds,
         Id::Dependencies,
         Id::Incremental,
         Id::Caches,
+        Id::Backups,
     ];
 
     pub fn id(self) -> &'static str {
@@ -90,6 +97,7 @@ impl Id {
             Id::Dependencies => "node-modules",
             Id::Incremental => "incremental",
             Id::Caches => "caches",
+            Id::Backups => "backups",
         }
     }
 
@@ -104,6 +112,7 @@ impl Id {
             Id::Dependencies => "Old node_modules",
             Id::Incremental => "Old Rust build caches",
             Id::Caches => "Caches apps stopped using",
+            Id::Backups => "Build folders out of Time Machine",
         }
     }
 
@@ -131,6 +140,19 @@ impl Id {
                 "App and tool caches nothing has written to for 30 days, emptied while their \
                  app is closed; the app makes what it needs again."
             }
+            Id::Backups => {
+                "Keeps the folders a build or an install makes again (target, build, \
+                 node_modules, .venv, Pods) out of Time Machine's backups, new ones too: less to \
+                 send over the network and less room on the backup disk. Nothing is deleted."
+            }
+        }
+    }
+
+    /// How long after it ran it's due again.
+    pub fn every(self) -> i64 {
+        match self {
+            Id::Backups => 6 * 3600,
+            _ => EVERY,
         }
     }
 
@@ -146,6 +168,7 @@ impl Id {
     fn verb(self) -> &'static str {
         match self {
             Id::Caches => "emptied",
+            Id::Backups => "excluded",
             _ => "deleted",
         }
     }
@@ -229,7 +252,7 @@ pub fn due(store: &Store, now: i64) -> Result<Vec<Id>> {
         }
         let ran = last(store, id)?.map(|l| l.at);
         // A clock set back counts as due, rather than as never.
-        if ran.is_none_or(|at| now - at >= EVERY || at > now) {
+        if ran.is_none_or(|at| now - at >= id.every() || at > now) {
             out.push(id);
         }
     }
@@ -330,7 +353,53 @@ pub fn run(id: Id, home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome
         Id::Builds | Id::Dependencies => unused(id, home, keep, now, dry_run, &privacy::may_open),
         Id::Incremental => incremental(home, keep, now, dry_run),
         Id::Caches => caches(home, keep, now, dry_run, CACHE_MIN, &privacy::may_open),
+        Id::Backups => backups(home, keep, dry_run),
     }
+}
+
+/// The folders a build or an install makes again that are still backed
+/// up, marked to stay out ([`timemachine::set_excluded`]). Sizes aren't
+/// measured: nothing is freed.
+fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
+    let id = Id::Backups;
+    let mut o = Outcome::default();
+    // The mark first: it's a read, git only for what isn't marked yet.
+    let found = artifact_dirs(home, |d| {
+        !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true)
+            && crate::timemachine::rebuildable(d).is_some()
+    });
+    // In one marked already, or in another found: excluded with it.
+    let found: Vec<PathBuf> = found
+        .iter()
+        .filter(|p| !found.iter().any(|o| o != *p && p.starts_with(o)))
+        .cloned()
+        .collect();
+    for p in found {
+        if let Some(entry) = kept(keep, &p) {
+            o.skipped.push((p, kept_why(entry)));
+            continue;
+        }
+        if dry_run {
+            o.did(id, p, 0);
+            continue;
+        }
+        match crate::timemachine::set_excluded(std::slice::from_ref(&p), true, keep)
+            .remove(0)
+            .1
+        {
+            Ok(()) => o.did(id, p, 0),
+            Err(why) => o.fail(id, p, why),
+        }
+    }
+    let n = o.done.len();
+    let what = (n > 0).then(|| {
+        format!(
+            "Kept {n} folder{} out of Time Machine",
+            if n == 1 { "" } else { "s" }
+        )
+    });
+    o.finish(id, what);
+    o
 }
 
 /// The entry that keeps `path`, or something in it.
@@ -697,6 +766,13 @@ pub fn build_dirs(home: &Path) -> Vec<PathBuf> {
 /// folders, agents' worktrees included.
 pub fn dependency_dirs(home: &Path) -> Vec<PathBuf> {
     artifact_dirs(home, clean::dependencies)
+}
+
+/// Every folder in the code folders named as build output or packages
+/// ([`ARTIFACTS`]), agents' worktrees included, unchecked: the caller asks
+/// what each is.
+pub fn artifact_folders(home: &Path) -> Vec<PathBuf> {
+    artifact_dirs(home, |_| true)
 }
 
 /// The folders named in [`ARTIFACTS`] that `take` takes, in the code
@@ -1477,7 +1553,8 @@ mod tests {
                 "builds",
                 "node-modules",
                 "incremental",
-                "caches"
+                "caches",
+                "backups"
             ]
         );
         assert!(listed[4].on && listed[4].last.is_some());

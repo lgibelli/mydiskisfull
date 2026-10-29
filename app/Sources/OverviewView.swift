@@ -147,6 +147,12 @@ private struct AttentionSection: View {
                     }
                 }
                 #if !APP_STORE
+                if let b = monitor.timeMachine?.backlog {
+                    AttentionRow(symbol: "externaldrive.badge.exclamationmark", color: .orange,
+                                 title: "Time Machine keeps failing", text: TimeMachineText.backlog(b)) {
+                        Button("Time Machine…") { Navigator.shared.pane = .timeMachine }
+                    }
+                }
                 ForEach(monitor.undone) { t in
                     AttentionRow(symbol: "arrow.uturn.backward", color: .purple, title: "Undone since: \(t.title)",
                                  text: "Something changed the setting back, probably an update.") {

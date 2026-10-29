@@ -9,6 +9,7 @@ mod owners_cmd;
 mod space_cmd;
 mod status_cmd;
 mod tidy_cmd;
+mod timemachine_cmd;
 mod tweaks_cmd;
 mod watch_cmd;
 mod writers_cmd;
@@ -149,6 +150,21 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
     },
+    /// Time Machine: what goes into the backups, what the local snapshots
+    /// hold and why, and the build folders still backed up
+    Timemachine {
+        #[command(subcommand)]
+        action: Option<TimeMachineAction>,
+        /// The backups and the snapshots only, without the folders (fast)
+        #[arg(long)]
+        quick: bool,
+        /// Print the result as JSON
+        #[arg(long, global = true)]
+        json: bool,
+        /// History database (for what changed since the last backup)
+        #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
+        db: PathBuf,
+    },
     /// What raises an alert: how little free space, how soon full, how much a
     /// folder grows or a process writes; and which of them notify
     Alerts {
@@ -248,7 +264,7 @@ enum TweakAction {
 
 #[derive(Subcommand)]
 enum TidyAction {
-    /// Turn a tidy-up on: the watcher does it once a day
+    /// Turn a tidy-up on: the watcher does it once a day (`backups` every 6 hours)
     On { id: String },
     /// Turn a tidy-up off
     Off { id: String },
@@ -259,6 +275,22 @@ enum TidyAction {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TimeMachineAction {
+    /// Keep folders a build or an install makes again out of the backups
+    Exclude {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Let them back into the backups
+    Include {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Start a backup now
+    BackUp,
 }
 
 #[derive(Subcommand)]
@@ -356,6 +388,21 @@ fn main() -> Result<()> {
             Some(TidyAction::On { id }) => tidy_cmd::set(&db, &id, true, json)?,
             Some(TidyAction::Off { id }) => tidy_cmd::set(&db, &id, false, json)?,
             Some(TidyAction::Run { ids, dry_run }) => tidy_cmd::run(&db, &ids, dry_run, json)?,
+        },
+        Cmd::Timemachine {
+            action,
+            quick,
+            json,
+            db,
+        } => match action {
+            None => timemachine_cmd::show(&db, quick, json)?,
+            Some(TimeMachineAction::Exclude { paths }) => {
+                timemachine_cmd::set(&db, &paths, true, json)?
+            }
+            Some(TimeMachineAction::Include { paths }) => {
+                timemachine_cmd::set(&db, &paths, false, json)?
+            }
+            Some(TimeMachineAction::BackUp) => timemachine_cmd::back_up(json)?,
         },
         Cmd::Alerts {
             action,

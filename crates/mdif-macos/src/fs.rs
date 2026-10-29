@@ -227,9 +227,87 @@ pub fn available_for_important_usage(path: &Path) -> io::Result<u64> {
     })
 }
 
+/// Keeps `path` out of Time Machine's backups, or lets it back in, as
+/// `tmutil addexclusion` does without `-p`: a mark on the item itself
+/// (`NSURLIsExcludedFromBackupKey`), which goes where it's moved, and goes
+/// with it when it's deleted. No administrator needed for your own files.
+pub fn set_excluded_from_backup(path: &Path, excluded: bool) -> io::Result<()> {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::{NSNumber, NSString, NSURL, NSURLIsExcludedFromBackupKey};
+
+    let text = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a UTF-8 path"))?;
+    autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        let value = NSNumber::new_bool(excluded);
+        // SAFETY: the key is a constant Foundation exports, and its value
+        // is the NSNumber it documents.
+        let key = unsafe { NSURLIsExcludedFromBackupKey };
+        unsafe { url.setResourceValue_forKey_error(Some(&value), key) }
+            .map_err(|e| io::Error::other(e.localizedDescription().to_string()))
+    })
+}
+
+/// Whether `path` itself carries that mark. Time Machine also leaves out
+/// what its settings list and macOS's own exclusions (caches, the Trash):
+/// `tmutil isexcluded` says all of it.
+pub fn excluded_from_backup(path: &Path) -> io::Result<bool> {
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSNumber, NSString, NSURL, NSURLIsExcludedFromBackupKey};
+
+    let text = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a UTF-8 path"))?;
+    autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        let mut value: Option<Retained<AnyObject>> = None;
+        // SAFETY: as above; the value is checked to be an NSNumber.
+        let key = unsafe { NSURLIsExcludedFromBackupKey };
+        unsafe { url.getResourceValue_forKey_error(&mut value, key) }
+            .map_err(|e| io::Error::other(e.localizedDescription().to_string()))?;
+        Ok(value
+            .and_then(|v| v.downcast::<NSNumber>().ok())
+            .is_some_and(|n| n.boolValue()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_kept_out_of_backups_says_so_and_comes_back_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("target");
+        std::fs::create_dir(&d).unwrap();
+        assert!(!excluded_from_backup(&d).unwrap());
+        set_excluded_from_backup(&d, true).unwrap();
+        assert!(excluded_from_backup(&d).unwrap());
+        // The mark Cargo puts on its target folders, which tmutil reads.
+        let names = xattr_names(&d);
+        assert!(
+            names
+                .iter()
+                .any(|n| n.ends_with("com_apple_backup_excludeItem")),
+            "{names:?}"
+        );
+        set_excluded_from_backup(&d, false).unwrap();
+        assert!(!excluded_from_backup(&d).unwrap());
+    }
+
+    fn xattr_names(p: &Path) -> Vec<String> {
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { libc::listxattr(c.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        assert!(n >= 0);
+        buf[..n as usize]
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect()
+    }
 
     #[test]
     fn a_folder_is_found_by_number_after_it_moves_and_not_once_deleted() {
