@@ -14,8 +14,9 @@ struct WelcomeView: View {
     @State private var notificationsAsked = false
     /// Turned off in System Settings: asking again shows nothing.
     @State private var notificationsDenied = false
-    /// Opening at login is asked, not assumed (App Review 2.4.5).
-    @State private var openAtLogin = true
+    /// Lite opens at login only once the switch is turned on: a switch that
+    /// starts on isn't consent to App Review (2.4.5(iii), rejected 0.1.2).
+    @State private var openAtLogin = !Edition.appStore
 
     init(monitor: Monitor) {
         self.monitor = monitor
