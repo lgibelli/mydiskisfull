@@ -135,7 +135,29 @@ final class Monitor: ObservableObject {
         }
         lastRefresh = Date()
         watcher.refresh()
+        #if !APP_STORE
+        Task { await updateKnowledge() }
+        #endif
     }
+
+    #if !APP_STORE
+    /// Once a day, a newer list of what's known about folders, unless
+    /// Settings turned that off. It goes by itself: what's named and said
+    /// from it shows when the disk is measured next.
+    private func updateKnowledge() async {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: "knowledgeUpdates") else { return }
+        if let last = d.object(forKey: "knowledgeChecked") as? Date,
+           Date().timeIntervalSince(last) < 86_400 { return }
+        d.set(Date(), forKey: "knowledgeChecked")
+        do {
+            let u = try await Core.json(KnowledgeUpdate.self, ["knowledge", "update"], timeout: 60)
+            if u.newer { log.notice("knowledge: version \(u.version), \(u.folders) folders") }
+        } catch {
+            log.info("knowledge: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+    #endif
 
     /// Everything read again now, the whole-disk measure too: Refresh (⌘R).
     func refreshAll() {
@@ -649,7 +671,7 @@ final class AppSettings {
     private let d = UserDefaults.standard
 
     init() {
-        d.register(defaults: ["notificationsEnabled": true])
+        d.register(defaults: ["notificationsEnabled": true, "knowledgeUpdates": true, "askAI": true])
     }
 
     var notificationsEnabled: Bool {

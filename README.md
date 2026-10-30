@@ -60,7 +60,12 @@ Download **MyDiskIsFull.dmg** from the
 MyDiskIsFull into Applications. It needs macOS 14 or later, on Apple silicon or Intel, and it's
 signed and notarized. It updates itself with [Sparkle](https://sparkle-project.org): once a day
 it reads the latest release's feed from GitHub (nothing is sent), and an update installs only if
-it carries the project's signature. Settings turns the check off.
+it carries the project's signature. Settings turns the check off. Once a day it also downloads
+the newest list of what's known about folders (what one is, why it grows, what helps) from
+salamacchine.it, signed the same way; nothing about your Mac is sent, and Settings turns it off.
+Where the list says nothing of a folder you can ask AI: it shows what would be sent (the folder's
+name, never one of your own folders nor what's in it, its size and the macOS version) and sends
+it only when you say so, to MyDiskIsFull's server, which asks Claude ([worker/](worker)).
 
 The command line is inside the app; to use it from a terminal:
 
@@ -173,6 +178,9 @@ cargo build --release
 ./target/release/mdif timemachine      # what goes into the backups, what the snapshots hold
 ./target/release/mdif timemachine exclude <folder>   # keep a build folder or a cache out of the backups
 ./target/release/mdif docker           # what docker system prune would remove, item by item
+./target/release/mdif knowledge about <folder>   # what it is, why it grows, what helps
+./target/release/mdif knowledge missing          # big or growing folders nothing explains yet
+./target/release/mdif knowledge ask <folder> --dry-run   # what asking AI about it would send
 ./target/release/mdif agent status
 ```
 
@@ -317,7 +325,9 @@ with `--upload` it sends it there (see [docs/RELEASING.md](docs/RELEASING.md)).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Ideas and bug reports are welcome in the issues,
-especially "my disk filled up and nothing explained why" stories.
+especially "my disk filled up and nothing explained why" stories. What a folder is, why it grows
+and what helps is a list, [folders.json](crates/mdif-core/knowledge/folders.json): a folder you
+know well is a welcome pull request, and it reaches installed copies without a release.
 
 ## License
 

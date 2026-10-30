@@ -10,6 +10,9 @@
 //! - [`clean`]: the clean-ups it does itself when asked, checked again first;
 //!   [`tidy`]: the ones the watcher does once a day, when turned on.
 //! - [`keep`]: what you keep, which nothing suggests deleting.
+//! - [`knowledge`]: what's known about folders (what one is, why it grows,
+//!   what helps), built in and updated as signed data; [`ask`]: asking AI
+//!   about one nothing's known about, when someone asks.
 //! - [`space`]: where the space goes, sorted into kinds, and what of it is
 //!   waste.
 //! - [`worktrees`]: agent worktrees whose work is merged, with nothing left
@@ -25,12 +28,14 @@
 
 pub mod alerts;
 pub mod apfs;
+pub mod ask;
 pub mod clean;
 pub mod docker;
 pub mod forecast;
 pub mod handlers;
 pub mod incidents;
 pub mod keep;
+pub mod knowledge;
 pub mod map;
 pub mod os_update;
 pub mod owners;

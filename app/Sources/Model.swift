@@ -661,6 +661,11 @@ struct SpaceReport: Decodable {
         let action: CleanAction?
         /// What an app keeps in it, and where to make it smaller.
         let about: About?
+        /// What's known about it: what's in it, why it grows, what helps.
+        let known: Known?
+        /// Nothing in particular is said about it: its name as it may be
+        /// sent to ask (never one of your own folders).
+        let unexplained: String?
 
         var id: String { path }
         func has(_ flag: String) -> Bool { flags.contains(flag) }
@@ -786,6 +791,55 @@ struct AlertSettings: Decodable {
     let notifyChurn: Bool
 }
 
+// MARK: - mdif knowledge
+
+/// What's known about a folder, from the list `mdif` has (built in, or a
+/// newer one downloaded): what's in it, why it grows, what helps, and where
+/// that's said. See mdif_core::knowledge.
+struct Known: Decodable {
+    let what: String?
+    let grows: String?
+    let helps: String?
+    let source: String?
+    /// The AI model that said it, when it's an answer asked from this Mac
+    /// and not the list's: not checked by anyone.
+    let ai: String?
+}
+
+/// What `mdif knowledge update` found.
+struct KnowledgeUpdate: Decodable {
+    let version: Int64
+    /// Whether it's a newer list than before.
+    let newer: Bool
+    let folders: Int
+}
+
+/// What `mdif knowledge ask <folder> --dry-run` would send, all of it.
+struct AskQuestion: Decodable {
+    let name: String
+    /// Rounded to two digits.
+    let bytes: Int64?
+    let macos: String
+    let url: String
+}
+
+/// What the AI said of a folder (`mdif knowledge ask <folder>`); `known`
+/// false when it couldn't say.
+struct AskAnswer: Decodable {
+    let name: String
+    let known: Bool
+    let what: String?
+    let grows: String?
+    let helps: String?
+    /// The model that wrote it.
+    let by: String
+    /// The server had it already, from someone else's question.
+    let cached: Bool
+    let asked: Int64
+
+    var said: Known { Known(what: what, grows: grows, helps: helps, source: nil, ai: by) }
+}
+
 // MARK: - mdif docker --json
 
 /// What Docker can remove: what `docker system prune` would, item by item,
@@ -894,6 +948,11 @@ struct TimeMachineReport: Decodable {
 
     struct Change: Decodable, Identifiable {
         let path: String
+        /// What it's called, when that's known ("Photo analysis (macOS)").
+        let name: String?
+        let known: Known?
+        /// Nothing is said about it: its name as it may be sent to ask.
+        let unexplained: String?
         /// Grew (into the next backup) or shrank (held by the snapshots).
         let bytes: Int64
         let backedUp: Bool?

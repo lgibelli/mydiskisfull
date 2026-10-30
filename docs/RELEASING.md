@@ -99,3 +99,43 @@ it once it's approved is the author's call, like publishing a GitHub release.
 - Installed copies see the update within a day; "Check for Updates…" sees it at once.
 - `https://github.com/lgibelli/mydiskisfull/releases/latest/download/MyDiskIsFull.dmg` always
   downloads the latest, for links that shouldn't change.
+
+## What's known about folders
+
+`crates/mdif-core/knowledge/folders.json` is the list of what folders are called, why they grow
+and what helps. Each build carries the one in the repository; installed copies of the full
+edition also download a newer one once a day (`mdif knowledge update`) and take it only when it's
+signed with the updates' key and its `version` is higher than theirs. It's text only: it changes
+what's said about a folder, never what's deleted (that's in the code), so it can go out between
+releases.
+
+1. Edit the list and raise its `version`. `cargo test -p mdif-core knowledge` checks it.
+2. `app/knowledge.sh` checks it, signs it with the Sparkle key and copies `folders-1.json` and
+   `folders-1.json.sig` into `KNOWLEDGE_DIR` (release.env), the website's folder.
+3. Commit and push the website: it's live at
+   `https://www.salamacchine.it/apps/mydiskisfull/folders-1.json` once it's deployed.
+
+A change to the format that older copies can't read goes out as `folders-2.json`, beside the old
+one.
+
+## Ask AI's server
+
+`worker/` is the Cloudflare Worker behind "Ask AI…" (`mdif knowledge ask`), at
+`https://ask.salamacchine.it/mydiskisfull/v1/folder`. `cd worker && npm ci && npm run check &&
+npm test` checks it locally, with a stand-in for Anthropic's API (nothing is asked for real).
+
+The first time, with the account that has salamacchine.it:
+
+1. `npx wrangler secret put ANTHROPIC_API_KEY` (a key of its own, with a spend limit in the
+   Anthropic Console as well as `DAILY_ASKS`).
+2. `npx wrangler deploy`: it creates the D1 database and the `ask.salamacchine.it` domain. If it
+   writes the database's id into `wrangler.jsonc`, commit it.
+3. `npx wrangler d1 migrations apply ANSWERS --remote`.
+
+After that, `npx wrangler deploy` again for a change, and `npx wrangler d1 migrations apply
+ANSWERS --remote` for a new migration. `DAILY_ASKS` in `wrangler.jsonc` is how many questions
+Claude answers in a day, for everyone; past it the app says to try again tomorrow.
+
+Now and then, `worker/answers.sh` lists what Claude said, most asked first, as entries for
+`folders.json`: check each, put the good ones in the list and publish it as above. A folder the
+list knows isn't asked about any more.

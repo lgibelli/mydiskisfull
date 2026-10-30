@@ -144,10 +144,30 @@ jobs:
           if strings "$store" | grep -q "once you empty the Trash"; then exit 1; fi
           strings "$full" | grep -q "Asking Docker what it can remove"
           if strings "$store" | grep -q "Asking Docker what it can remove"; then exit 1; fi
+          # Asking AI: the store edition has no network entitlement for it.
+          strings "$full" | grep -q "which asks Claude, Anthropic's AI"
+          if strings "$store" | grep -q "which asks Claude, Anthropic's AI"; then exit 1; fi
           strings "$store" | grep -q "Get the Free Full Version"
           # The App Store updates it: no Sparkle, no feed.
           test ! -e "$lite/Contents/Frameworks/Sparkle.framework"
           if plutil -extract SUFeedURL raw "$lite/Contents/Info.plist" 2>/dev/null; then exit 1; fi
+
+  worker:
+    name: Ask AI's Worker
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      # Types, then the Worker under wrangler dev with a stand-in for
+      # Anthropic's API: nothing is asked for real.
+      - run: npm run check
+      - run: npm test
 
   intel:
     name: build (Intel)

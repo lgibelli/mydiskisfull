@@ -375,6 +375,13 @@ pub struct Item {
     /// The biggest folder in it that an app's handler knows
     /// ([`handlers`](crate::handlers)): what it is and how to make it smaller.
     pub about: Option<About>,
+    /// What's known about it ([`knowledge`](crate::knowledge)): what's in it,
+    /// why it grows, what helps.
+    pub known: Option<crate::knowledge::Known>,
+    /// Nothing in particular is said about it: its name as it may be sent to
+    /// ask ([`knowledge::generic`](crate::knowledge::generic)). Not for your
+    /// own folders, nor what a rule explains (build output, apps).
+    pub unexplained: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1299,6 +1306,8 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
             detail: None,
             action: None,
             about: None,
+            known: None,
+            unexplained: None,
         });
     }
 
@@ -1460,6 +1469,8 @@ fn unseen(bytes: u64, m: &Measured, snapshots: &[String]) -> Item {
         detail: Some(detail),
         action,
         about: None,
+        known: None,
+        unexplained: None,
     }
 }
 
@@ -1609,7 +1620,7 @@ fn describe(
             note = Some("A virtual machine's disk: it grows as the guest writes".into());
         }
         What::Trash => note = Some("Freed when you empty the Trash".into()),
-        What::Plain => note = plain_note(&s.path, &m.home),
+        What::Plain => note = crate::knowledge::note(&s.path, &m.home),
     }
     let cold_share = if p.allocated > 0 {
         p.cold.max(0) as f64 / p.allocated as f64
@@ -1628,6 +1639,20 @@ fn describe(
         note = Some(minecraft_note(&s.path, &m.home));
     }
     let about = about(m, &s.path, bytes);
+    let known = crate::knowledge::known(&s.path, &m.home);
+    // Said in particular: a folder's own note (the list's, a game's), its
+    // handler, the list's explanation; for a cache, the note on what all
+    // caches are doesn't count.
+    let unexplained = (matches!(s.what, What::Plain | What::Cache | What::DevCache)
+        && !matches!(s.kind, Kind::Files | Kind::Media)
+        && !(s.what == What::Plain && note.is_some())
+        && s.path != Path::new("/private/var/folders")
+        && about.is_none()
+        && known.is_none())
+    .then(|| crate::knowledge::generic(&s.path, &m.home))
+    .flatten();
+    // What the AI said of it, when asked from this Mac.
+    let known = known.or_else(|| unexplained.as_deref().and_then(crate::ask::answered));
     // What the handler says of the whole item, the box says: no note too.
     if about.as_ref().is_some_and(|a| Path::new(&a.path) == s.path) {
         note = None;
@@ -1666,6 +1691,8 @@ fn describe(
         detail: None,
         action: None,
         about,
+        known,
+        unexplained,
     }
 }
 
@@ -1753,54 +1780,6 @@ fn artifact_note(path: &Path) -> String {
         "build" if marker("pubspec.yaml") => "Flutter build output".into(),
         _ => "Build output: the next build makes it again".into(),
     }
-}
-
-/// An app's container or group container (`UBF8T346G9.Office`,
-/// `group.com.apple.VoiceMemos.shared`, `com.microsoft.teams2`) by the app's
-/// name, as far as it's known; otherwise without the team ID and `group.`.
-fn container_name(c: &str) -> String {
-    const KNOWN: &[(&str, &str)] = &[
-        ("UBF8T346G9.Office", "Microsoft Office (shared)"),
-        ("UBF8T346G9.OfficeOsfWebHost", "Office add-ins"),
-        ("UBF8T346G9.ms", "Microsoft (shared)"),
-        ("UBF8T346G9.com.microsoft.teams", "Microsoft Teams"),
-        ("com.microsoft.teams2", "Microsoft Teams"),
-        ("com.microsoft.Outlook", "Outlook"),
-        ("com.microsoft.Word", "Word"),
-        ("com.microsoft.Excel", "Excel"),
-        ("com.microsoft.Powerpoint", "PowerPoint"),
-        ("group.com.apple.VoiceMemos.shared", "Voice Memos"),
-        ("group.com.apple.notes", "Notes"),
-        ("group.com.apple.calendar", "Calendar"),
-        ("com.apple.Safari", "Safari"),
-        ("com.apple.mediaanalysisd", "Photo analysis (macOS)"),
-        ("com.apple.photoanalysisd", "Photo analysis (macOS)"),
-        ("com.apple.Notes", "Notes"),
-        ("com.apple.news", "News"),
-        ("com.apple.podcasts", "Podcasts"),
-        ("com.apple.Maps", "Maps"),
-        ("com.apple.FinalCut", "Final Cut Pro"),
-        ("com.apple.iMovieApp", "iMovie"),
-        ("com.spotify.client", "Spotify"),
-        ("ru.keepcoder.Telegram", "Telegram"),
-        ("net.whatsapp.WhatsApp", "WhatsApp"),
-    ];
-    // A team ID: ten capitals and digits.
-    let team = |s: &str| {
-        s.len() == 10
-            && s.bytes()
-                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-    };
-    let bare = match c.split_once('.') {
-        Some((t, rest)) if team(t) => rest,
-        _ => c,
-    };
-    let bare = bare.strip_prefix("group.").unwrap_or(bare);
-    KNOWN
-        .iter()
-        .find(|(k, _)| *k == c || *k == bare)
-        .map(|(_, n)| (*n).to_string())
-        .unwrap_or_else(|| bare.to_string())
 }
 
 impl Measured {
@@ -1974,41 +1953,6 @@ fn mostly(m: &Measured, item: &Path, bytes: u64, forgotten: bool) -> Option<(Str
     Some((path.join(" › "), size))
 }
 
-/// A note for a folder known by its place.
-fn plain_note(path: &Path, home: &Path) -> Option<String> {
-    let note = match path.strip_prefix(home).ok().and_then(|r| r.to_str()) {
-        Some("Library/Containers/com.docker.docker") => {
-            "Docker's disk image: `docker system prune` frees what no container uses"
-        }
-        Some("Library/Group Containers/UBF8T346G9.OneDriveSyncClientSuite") => {
-            "OneDrive's copy of what it keeps on this Mac"
-        }
-        Some("Library/Mobile Documents") => {
-            "Downloaded iCloud files: Remove Download keeps them in iCloud only"
-        }
-        Some("Library/Metadata") => "Spotlight's index of what's in your apps",
-        Some("Library/Developer/CoreSimulator/Devices") => {
-            "Simulators' apps and data: `xcrun simctl delete unavailable` removes those of \
-             runtimes that are gone"
-        }
-        Some(rel) if rel.starts_with("Library/CloudStorage/") => {
-            "Downloaded cloud files: Free Up Space keeps them in the cloud only"
-        }
-        _ => match path.to_str() {
-            Some("/System/Library/AssetsV2") => "Voices, dictionaries and models macOS downloads",
-            Some("/opt/homebrew") => {
-                "What Homebrew installed. It removes old versions by itself every 30 days, so \
-                 this is what's installed now: `brew leaves` lists what you asked for, and \
-                 `brew uninstall` removes one"
-            }
-            Some("/.Spotlight-V100") => "Spotlight's index",
-            Some("/private/var/vm") => "Where the Mac keeps memory while it sleeps",
-            _ => return None,
-        },
-    };
-    Some(note.to_string())
-}
-
 /// What an item is called.
 fn name(s: &Sorted, m: &Measured) -> String {
     let last = s
@@ -2072,7 +2016,7 @@ fn name(s: &Sorted, m: &Measured) -> String {
                         "Containers" | "Group Containers" | "Application Support"
                     )
                 {
-                    return container_name(&parts[2]);
+                    return crate::knowledge::app_name(&parts[2]);
                 }
             }
             if s.path == Path::new("/private/var/folders") {
@@ -2081,52 +2025,18 @@ fn name(s: &Sorted, m: &Measured) -> String {
         }
         _ => {}
     }
+    // By its place first: Docker's container is its disk image.
+    if let Some(known) = crate::knowledge::name(&s.path, &m.home) {
+        return known;
+    }
     if let Some(rel) = rel
         && let ["Library", "Containers" | "Group Containers", c] = rel
             .iter()
             .map(|n| n.to_str().unwrap_or(""))
             .collect::<Vec<_>>()
             .as_slice()
-        && !matches!(
-            *c,
-            "UBF8T346G9.OneDriveSyncClientSuite" | "com.docker.docker" | "group.com.docker"
-        )
-        && *c != "com.apple.mail"
     {
-        return container_name(c);
-    }
-    let known = match rel.and_then(|r| r.to_str()) {
-        Some("Library/Mobile Documents") => "iCloud Drive",
-        Some("Library/Group Containers/UBF8T346G9.OneDriveSyncClientSuite") => "OneDrive",
-        Some("Library/Containers/com.docker.docker") => "Docker",
-        Some("Library/Group Containers/group.com.docker") => "Docker (shared)",
-        Some("Library/Containers/com.apple.mail") => "Mail downloads",
-        Some("Library/Android") => "Android SDK",
-        Some(".android") => "Android emulators",
-        Some(".gradle") => "Gradle",
-        Some(".cargo") => "Cargo",
-        Some(".rustup") => "Rust toolchains",
-        Some("fvm") => "Flutter versions",
-        Some(".npm") => "npm",
-        Some(".pnpm-store") => "pnpm",
-        Some(".pub-cache") => "Dart packages",
-        Some("Library/Developer/CoreSimulator/Devices") => "Simulator devices",
-        Some("Library/Developer/Xcode/DerivedData") => "Xcode DerivedData",
-        Some("Library/Developer/Xcode/Archives") => "Xcode archives",
-        Some("Library/Metadata") => "App search index",
-        _ => match s.path.to_str() {
-            Some("/System/Library/AssetsV2") => "System downloads",
-            Some("/.Spotlight-V100") => "Spotlight index",
-            Some("/.DocumentRevisions-V100") => "Document versions",
-            Some("/.fseventsd") => "File-system events",
-            Some("/opt/homebrew") => "Homebrew",
-            Some("/private/var/vm") => "Sleep image",
-            Some("/Library/Developer/CommandLineTools") => "Command Line Tools",
-            _ => "",
-        },
-    };
-    if !known.is_empty() {
-        return known.into();
+        return crate::knowledge::app_name(c);
     }
     // A system folder by its path: `/private/var/db`, `/usr/local`.
     if rel.is_none() && s.what == What::Plain && s.kind != Kind::Files {
@@ -3447,6 +3357,14 @@ mod tests {
                         open: crate::handlers::HANDLERS.iter().find_map(|h| h.open),
                         action: None,
                     }),
+                    known: Some(crate::knowledge::Known {
+                        what: Some(String::new()),
+                        grows: Some(String::new()),
+                        helps: Some(String::new()),
+                        source: Some(String::new()),
+                        ai: Some(String::new()),
+                    }),
+                    unexplained: None,
                 }],
             }],
             old_files: vec![OldFile {
@@ -3485,6 +3403,7 @@ mod tests {
         let real_item = &real_kind["items"][0];
         let mut actions = 0;
         let mut abouts = 0;
+        let mut knowns = 0;
         for k in fixture["kinds"].as_array().unwrap() {
             assert_eq!(keys(k), keys(real_kind));
             assert!(Kind::ALL.iter().any(|kind| kind.id() == k["id"]), "{k}");
@@ -3499,8 +3418,13 @@ mod tests {
                     assert_eq!(keys(&i["about"]["open"]), keys(&real_item["about"]["open"]));
                     abouts += 1;
                 }
+                if !i["known"].is_null() {
+                    assert_eq!(keys(&i["known"]), keys(&real_item["known"]));
+                    knowns += 1;
+                }
             }
         }
+        assert!(knowns > 0, "the fixture shows what's known about a folder");
         assert!(actions > 0, "the fixture shows an action");
         assert!(abouts > 0, "the fixture shows what an app keeps");
         let real_old = &real["old_files"][0];

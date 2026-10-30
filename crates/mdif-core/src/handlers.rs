@@ -283,7 +283,7 @@ pub fn find(rel: &Path) -> Option<&'static Handler> {
     HANDLERS.iter().find(|h| matches(h.path, rel))
 }
 
-fn matches(pattern: &str, rel: &Path) -> bool {
+pub(crate) fn matches(pattern: &str, rel: &Path) -> bool {
     let mut names = rel.iter();
     for p in pattern.split('/') {
         let Some(name) = names.next().and_then(|n| n.to_str()) else {

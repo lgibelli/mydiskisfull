@@ -272,11 +272,14 @@ private struct ChangesSection: View {
     var body: some View {
         Section {
             ForEach(r.changes) { c in
+                let name = c.name ?? TimeMachineText.name(c.path)
                 HStack(spacing: 10) {
                     FileIcon(path: c.path)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(TimeMachineText.name(c.path))
-                        Text("\(TimeMachineText.place(c.path)) · \(state(c))")
+                        Text(name)
+                        // Named from what's known: the folder's own name stays in sight.
+                        let place = c.name == nil ? TimeMachineText.place(c.path) : Format.path(c.path)
+                        Text("\(place) · \(state(c))")
                             .font(.subheadline).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
@@ -284,6 +287,14 @@ private struct ChangesSection: View {
                     Text((c.bytes >= 0 ? "+" : "−") + Format.bytes(abs(c.bytes)))
                         .monospacedDigit()
                         .foregroundStyle(c.bytes >= 0 ? Color.primary : Color.secondary)
+                    if let known = c.known {
+                        KnownButton(title: name, known: known)
+                    } else if c.unexplained != nil {
+                        #if !APP_STORE
+                        // What goes into a backup isn't the folder's size.
+                        AskButton(title: name, path: c.path, bytes: nil)
+                        #endif
+                    }
                     PathMenu(path: c.path)
                 }
                 .help(Format.path(c.path))

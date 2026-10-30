@@ -341,6 +341,14 @@ pub fn snapshots(names: &[String], reference: Option<i64>) -> Vec<Snapshot> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Change {
     pub path: String,
+    /// What it's called, when that's known ([`knowledge`](crate::knowledge)):
+    /// "Photo analysis (macOS)" for `com.apple.mediaanalysisd`.
+    pub name: Option<String>,
+    /// What's in it, why it grows and what helps, when that's known.
+    pub known: Option<crate::knowledge::Known>,
+    /// Nothing is said about it: its name as it may be sent to ask
+    /// ([`knowledge::generic`](crate::knowledge::generic)).
+    pub unexplained: Option<String>,
     /// Grew (goes into the next backup) or shrank (what went stays in the
     /// snapshots until then).
     pub bytes: i64,
@@ -639,7 +647,19 @@ pub fn report(
                 let p = Path::new(path);
                 *b < 0 || !privacy::may_open(p) || p.symlink_metadata().is_ok()
             })
-            .map(|(path, bytes)| Change {
+            .map(|(path, bytes)| {
+                let p = Path::new(&path);
+                let known = crate::knowledge::known(p, home);
+                let unexplained = (known.is_none() && crate::knowledge::note(p, home).is_none())
+                    .then(|| crate::knowledge::generic(p, home))
+                    .flatten();
+                let known = known.or_else(|| unexplained.as_deref().and_then(crate::ask::answered));
+                (path, bytes, known, unexplained)
+            })
+            .map(|(path, bytes, known, unexplained)| Change {
+                name: crate::knowledge::called(Path::new(&path), home),
+                known,
+                unexplained,
                 path,
                 bytes,
                 backed_up: None,
@@ -854,6 +874,9 @@ mod tests {
             ]),
             changes: vec![Change {
                 path: String::new(),
+                name: None,
+                known: None,
+                unexplained: None,
                 bytes: -1,
                 backed_up: Some(true),
                 kept_out: 0,

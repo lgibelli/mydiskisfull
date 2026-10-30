@@ -60,19 +60,49 @@
   },
   "changes": [
     {
+      "path": "/Users/me/Library/Containers/com.apple.mediaanalysisd",
+      "name": "Photo analysis (macOS)",
+      "known": {
+        "what": "What macOS works out from the photos and videos in your library: what's in them, for search, Visual Look Up and the text in images.",
+        "grows": "It analyses each new photo and video, and may go through the whole library again after a macOS update; what it keeps grows while it works.",
+        "helps": "Leave it to macOS: deleted, it would analyse the whole library again, which takes hours. It does most of its work while the Mac is plugged in and idle.",
+        "source": null,
+        "ai": null
+      },
+      "unexplained": null,
+      "bytes": 5700000000,
+      "backed_up": true,
+      "kept_out": 0
+    },
+    {
       "path": "/Users/me/devel/app/.claude/worktrees/agent-1",
+      "name": null,
+      "known": null,
+      "unexplained": null,
       "bytes": 1300000000,
       "backed_up": true,
       "kept_out": 6
     },
     {
       "path": "/Users/me/Library/Caches/ms-playwright",
+      "name": null,
+      "known": {
+        "what": "Playwright's browsers: the builds of Chromium, Firefox and WebKit its tests run in.",
+        "grows": "Each Playwright version downloads its own builds, and old ones stay.",
+        "helps": "Playwright removes the builds no installed version uses when it installs new ones.",
+        "source": null,
+        "ai": "claude-opus-5-5"
+      },
+      "unexplained": "~/Library/Caches/ms-playwright",
       "bytes": 560000000,
       "backed_up": false,
       "kept_out": 0
     },
     {
       "path": "/Users/me/Desktop/Exports",
+      "name": null,
+      "known": null,
+      "unexplained": null,
       "bytes": -2100000000,
       "backed_up": null,
       "kept_out": 0

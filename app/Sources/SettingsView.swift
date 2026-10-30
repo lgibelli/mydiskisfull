@@ -72,6 +72,8 @@ struct SettingsView: View {
     @State private var inDock = Dock.always
     @State private var notify = true
     @State private var checkUpdates = true
+    @AppStorage("knowledgeUpdates") private var knowledgeUpdates = true
+    @AppStorage("askAI") private var askAI = true
     @State private var loginError: String?
 
     init(monitor: Monitor, page: SettingsPage? = nil) {
@@ -404,6 +406,16 @@ struct SettingsView: View {
                 }
                 LabeledContent("Check now") {
                     Button("Check for Updates…") { monitor.updates.checkForUpdates() }
+                }
+            }
+            Section("What Folders Are") {
+                Toggle(isOn: $knowledgeUpdates) {
+                    Text("Download what's known about folders")
+                    Text("Once a day, from salamacchine.it: what folders are, why they grow and what helps. The list is signed like the updates, and nothing about your Mac is sent.")
+                }
+                Toggle(isOn: $askAI) {
+                    Text("Ask AI about folders nothing's known about")
+                    Text("Shows Ask AI… where the list says nothing about a folder. Before anything is sent it shows what would be: the folder's name, its size and the macOS version, never what's in it. Claude, Anthropic's AI, answers through salamacchine.it.")
                 }
             }
             #endif

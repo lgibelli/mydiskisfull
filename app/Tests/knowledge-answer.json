@@ -1,0 +1,10 @@
+{
+  "name": "~/.cache/codex-runtimes",
+  "known": true,
+  "what": "Codex's runtimes: the Node and Python versions the Codex app downloaded to run its tools.",
+  "grows": "Each new runtime version adds to it, and old ones may stay.",
+  "helps": "Codex downloads again what it needs, so deleting it loses nothing but the time to download.",
+  "by": "claude-opus-5-5",
+  "cached": false,
+  "asked": 1793345000
+}

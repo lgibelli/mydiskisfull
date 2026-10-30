@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Answers "what is this folder?" for MyDiskIsFull's Ask AI: one folder name
+  // in, what Claude says of it out, kept by name so it's asked only once.
+  "name": "mydiskisfull-ask",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [{ "pattern": "ask.salamacchine.it", "custom_domain": true }],
+  "d1_databases": [
+    // No database_id: `wrangler deploy` creates the database the first time.
+    { "binding": "ANSWERS", "database_name": "mydiskisfull-answers", "migrations_dir": "migrations" }
+  ],
+  "ratelimits": [
+    // Questions Claude answers, per Mac (by a hash of its IP address).
+    { "name": "ASKS", "namespace_id": "20261030", "simple": { "limit": 5, "period": 60 } }
+  ],
+  "vars": {
+    // Questions Claude may answer in a day, for everyone: the spending cap.
+    "DAILY_ASKS": "300",
+    // Empty: Anthropic's API. The tests point it at a stand-in.
+    "ANTHROPIC_BASE_URL": ""
+  },
+  "secrets": { "required": ["ANTHROPIC_API_KEY"] },
+  // Our own log lines only, which never carry an IP address: invocation logs
+  // and traces would record each request's headers and client.
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
+}

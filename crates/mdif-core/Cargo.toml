@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
 libc.workspace = true
 plist.workspace = true
 rayon.workspace = true

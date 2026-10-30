@@ -5,6 +5,7 @@ mod alerts_cmd;
 mod clean_cmd;
 mod docker_cmd;
 mod keep_cmd;
+mod knowledge_cmd;
 mod map_cmd;
 mod owners_cmd;
 mod space_cmd;
@@ -153,6 +154,15 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
     },
+    /// What's known about folders: what one is, why it grows, what helps.
+    /// A list is built in; `update` downloads a newer one when there is one
+    Knowledge {
+        #[command(subcommand)]
+        action: Option<KnowledgeAction>,
+        /// Print the result as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Docker: what `docker system prune` would remove, item by item, and
     /// the images no container uses (`-a`). `mdif clean <item>` removes one
     Docker {
@@ -288,6 +298,43 @@ enum TidyAction {
 }
 
 #[derive(Subcommand)]
+enum KnowledgeAction {
+    /// Download a newer list, if there is one (signed like the app's
+    /// updates; nothing about this Mac is sent)
+    Update,
+    /// What's said about these folders
+    About {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// This Mac's big or growing folders that nothing in particular is said
+    /// about (never your own folders)
+    Missing {
+        /// Only folders this big, or grown as much in a week, in MB
+        #[arg(long, default_value_t = 500)]
+        min_mb: u64,
+    },
+    /// Ask AI what a folder is, when nothing's known about it: only its
+    /// name (never your own folders, nothing in it), its size and the macOS
+    /// version are sent, to MyDiskIsFull's server, which asks Claude
+    Ask {
+        folder: PathBuf,
+        /// Its size, sent rounded to two digits
+        #[arg(long)]
+        bytes: Option<u64>,
+        /// Print what would be sent, and send nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Check a list, and its signature, before it's put online
+    Check {
+        file: PathBuf,
+        #[arg(long)]
+        sig: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TimeMachineAction {
     /// Keep folders a build, an install or their tool makes again out of the
     /// backups (a project or a tool's folder: those in it)
@@ -344,6 +391,8 @@ enum AgentAction {
 
 fn main() -> Result<()> {
     watch_cmd::mark_started();
+    mdif_core::knowledge::init(&knowledge_cmd::dir());
+    mdif_core::ask::init(&knowledge_cmd::dir());
     match Cli::parse().cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
         Cmd::Forecast {
@@ -399,6 +448,20 @@ fn main() -> Result<()> {
             Some(TidyAction::On { id }) => tidy_cmd::set(&db, &id, true, json)?,
             Some(TidyAction::Off { id }) => tidy_cmd::set(&db, &id, false, json)?,
             Some(TidyAction::Run { ids, dry_run }) => tidy_cmd::run(&db, &ids, dry_run, json)?,
+        },
+        Cmd::Knowledge { action, json } => match action {
+            None => knowledge_cmd::show(json)?,
+            Some(KnowledgeAction::Update) => knowledge_cmd::update(json)?,
+            Some(KnowledgeAction::About { paths }) => knowledge_cmd::about(&paths, json)?,
+            Some(KnowledgeAction::Missing { min_mb }) => knowledge_cmd::missing(min_mb, json)?,
+            Some(KnowledgeAction::Ask {
+                folder,
+                bytes,
+                dry_run,
+            }) => knowledge_cmd::ask(&folder, bytes, dry_run, json)?,
+            Some(KnowledgeAction::Check { file, sig }) => {
+                knowledge_cmd::check(&file, sig.as_deref())?
+            }
         },
         Cmd::Docker { json } => docker_cmd::show(json)?,
         Cmd::Timemachine {

@@ -52,7 +52,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Applications/SimCity.app",
@@ -67,7 +69,9 @@
           "note": "Not opened since March",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Applications/Xcode.app",
@@ -80,7 +84,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Applications/iMovie.app",
@@ -95,7 +101,9 @@
           "note": "Never opened",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Applications/Microsoft Word.app",
@@ -108,7 +116,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -130,7 +140,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Desktop",
@@ -145,7 +157,9 @@
           "note": "Mostly unchanged since 2023",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Downloads",
@@ -158,7 +172,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/.Trash",
@@ -171,7 +187,9 @@
           "note": "Freed when you empty the Trash",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/Shared",
@@ -184,7 +202,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -206,7 +226,9 @@
           "note": "`brew cleanup` removes old versions",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/.gradle",
@@ -219,7 +241,15 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": {
+            "what": "Gradle's caches: the dependencies and Gradle versions your projects' builds downloaded.",
+            "grows": "Each new dependency version, and each Gradle version a project's wrapper asks for, adds to it.",
+            "helps": "Gradle deletes what no build used for 30 days by itself.",
+            "source": null,
+            "ai": null
+          },
+          "unexplained": null
         },
         {
           "path": "/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime/3e800c38767f9f2c5fc86acdad7adf44565e051a.asset",
@@ -232,7 +262,9 @@
           "note": "Xcode → Settings → Components removes it; it downloads again when needed",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Developer/CoreSimulator/Devices",
@@ -245,7 +277,15 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": {
+            "what": null,
+            "grows": "Each simulator keeps the apps you ran in it and their data, and the simulators of runtimes you removed stay behind.",
+            "helps": null,
+            "source": null,
+            "ai": null
+          },
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Containers/com.docker.docker",
@@ -258,7 +298,15 @@
           "note": "Docker's disk image: `docker system prune` frees what no container uses",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": {
+            "what": "Docker Desktop's disk image: every image, container, volume and build cache is in this one file.",
+            "grows": "It grows as images are pulled or built and as containers write. What Docker deletes goes back to macOS a few seconds later.",
+            "helps": "Remove the images and containers you no longer use (`docker system prune` removes what nothing uses, never volumes); Docker Desktop's Settings → Resources sets how big the disk image may get.",
+            "source": null,
+            "ai": null
+          },
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Android",
@@ -271,7 +319,15 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": {
+            "what": "What Android Studio downloaded: SDK platforms, build tools and the emulators' system images.",
+            "grows": null,
+            "helps": "Android Studio's SDK Manager removes the platforms and system images you no longer build for.",
+            "source": null,
+            "ai": null
+          },
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Developer/Xcode/DerivedData",
@@ -286,7 +342,9 @@
           "note": "Xcode's build output: the next build makes it again",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -308,7 +366,9 @@
           "note": "macOS itself, read-only",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/System/Volumes/Preboot",
@@ -321,7 +381,9 @@
           "note": "What the Mac starts up from",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/System/Library/AssetsV2",
@@ -334,7 +396,9 @@
           "note": "Voices, dictionaries and models macOS downloads",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/System/Volumes/VM",
@@ -347,7 +411,9 @@
           "note": "Comes back after a restart",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/private/var/db",
@@ -360,7 +426,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Volumes/Recovery",
@@ -373,7 +441,9 @@
           "note": "macOS Recovery",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -405,7 +475,9 @@
             "confirm": "Delete ~/devel/app/src-tauri/target? 38.7 GB on disk. It's deleted, not moved to the Trash; the next build makes it again.",
             "done": null
           },
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/devel/app/src-tauri/target/debug/incremental",
@@ -428,7 +500,9 @@
             "confirm": "Delete the incremental caches in ~/devel/app/src-tauri/target/debug/incremental? 17.9 GB on disk. They're deleted, not moved to the Trash; only the next build of your own crates is slower.",
             "done": null
           },
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/devel/app/.claude/worktrees/fix/target",
@@ -443,7 +517,9 @@
           "note": "Rust build output",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/devel/web/node_modules",
@@ -459,7 +535,9 @@
           "note": "Packages npm installs again",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -481,7 +559,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Metadata",
@@ -494,7 +574,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Containers/com.apple.Safari",
@@ -507,7 +589,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Application Support/Signal",
@@ -522,7 +606,9 @@
           "note": "Mostly unchanged since 2025",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -546,7 +632,9 @@
           "note": "Downloaded cloud files: Free Up Space keeps them in the cloud only",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Group Containers/UBF8T346G9.OneDriveSyncClientSuite",
@@ -559,7 +647,9 @@
           "note": "OneDrive's copy of what it keeps on this Mac",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Mobile Documents",
@@ -572,7 +662,9 @@
           "note": "Downloaded iCloud files: Remove Download keeps them in iCloud only",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -596,7 +688,9 @@
           "note": "A virtual machine's disk: it grows as the guest writes",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -621,7 +715,9 @@
           "note": "Apps' temporary files and caches",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Caches/com.example.agent",
@@ -637,7 +733,9 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": "~/Library/Caches/com.example.agent"
         },
         {
           "path": "/Users/me/Library/Caches/Google",
@@ -653,7 +751,9 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": "~/Library/Caches/Google"
         },
         {
           "path": "/Users/me/Library/Application Support/Claude/Cache",
@@ -669,7 +769,9 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -700,7 +802,9 @@
             "confirm": "Delete 2 local Time Machine snapshots? Backups on your backup disk aren't touched, but what changed since the last backup loses its local copy: Time Machine can't restore it from this Mac any more. This can't be undone.",
             "done": null
           },
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -734,7 +838,9 @@
               "url": "x-apple.systempreferences:com.apple.settings.Storage"
             },
             "action": null
-          }
+          },
+          "known": null,
+          "unexplained": null
         },
         {
           "path": "/Users/me/Library/Mail",
@@ -747,7 +853,9 @@
           "note": null,
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     },
@@ -771,7 +879,9 @@
           "note": "Mostly unchanged since 2025",
           "detail": null,
           "action": null,
-          "about": null
+          "about": null,
+          "known": null,
+          "unexplained": null
         }
       ]
     }

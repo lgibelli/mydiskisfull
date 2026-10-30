@@ -1,0 +1,322 @@
+{
+  "version": 2,
+  "folders": [
+    {
+      "app": "com.apple.mediaanalysisd",
+      "name": "Photo analysis (macOS)",
+      "what": "What macOS works out from the photos and videos in your library: what's in them, for search, Visual Look Up and the text in images.",
+      "grows": "It analyses each new photo and video, and may go through the whole library again after a macOS update; what it keeps grows while it works.",
+      "helps": "Leave it to macOS: deleted, it would analyse the whole library again, which takes hours. It does most of its work while the Mac is plugged in and idle."
+    },
+    {
+      "app": "com.apple.photoanalysisd",
+      "name": "Photo analysis (macOS)",
+      "what": "What Photos works out about your library: the people, places and moments it groups into Memories and People & Pets.",
+      "grows": "It looks at each new photo and video, and may go through the whole library again after a macOS update.",
+      "helps": "Leave it to macOS: deleted, it would look through the whole library again. It does most of its work while the Mac is plugged in and idle."
+    },
+    { "app": "UBF8T346G9.Office", "name": "Microsoft Office (shared)" },
+    { "app": "UBF8T346G9.OfficeOsfWebHost", "name": "Office add-ins" },
+    { "app": "UBF8T346G9.ms", "name": "Microsoft (shared)" },
+    { "app": "UBF8T346G9.com.microsoft.teams", "name": "Microsoft Teams" },
+    { "app": "com.microsoft.teams2", "name": "Microsoft Teams" },
+    { "app": "com.microsoft.Outlook", "name": "Outlook" },
+    { "app": "com.microsoft.Word", "name": "Word" },
+    { "app": "com.microsoft.Excel", "name": "Excel" },
+    { "app": "com.microsoft.Powerpoint", "name": "PowerPoint" },
+    {
+      "app": "group.com.apple.VoiceMemos.shared",
+      "name": "Voice Memos",
+      "what": "Your Voice Memos recordings.",
+      "helps": "Recordings you delete stay in Recently Deleted for 30 days, unless Voice Memos' Settings clear them sooner."
+    },
+    { "app": "group.com.apple.notes", "name": "Notes" },
+    { "app": "group.com.apple.calendar", "name": "Calendar" },
+    {
+      "app": "com.apple.Safari",
+      "name": "Safari",
+      "what": "Safari's cache and what websites store in it: their data, databases and offline copies.",
+      "grows": "Websites store more as you visit them, and the cache keeps copies of their pages and media.",
+      "helps": "Safari → Settings → Privacy → Manage Website Data… removes what sites stored; with Settings → Advanced → Show features for web developers on, Develop → Empty Caches empties the cache."
+    },
+    { "app": "com.apple.Notes", "name": "Notes" },
+    { "app": "com.apple.news", "name": "News" },
+    { "app": "com.apple.podcasts", "name": "Podcasts" },
+    { "app": "com.apple.Maps", "name": "Maps" },
+    { "app": "com.apple.FinalCut", "name": "Final Cut Pro" },
+    { "app": "com.apple.iMovieApp", "name": "iMovie" },
+    { "app": "com.spotify.client", "name": "Spotify" },
+    { "app": "ru.keepcoder.Telegram", "name": "Telegram" },
+    { "app": "net.whatsapp.WhatsApp", "name": "WhatsApp" },
+    {
+      "app": "com.tinyspeck.slackmacgap",
+      "name": "Slack",
+      "what": "Slack's data: its cache, the files and images you opened, and each workspace's local copy.",
+      "helps": "Help → Troubleshooting → Clear Cache and Restart empties its cache."
+    },
+    {
+      "app": "com.apple.geod",
+      "name": "Maps data (macOS)",
+      "what": "Map data macOS downloaded for Maps and for apps that show maps.",
+      "helps": "It's a cache: Maps downloads again what it needs."
+    },
+    {
+      "path": "Library/Mobile Documents",
+      "name": "iCloud Drive",
+      "note": "Downloaded iCloud files: Remove Download keeps them in iCloud only"
+    },
+    {
+      "path": "Library/Group Containers/UBF8T346G9.OneDriveSyncClientSuite",
+      "name": "OneDrive",
+      "note": "OneDrive's copy of what it keeps on this Mac"
+    },
+    {
+      "path": "Library/Containers/com.docker.docker",
+      "name": "Docker",
+      "note": "Docker's disk image: `docker system prune` frees what no container uses",
+      "what": "Docker Desktop's disk image: every image, container, volume and build cache is in this one file.",
+      "grows": "It grows as images are pulled or built and as containers write. What Docker deletes goes back to macOS a few seconds later.",
+      "helps": "Remove the images and containers you no longer use (`docker system prune` removes what nothing uses, never volumes); Docker Desktop's Settings → Resources sets how big the disk image may get."
+    },
+    { "path": "Library/Group Containers/group.com.docker", "name": "Docker (shared)" },
+    { "path": "Library/Containers/com.apple.mail", "name": "Mail downloads" },
+    {
+      "path": "Library/Android",
+      "name": "Android SDK",
+      "what": "What Android Studio downloaded: SDK platforms, build tools and the emulators' system images.",
+      "helps": "Android Studio's SDK Manager removes the platforms and system images you no longer build for."
+    },
+    { "path": ".android", "name": "Android emulators" },
+    {
+      "path": ".gradle",
+      "name": "Gradle",
+      "what": "Gradle's caches: the dependencies and Gradle versions your projects' builds downloaded.",
+      "grows": "Each new dependency version, and each Gradle version a project's wrapper asks for, adds to it.",
+      "helps": "Gradle deletes what no build used for 30 days by itself."
+    },
+    {
+      "path": ".cargo",
+      "name": "Cargo",
+      "what": "Cargo's downloads: the source of each crate version and git dependency your builds used.",
+      "helps": "Since Rust 1.88, Cargo deletes by itself what no build used for months."
+    },
+    {
+      "path": ".rustup",
+      "name": "Rust toolchains",
+      "what": "The Rust toolchains rustup installed: stable, nightly and each version a project pins.",
+      "helps": "`rustup toolchain list` shows them; `rustup toolchain uninstall <name>` removes one you no longer use."
+    },
+    {
+      "path": "fvm",
+      "name": "Flutter versions",
+      "what": "The Flutter SDKs fvm installed, one for each version a project pins.",
+      "helps": "`fvm list` shows them; `fvm remove <version>` removes one."
+    },
+    {
+      "path": ".npm",
+      "name": "npm",
+      "what": "npm's cache: each package version npm downloaded, for any project.",
+      "grows": "npm doesn't delete old versions by itself.",
+      "helps": "`npm cache clean --force` empties it; installs download again what they need."
+    },
+    {
+      "path": ".pnpm-store",
+      "name": "pnpm",
+      "what": "pnpm's store: one copy of each package version, shared by all projects.",
+      "helps": "`pnpm store prune` removes the versions no project uses."
+    },
+    {
+      "path": ".pub-cache",
+      "name": "Dart packages",
+      "what": "Pub's cache: each Dart and Flutter package version your projects used.",
+      "helps": "`dart pub cache clean` empties it; projects download again what they need."
+    },
+    {
+      "path": ".bun/install/cache",
+      "what": "bun's cache: each package version bun downloaded.",
+      "helps": "`bun pm cache rm` empties it; installs download again what they need."
+    },
+    {
+      "path": "Library/Caches/pip",
+      "what": "pip's downloads, and the wheels it built.",
+      "helps": "`pip cache purge` empties it."
+    },
+    {
+      "path": "go/pkg/mod",
+      "what": "Go's module cache: each module version your builds downloaded.",
+      "helps": "`go clean -modcache` empties it; builds download again what they need."
+    },
+    {
+      "path": "Library/Developer/CoreSimulator/Devices",
+      "name": "Simulator devices",
+      "note": "Simulators' apps and data: `xcrun simctl delete unavailable` removes those of runtimes that are gone",
+      "grows": "Each simulator keeps the apps you ran in it and their data, and the simulators of runtimes you removed stay behind."
+    },
+    {
+      "path": "Library/Developer/Xcode/DerivedData",
+      "name": "Xcode DerivedData",
+      "what": "Xcode's build output, indexes and logs, a folder for each project it built.",
+      "grows": "Each build adds to its project's folder, and the folders of projects you no longer open stay.",
+      "helps": "It can be deleted while Xcode isn't building: the next build makes what it needs again."
+    },
+    {
+      "path": "Library/Developer/Xcode/Archives",
+      "name": "Xcode archives",
+      "what": "Each build you archived to upload or export, with its debug symbols.",
+      "helps": "Xcode's Organizer deletes old archives; keep those of versions whose crash reports you still read."
+    },
+    {
+      "path": "Library/Developer/Xcode/iOS DeviceSupport",
+      "what": "What Xcode copies from each iPhone or iPad it runs apps on, once for each iOS version.",
+      "grows": "A new copy, often several GB, for each iOS version a device you connected ran.",
+      "helps": "The folders of versions your devices no longer run can be deleted; Xcode copies one again when it needs it."
+    },
+    {
+      "path": "Library/Metadata",
+      "name": "App search index",
+      "note": "Spotlight's index of what's in your apps"
+    },
+    {
+      "path": "Library/CloudStorage/*",
+      "note": "Downloaded cloud files: Free Up Space keeps them in the cloud only"
+    },
+    {
+      "path": "Library/Application Support/Google",
+      "what": "Chrome's profiles (history, extensions, what websites stored) and the data of Google's other apps.",
+      "grows": "Websites store more as you visit them; Chrome also downloads an on-device AI model of a few GB when its AI features are on.",
+      "helps": "In Chrome, Settings → Privacy and security → Delete browsing data removes what sites stored."
+    },
+    {
+      "path": "Library/Caches/Google",
+      "what": "Chrome's cache: copies of pages and media, to load them faster again.",
+      "helps": "Chrome deletes from it as it fills; Delete browsing data → Cached images and files empties it."
+    },
+    {
+      "path": "Library/Application Support/Code",
+      "what": "VS Code's data: its settings, each folder's workspace storage, extensions' data, and its caches.",
+      "helps": "Its caches (Cache, CachedData, Code Cache) can be deleted while VS Code is closed; it makes them again."
+    },
+    {
+      "path": "Library/Application Support/Comet",
+      "what": "Comet's data (Perplexity's browser): its profiles, what websites stored, and its caches."
+    },
+    {
+      "path": "Library/Biome",
+      "what": "macOS's record of how you use the Mac, for Siri Suggestions, Screen Time and the like; it stays on this Mac.",
+      "helps": "Leave it to macOS, which trims it by itself."
+    },
+    {
+      "path": "Library/Daemon Containers",
+      "what": "The private folders of macOS's background services, each named by an id instead of the service.",
+      "helps": "Leave them to macOS."
+    },
+    {
+      "path": "Library/Python",
+      "what": "Python packages installed for your account (`pip install --user`), and their commands.",
+      "helps": "`pip list --user` lists them; `pip uninstall <name>` removes one."
+    },
+    {
+      "path": "Library/Caches/ms-playwright",
+      "what": "The browsers Playwright downloaded to run tests: Chromium, Firefox and WebKit, for each Playwright version.",
+      "grows": "Each Playwright version needs its own browsers; Playwright deletes a version's once nothing on this Mac uses it.",
+      "helps": "`npx playwright uninstall --all` removes them all; tests download them again."
+    },
+    {
+      "path": "Library/Caches/cargo-xwin",
+      "what": "The Windows SDK and C runtime cargo-xwin downloaded to build Rust for Windows.",
+      "helps": "It can be deleted: cargo-xwin downloads it again for the next Windows build."
+    },
+    {
+      "path": "Library/Caches/Homebrew",
+      "what": "Homebrew's downloads: the bottles and sources of what it installed.",
+      "helps": "`brew cleanup` deletes old downloads, which Homebrew also does by itself every 30 days."
+    },
+    {
+      "path": "Library/Caches/org.swift.swiftpm",
+      "what": "Swift Package Manager's cache: the packages it downloaded, for any project.",
+      "helps": "`swift package purge-cache` empties it; builds download again what they need."
+    },
+    {
+      "path": ".dartServer",
+      "what": "The Dart analysis server's cache, for Dart and Flutter in VS Code and Android Studio: what it worked out about each package it analysed.",
+      "grows": "It adds to it for each package and Dart version it analyses, and doesn't delete old ones.",
+      "helps": "It can be deleted while no editor is open: the analysis server makes what it needs again."
+    },
+    {
+      "path": ".claude",
+      "what": "Claude Code's data: each session's transcript, its plugins and settings.",
+      "grows": "Every session adds its transcript; Claude Code deletes those older than 30 days by itself.",
+      "helps": "`cleanupPeriodDays` in ~/.claude/settings.json keeps transcripts for fewer days."
+    },
+    {
+      "path": ".bun",
+      "what": "bun: the program, the packages installed with `bun add -g`, and its package cache (install/cache), mostly the cache.",
+      "helps": "`bun pm cache rm` empties the cache; installs download again what they need."
+    },
+    {
+      "path": ".local",
+      "what": "Where command-line tools put what they install for you: programs in .local/bin, their data in .local/share (uv's Pythons, pipx's apps)."
+    },
+    {
+      "path": "/System/Library/AssetsV2",
+      "name": "System downloads",
+      "note": "Voices, dictionaries and models macOS downloads"
+    },
+    {
+      "path": "/.Spotlight-V100",
+      "name": "Spotlight index",
+      "note": "Spotlight's index"
+    },
+    {
+      "path": "/.DocumentRevisions-V100",
+      "name": "Document versions",
+      "what": "The versions macOS keeps of documents as apps save them: what File → Revert To lists."
+    },
+    { "path": "/.fseventsd", "name": "File-system events" },
+    {
+      "path": "/opt/homebrew",
+      "name": "Homebrew",
+      "note": "What Homebrew installed. It removes old versions by itself every 30 days, so this is what's installed now: `brew leaves` lists what you asked for, and `brew uninstall` removes one"
+    },
+    {
+      "path": "/private/var/vm",
+      "name": "Sleep image",
+      "note": "Where the Mac keeps memory while it sleeps",
+      "grows": "Swap files are added when apps need more memory than the Mac has; they go when the Mac restarts."
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools",
+      "name": "Command Line Tools",
+      "what": "Apple's command-line developer tools (compilers, git, the macOS SDKs), for builds outside Xcode; Homebrew needs them."
+    },
+    {
+      "path": "/private/tmp",
+      "what": "Temporary files programs put here.",
+      "helps": "macOS deletes them when the Mac restarts, and those unused for 3 days."
+    },
+    {
+      "path": "/usr/local",
+      "what": "Command-line tools and libraries installed outside macOS: Homebrew on Intel Macs, and installers like TeX's, Python's or the AWS CLI's.",
+      "helps": "Each came from an installer you ran; its uninstaller, or `brew uninstall`, removes it."
+    },
+    {
+      "path": "/private/var/db",
+      "what": "macOS's own records: the system log (diagnostics, uuidtext), install receipts, and its services' databases.",
+      "grows": "The log keeps the last days' or weeks' messages, up to a size macOS sets.",
+      "helps": "Leave it to macOS: it trims the log by itself, and only macOS changes these folders."
+    },
+    {
+      "path": "/Library/Application Support",
+      "what": "What apps installed for every account on the Mac: drivers, plug-ins, sound and media libraries, licences.",
+      "helps": "An app's folder here goes with the app: its uninstaller removes it."
+    },
+    {
+      "path": "/Library/Audio",
+      "what": "Sounds and plug-ins for audio apps: Apple Loops, sound libraries and Audio Units plug-ins."
+    },
+    {
+      "path": "/Library/Caches/com.microsoft.autoupdate.fba",
+      "what": "Microsoft AutoUpdate's downloads: the Office and Teams updates it fetched to install."
+    }
+  ]
+}

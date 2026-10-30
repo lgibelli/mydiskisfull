@@ -41,6 +41,8 @@ db="$T/history.sqlite3"
 "$MDIF" timemachine --quick --json --db "$db" > "$T/timemachine-quick.json"
 # Only asks Docker (on CI, it isn't there): nothing is removed.
 "$MDIF" docker --json > "$T/docker.json"
+# What would be sent: nothing is.
+"$MDIF" knowledge ask "$HOME/.cache/codex-runtimes" --bytes 1734567890 --dry-run --json > "$T/question.json"
 # Refused (it isn't a build folder), so nothing is marked.
 "$MDIF" timemachine exclude "$T" --json --db "$db" > "$T/exclude.json"
 
@@ -68,6 +70,9 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     timemachine="$T/timemachine-quick.json" \
     exclusion="$T/exclude.json" \
     docker="$T/docker.json" \
+    knowledge=app/Tests/knowledge-update.json \
+    question="$T/question.json" \
+    answer=app/Tests/knowledge-answer.json \
     status=app/Tests/status-incidents.json \
     apply=app/Tests/apply-profile.json \
     revert=app/Tests/revert.json \

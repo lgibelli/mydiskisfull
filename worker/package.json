@@ -1,0 +1,17 @@
+{
+  "name": "mydiskisfull-ask",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit",
+    "dev": "wrangler dev",
+    "test": "node --test test/name.test.ts test/ask.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.3.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "wrangler": "4.153.0"
+  }
+}

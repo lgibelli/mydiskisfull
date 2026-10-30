@@ -172,6 +172,37 @@ and the Storage page shows it with the item in its category. A handler can also 
 itself can go to the Trash (`trash`: a cloud folder left behind), which `mdif clean` then takes. Only ways known to work are given; a
 handler that can do it safely itself becomes a clean kind instead.
 
+**What's known about folders** (`knowledge.rs`, the list in `knowledge/folders.json`): what a
+folder is called, the line under it, what's in it, why it grows and what helps, by its place
+(from the home folder or `/`, `*` within a name) or by its app (its container, group container,
+Application Support and Caches folders). Storage's items and Time Machine's changes carry it
+(`known`). It's data so that it can be corrected and grown without a release: the full edition
+downloads a newer copy once a day (`mdif knowledge update`, curl, the signature first and the
+list only when that changed), which is taken only when it's signed with the updates' Ed25519 key
+(`SUPublicEDKey`) and its version is higher than the one built in or downloaded before (no going
+back to an older signed copy). Text only: what may be deleted, emptied or moved stays in the code
+(`clean`, the handlers, whose text goes with their buttons). Published by `app/knowledge.sh`
+into the website (Cloudflare).
+**Ask AI** (`ask.rs`, `worker/`): where the list says nothing of a folder, the full edition offers
+"Ask AI…", which shows exactly what would be sent (`mdif knowledge ask <folder> --dry-run`: the
+name as `knowledge::generic` makes it, the size to two digits, the macOS version) and sends it
+only on "Ask AI". The Worker (Cloudflare, `ask.salamacchine.it`) checks the name against the same
+rule again (`worker/src/name.ts`), answers from D1 when the name was asked before, and otherwise
+asks Claude (structured output: known, what, grows, helps; a command or a link in a text drops
+it), within a per-Mac rate limit (a hash of the IP, never kept) and a daily cap for everyone.
+Nothing about who asked is stored or logged. The answer is kept on the Mac too (`answers.json`
+beside the history) and shown as the AI's, not checked; `worker/answers.sh` lists the most asked,
+which go into the list once checked, and from there to every Mac. Not in Lite (no network
+entitlement, and App Privacy would change).
+What's missing is found on each Mac (`mdif knowledge missing`, `unexplained` on items and
+changes): a folder shown (an item, a change since the last backup, a week's growth of 500 MB or
+more) that isn't your own nor explained by a rule (build output, apps, macOS's volumes), with no
+handler and nothing from the list but its name. Its name is `knowledge::generic`: an app's id
+folder (`~/Library/Containers/<id>`, the standard `Data/Library/Caches` inside it), the Library's
+own folders, a tool's dot-folder (and `~/.cache/<tool>`), a place outside the home folder (three
+names at most), never past a name that could be the user's (a project in `~/.claude`, a cloud
+account in CloudStorage, a mailbox); `/Users` and `/Volumes` never.
+
 **Showing, not telling**: each suggestion that cleans a folder says about how much it frees (its
 private size) and how old its files are on average (by size, from modification dates, which the
 scanner already reads), and a folder that keeps growing shows its size at the end of each of the

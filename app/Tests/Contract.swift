@@ -57,6 +57,15 @@ enum Contract {
                 case "timemachine":
                     let r = try check(TimeMachineReport.self, path)
                     summary = "\(r.tries.count) tries, \(r.snapshots.count) snapshots, \(r.rebuildable.count) build folders"
+                case "knowledge":
+                    let u = try check(KnowledgeUpdate.self, path)
+                    summary = "version \(u.version), \(u.folders) folders"
+                case "question":
+                    let q = try check(AskQuestion.self, path)
+                    summary = "\(q.name), macOS \(q.macos)"
+                case "answer":
+                    let a = try check(AskAnswer.self, path)
+                    summary = "\(a.name): \(a.known ? "known" : "unknown"), by \(a.by)"
                 case "docker":
                     let r = try check(DockerReport.self, path)
                     summary = r.running ? "\(r.pruned.count) to prune, \(r.unused.count) unused images" : "not running: \(r.why ?? "")"

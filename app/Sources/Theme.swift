@@ -645,3 +645,204 @@ enum Headline {
         return i.kind == .growth ? URL(fileURLWithPath: i.subject).lastPathComponent : e.app ?? i.subject
     }
 }
+
+/// What's known about a folder: what's in it, why it grows, what helps, and
+/// where that's said.
+struct KnownText: View {
+    let known: Known
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let what = known.what { Text(Format.inline(what)) }
+            if let grows = known.grows { said("Why it grows", grows) }
+            if let helps = known.helps { said("What helps", helps) }
+            if let s = known.source, let url = URL(string: s), url.scheme == "https" {
+                Link("Where it's said", destination: url).font(.caption)
+            }
+            if let ai = known.ai {
+                Label("Written by AI (\(ai.hasPrefix("claude") ? "Claude" : ai)) and not checked: it may be wrong.",
+                      systemImage: "sparkles")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func said(_ label: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.subheadline.weight(.semibold))
+            Text(Format.inline(text))
+        }
+    }
+}
+
+#if !APP_STORE
+/// Where nothing's known about a folder: "Ask AI…", which first shows what
+/// would be sent (its name as `mdif` makes it, its size, the macOS version)
+/// and sends it only on "Ask AI" (`mdif knowledge ask`). Settings turns it
+/// off.
+struct AskAI: View {
+    let path: String
+    /// Its size, when it's a folder's size (a backup's change isn't).
+    let bytes: Int64?
+    @AppStorage("askAI") private var enabled = true
+    @State private var step: Step
+
+    enum Step {
+        case offer
+        case confirm(AskQuestion)
+        case asking
+        case answer(AskAnswer)
+        case failed(String)
+    }
+
+    /// Answers since the app started, so a popover opened again shows its.
+    @MainActor private static var answers: [String: AskAnswer] = [:]
+
+    init(path: String, bytes: Int64?) {
+        self.path = path
+        self.bytes = bytes
+        _step = State(initialValue: Self.answers[path].map(Step.answer) ?? .offer)
+    }
+
+    private var args: [String] {
+        ["knowledge", "ask", path] + (bytes.map { ["--bytes", "\($0)"] } ?? [])
+    }
+
+    var body: some View {
+        switch step {
+        case .offer:
+            HStack {
+                Text("Nothing's known about it yet.").foregroundStyle(.secondary)
+                Spacer()
+                if enabled {
+                    Button("Ask AI…") { Task { await prepare() } }
+                }
+            }
+        case .confirm(let q):
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Ask AI what it is?").font(.subheadline.weight(.semibold))
+                Text("MyDiskIsFull sends only this to its server at salamacchine.it, which asks Claude, Anthropic's AI:")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(q.name).font(.body.monospaced()).textSelection(.enabled)
+                    Text([q.bytes.map { Format.bytes($0) }, "macOS \(q.macos)"].compactMap { $0 }
+                        .joined(separator: " · "))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                Text("Nothing inside the folder, no other names, nothing about you. The answer is kept for whoever asks about the same folder.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { step = .offer }
+                    Button("Ask AI") { Task { await ask() } }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        case .asking:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Asking…").foregroundStyle(.secondary)
+            }
+        case .answer(let a):
+            if a.known {
+                KnownText(known: a.said)
+            } else {
+                Text("The AI doesn't know what it is either.").foregroundStyle(.secondary)
+            }
+        case .failed(let why):
+            HStack(alignment: .firstTextBaseline) {
+                Text(why).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Try Again") { Task { await prepare() } }
+            }
+        }
+    }
+
+    /// What would be sent, from `mdif` itself: what's shown is what goes.
+    private func prepare() async {
+        do {
+            step = .confirm(try await Core.json(AskQuestion.self, args + ["--dry-run"], timeout: 30))
+        } catch {
+            step = .failed(Self.sentence(error))
+        }
+    }
+
+    private func ask() async {
+        step = .asking
+        do {
+            let a = try await Core.json(AskAnswer.self, args, timeout: 120)
+            Self.answers[path] = a
+            step = .answer(a)
+        } catch {
+            step = .failed(Self.sentence(error))
+        }
+    }
+
+    /// `mdif`'s message, its first line, as a sentence.
+    private static func sentence(_ error: Error) -> String {
+        let line = error.localizedDescription.split(separator: "\n").first.map(String.init) ?? ""
+        let s = line.prefix(1).uppercased() + line.dropFirst()
+        return s.hasSuffix(".") ? s : s + "."
+    }
+}
+
+/// An (i) at the end of a row nothing's known about, with Ask AI in it.
+struct AskButton: View {
+    let title: String
+    let path: String
+    let bytes: Int64?
+    @AppStorage("askAI") private var enabled = true
+    @State private var shown = false
+
+    var body: some View {
+        if enabled {
+            Button {
+                shown.toggle()
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Nothing's known about it yet: you can ask AI")
+            .popover(isPresented: $shown, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(title).font(.headline)
+                    AskAI(path: path, bytes: bytes)
+                }
+                .padding(16)
+                .frame(width: 380)
+            }
+        }
+    }
+}
+#endif
+
+/// An (i) at the end of a row that opens what's known about its folder.
+struct KnownButton: View {
+    let title: String
+    let known: Known
+    @State private var shown = false
+
+    var body: some View {
+        Button {
+            shown.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("What it is, and why it grows")
+        .popover(isPresented: $shown, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).font(.headline)
+                KnownText(known: known)
+            }
+            .padding(16)
+            .frame(width: 380)
+        }
+    }
+}

@@ -411,6 +411,7 @@ struct ItemRow: View {
     /// A suggestion about it, shown with it.
     let suggestion: Suggestion?
     @ObservedObject var monitor: Monitor
+    @AppStorage("askAI") private var askAI = true
 
     var body: some View {
         let i = item
@@ -471,7 +472,17 @@ struct ItemRow: View {
     }
 
     private var hasAdvice: Bool {
-        (item.about != nil && !item.has("kept")) || item.note != nil || item.detail != nil || suggestion != nil
+        (item.about != nil && !item.has("kept")) || item.note != nil || item.detail != nil
+            || item.known != nil || suggestion != nil || canAsk
+    }
+
+    /// Nothing's known about it, and AI may be asked.
+    private var canAsk: Bool {
+        #if APP_STORE
+        false
+        #else
+        item.unexplained != nil && askAI
+        #endif
     }
 }
 
@@ -541,6 +552,15 @@ private struct AdviceButton: View {
                 }
                 if let detail = item.detail {
                     Text(Format.inline(detail)).fixedSize(horizontal: false, vertical: true)
+                }
+                if let known = item.known {
+                    KnownText(known: known)
+                } else if item.unexplained != nil {
+                    #if APP_STORE
+                    Text("Nothing's known about it yet.").foregroundStyle(.secondary)
+                    #else
+                    AskAI(path: item.path, bytes: item.bytes)
+                    #endif
                 }
                 #if !APP_STORE
                 // Snapshots: their page says what they hold and what helps.

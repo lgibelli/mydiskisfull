@@ -32,6 +32,29 @@ All notable changes to this project are documented here. The format is based on
   gives the space back a few seconds later, and what was freed is counted then. `mdif docker`
   lists the same, `mdif clean docker:<kind>:<id>` removes one. Not in Lite, which shows the
   command.
+- What's known about folders is a list now (`crates/mdif-core/knowledge/folders.json`), not
+  code: what one is called, what's in it, why it grows and what helps, by its place or by its
+  app (`com.apple.mediaanalysisd`: Photo analysis, which analyses each new photo and may go
+  through the library again after a macOS update). Storage's (i) and Time Machine's "Since the
+  Last Backup" rows show it, with the name instead of the folder's id. Once a day the full
+  edition downloads a newer list from salamacchine.it, taken only when it's signed with the
+  updates' key and newer than its own; it's text only, so what's deleted stays in the code.
+  Nothing about your Mac is sent; Settings turns it off. `mdif knowledge` (`update`, `about
+  <folder>`, `check <file>`).
+- `mdif knowledge missing`: this Mac's big or growing folders that nothing in particular is said
+  about, by names that say nothing about you (an app's id, a tool's folder, a place outside the
+  home folder; never your own folders, nor a cloud account's or a mailbox's contents). Storage's
+  (i) says "Nothing's known about it yet". The list's second version explains 27 more, among
+  them Safari's and Chrome's data, Xcode's DerivedData, the Dart analysis server's cache, Claude
+  Code's transcripts, `/usr/local`, `/private/var/db` and Playwright's browsers.
+- Ask AI: where nothing's known about a folder, Storage's (i) and Time Machine's rows offer "Ask
+  AI…". It first shows exactly what would be sent (the folder's name as above, its size and the
+  macOS version: nothing inside it, nothing about you) and sends it only when you say so, to
+  MyDiskIsFull's server at salamacchine.it, which asks Claude, Anthropic's AI. Each folder is
+  asked once: the answer is kept for whoever asks about the same folder, and on your Mac, and
+  it's shown as written by AI and not checked. The most asked go into the list once checked.
+  Settings turns it off. `mdif knowledge ask <folder>` (`--dry-run` sends nothing). Not in
+  Lite.
 
 ### Changed
 - The main window is laid out like Apple's own apps, in five pages instead of seven: Overview,
