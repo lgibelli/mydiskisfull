@@ -80,6 +80,11 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 - Folders whose names have dots in them (`group.com.apple.VoiceMemos.shared`) had no icon.
 - A folder named like a Markdown link showed as a link in the app's texts; it's plain text now.
+- The main window read free space every 5 seconds for as long as it was open, even minimised or
+  covered, and reloaded the whole history and redrew its page each time: a window left open cost
+  several percent of a core all day. Now it reads every 5 seconds while you're looking (for two
+  minutes after it comes forward or free space moves), else once a minute, and not while nobody
+  can see it; the charts reload with each new sample, every 5 minutes.
 - Old Files said "Opened 56 years ago" for an app that was never opened; it says "Never opened".
 - Lite: the welcome window's "Open at login" starts off, so Lite opens at login only once you
   turn it on (App Review refused 0.1.2 for a switch that started on).

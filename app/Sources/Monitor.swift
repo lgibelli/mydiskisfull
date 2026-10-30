@@ -171,8 +171,13 @@ final class Monitor: ObservableObject {
         }
     }
 
+    /// When a window last came forward: the main window reads free space
+    /// often for a while after.
+    private(set) var lookedAt = Date()
+
     /// Someone is looking: make what they see current.
     func viewed() {
+        lookedAt = Date()
         if lastRefresh.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
             Task {
                 await refresh()

@@ -108,16 +108,38 @@ struct MainWindow: View {
             SettingsView(monitor: monitor, page: nav.settingsPage)
         }
         .onAppear { monitor.viewed() }
-        // While the window is open, free space follows what you delete:
+        // While the window is on screen, free space follows what you delete:
         // `mdif status` reads it from the disk each time, in milliseconds.
+        // Every 5 seconds while someone's looking (for two minutes after the
+        // window came forward or free space moved), else once a minute; and
+        // not at all while it's minimised, covered or on another Space. Each
+        // read redraws the page, so a window left open all day polling every
+        // 5 seconds cost more than the watcher.
         .task {
+            var moved = Date.distantPast
+            var read = Date()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
+                let now = Date()
+                let looking = now.timeIntervalSince(max(moved, monitor.lookedAt)) < 120
+                guard Self.onScreen, looking || now.timeIntervalSince(read) >= 60 else { continue }
+                let before = monitor.status?.avail
                 await monitor.refresh()
+                read = Date()
+                if let before, let after = monitor.status?.avail, abs(after - before) >= 10_000_000 { moved = read }
             }
         }
-        // The timer's refresh brings a new sample: the charts follow it.
-        .task(id: monitor.lastRefresh) { await monitor.loadDetail() }
+        // A new sample from the watcher (every 5 minutes): the charts follow
+        // it. Not every read: the series is the whole history.
+        .task(id: monitor.status?.history.last) { await monitor.loadDetail() }
+    }
+
+    /// A window of the app that someone could be looking at: shown, not
+    /// minimised, at least partly uncovered, on the current Space.
+    static var onScreen: Bool {
+        NSApp.windows.contains { w in
+            w.isVisible && w.occlusionState.contains(.visible) && w.styleMask.contains(.titled) && !(w is NSPanel)
+        }
     }
 }
 
