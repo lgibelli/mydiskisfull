@@ -80,6 +80,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 - Folders whose names have dots in them (`group.com.apple.VoiceMemos.shared`) had no icon.
 - A folder named like a Markdown link showed as a link in the app's texts; it's plain text now.
+- Old Files said "Opened 56 years ago" for an app that was never opened; it says "Never opened".
 - Lite: the welcome window's "Open at login" starts off, so Lite opens at login only once you
   turn it on (App Review refused 0.1.2 for a switch that started on).
 

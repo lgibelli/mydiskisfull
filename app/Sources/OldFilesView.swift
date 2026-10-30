@@ -16,9 +16,9 @@ private struct OldRow: Identifiable {
     /// Where it is.
     let folder: String
     let bytes: Int64
-    /// Last opened or changed, whichever is later.
+    /// Last opened or changed, whichever is later; 0 for an app never opened.
     let lastUsed: Int64
-    /// "Not opened", "Unchanged", "Last opened".
+    /// "Opened", "Changed", or "Never opened" (then without an age).
     let how: String
     let action: CleanAction?
     /// A folder, not a file.
@@ -114,9 +114,13 @@ struct OldFilesPage: View {
             }
             .width(min: 100, ideal: 240)
             TableColumn("Last Used", value: \.lastUsed) { r in
-                Text("\(r.how) \(Format.age(now - r.lastUsed)) ago")
-                    .foregroundStyle(.secondary)
-                    .help(Date(timeIntervalSince1970: TimeInterval(r.lastUsed)).formatted(date: .long, time: .omitted))
+                if r.lastUsed == 0 {
+                    Text(r.how).foregroundStyle(.secondary)
+                } else {
+                    Text("\(r.how) \(Format.age(now - r.lastUsed)) ago")
+                        .foregroundStyle(.secondary)
+                        .help(Date(timeIntervalSince1970: TimeInterval(r.lastUsed)).formatted(date: .long, time: .omitted))
+                }
             }
             .width(min: 110, ideal: 160)
             TableColumn("Size", value: \.bytes) { r in
@@ -195,10 +199,12 @@ struct OldFilesPage: View {
         let span = Int64(minDays) * 86_400
         let folders = SpaceText.forgotten(r, min: Int64(minBytes), days: minDays, limit: .max).map { i in
             let unused = i.has("unused")
+            // An app with no last-opened date was never opened (0 sorts it oldest).
             let last = unused ? (i.lastUsed ?? 0) : r.measured - (i.age ?? 0)
+            let how = !unused ? "Changed" : i.lastUsed == nil ? "Never opened" : "Opened"
             return OldRow(id: i.id, name: i.name, path: i.path,
                           folder: (i.path as NSString).deletingLastPathComponent, bytes: i.bytes,
-                          lastUsed: last, how: unused ? "Opened" : "Changed", action: i.action, isFolder: true)
+                          lastUsed: last, how: how, action: i.action, isFolder: true)
         }
         let files = (r.oldFiles ?? [])
             .filter { !$0.kept && $0.bytes >= Int64(minBytes) && $0.lastUsed <= r.measured - span }
