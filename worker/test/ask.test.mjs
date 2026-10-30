@@ -98,6 +98,16 @@ test("only a question of the app's shape is taken", async () => {
   ]) {
     assert.equal((await post(bad)).status, 400, JSON.stringify(bad));
   }
+  // Too big, whether it says so or comes in chunks with no length.
+  const big = JSON.stringify({ ...q("~/.cache/codex-runtimes"), pad: "x".repeat(4096) });
+  assert.equal((await fetch(URL_, { method: "POST", body: big })).status, 413);
+  const chunked = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(big));
+      c.close();
+    },
+  });
+  assert.equal((await fetch(URL_, { method: "POST", body: chunked, duplex: "half" })).status, 413);
   assert.equal(asked.length, 0);
 });
 

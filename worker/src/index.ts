@@ -31,6 +31,35 @@ function question(body: unknown): Question | null {
   return { name, bytes, macos };
 }
 
+const MAX_BODY = 2048;
+
+/** The body as text, or null past MAX_BODY bytes: read up to there, whatever
+ * Content-Length says (a chunked request has none). */
+async function body(request: Request): Promise<string | null> {
+  if (Number(request.headers.get("content-length") ?? "0") > MAX_BODY) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
 /** A hash of the address, so the rate limiter never holds the address itself. */
 async function asker(request: Request): Promise<string> {
   const ip = request.headers.get("cf-connecting-ip") ?? "";
@@ -43,12 +72,11 @@ export default {
     const url = new URL(request.url);
     if (url.pathname !== PATH) return reply(404, { error: "not_found" });
     if (request.method !== "POST") return reply(405, { error: "post" });
-    if (Number(request.headers.get("content-length") ?? "0") > 2048) {
-      return reply(413, { error: "too_big" });
-    }
+    const text = await body(request);
+    if (text === null) return reply(413, { error: "too_big" });
     let q: Question | null;
     try {
-      q = question(await request.json());
+      q = question(JSON.parse(text));
     } catch {
       q = null;
     }
