@@ -548,7 +548,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "mdif-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "mdif-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "mdif-macos"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "objc2",

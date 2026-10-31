@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.5] - 2026-10-31
+
 ### Added
 - A Time Machine page: where it backs up, how often and the latest tries, finished or not; the
   local snapshots, which one the next backup starts from and why they hold space (they cover the
@@ -516,6 +518,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5
 [0.1.4]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.4
 [0.1.3]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.3
 [0.1.2]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.2
