@@ -187,7 +187,7 @@ final class Monitor: ObservableObject {
             Task { await loadDetail() }
         }
         if measuredAt.map({ Date().timeIntervalSince($0) > Self.measureEvery }) ?? true {
-            Task { await measure() }
+            Task { await measure(automatic: true) }
         }
         #if !APP_STORE
         // Whether backups keep failing, for Needs Attention: a second's look.
@@ -205,25 +205,35 @@ final class Monitor: ObservableObject {
         }
     }
 
-    /// Suggestions and tweaks, which size the folders they're about.
-    func measure() async {
+    /// Suggestions and tweaks, which size the folders they're about: half a
+    /// minute of CPU or more. `automatic`: nobody asked, so with the last
+    /// ones on screen meanwhile it runs at background priority, out of the
+    /// way of whatever the Mac is doing.
+    func measure(automatic: Bool = false) async {
         // Asked for while one runs, which may have started before a change:
-        // it runs again once that one is done.
+        // it runs again once that one is done. Not when nobody asked (a
+        // window came forward): the one running is as new.
         guard !measuring else {
-            measureAgain = true
+            if !automatic { measureAgain = true }
             return
         }
         measuring = true
         defer { measuring = false }
+        var behind = automatic && suggestions != nil
         repeat {
             measureAgain = false
+            let qos: QualityOfService = behind ? .background : .userInitiated
+            let timeout: TimeInterval = behind ? 900 : 120
+            behind = false
             #if APP_STORE
             // Its tweaks are only advice: no need to read other apps' settings.
-            if let sg = try? await Core.json([Suggestion].self, ["suggest"]) { suggestions = notKept(sg) }
+            if let sg = try? await Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos) {
+                suggestions = notKept(sg)
+            }
             #else
             let started = Date()
-            async let t = try? Core.json([TweakInfo].self, ["tweaks"])
-            async let s = try? Core.json([Suggestion].self, ["suggest"])
+            async let t = try? Core.json([TweakInfo].self, ["tweaks"], timeout: timeout, qos: qos)
+            async let s = try? Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos)
             let (tw, sg) = await (t, s)
             // Read before a tweak changed, it would put back the old state.
             if let tw, started > tweakChanged {
@@ -241,15 +251,28 @@ final class Monitor: ObservableObject {
     /// A scan younger than this is shown as it is.
     static let spaceMaxAge: Int = 6 * 3600
 
-    /// The breakdown, from the cache when it's recent; `refresh` measures
-    /// again (about a minute for a full disk).
+    /// The breakdown; `refresh` measures again (a minute or two for a full
+    /// disk, on every core). Otherwise the last measurement shows at once,
+    /// and if it's old it's measured again behind it at background priority:
+    /// nobody is waiting for that one, so it waits for whatever the Mac is
+    /// doing, on the efficiency cores.
     func loadSpace(refresh: Bool = false) async {
         guard !spaceMeasuring, spaceReadable else { return }
         spaceMeasuring = true
         defer { spaceMeasuring = false }
-        let args = ["space"] + (refresh ? ["--refresh"] : ["--max-age", "\(Self.spaceMaxAge)"])
         do {
-            space = try await Core.json(SpaceReport.self, args, timeout: 900)
+            if refresh {
+                space = try await Core.json(SpaceReport.self, ["space", "--refresh"], timeout: 900, qos: .userInitiated)
+            } else {
+                // However old; measured now only if there's none.
+                let last = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Int32.max)"],
+                                               timeout: 900, qos: .userInitiated)
+                space = last
+                if Int64(Date().timeIntervalSince1970) - last.measured > Int64(Self.spaceMaxAge) {
+                    space = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Self.spaceMaxAge)"],
+                                                timeout: 3600, qos: .background)
+                }
+            }
             spaceError = nil
         } catch {
             spaceError = error.localizedDescription

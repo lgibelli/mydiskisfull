@@ -126,9 +126,9 @@ enum Core {
         }.value
     }
 
-    static func json<T: Decodable>(_ type: T.Type, _ args: [String],
-                                   timeout: TimeInterval = 120) async throws -> T {
-        let data = try await run(args + ["--json"], timeout: timeout)
+    static func json<T: Decodable>(_ type: T.Type, _ args: [String], timeout: TimeInterval = 120,
+                                   qos: QualityOfService = .utility) async throws -> T {
+        let data = try await run(args + ["--json"], timeout: timeout, qos: qos)
         do {
             return try Wire.decode(type, from: data)
         } catch {

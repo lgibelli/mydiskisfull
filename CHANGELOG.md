@@ -85,6 +85,13 @@ All notable changes to this project are documented here. The format is based on
   several percent of a core all day. Now it reads every 5 seconds while you're looking (for two
   minutes after it comes forward or free space moves), else once a minute, and not while nobody
   can see it; the charts reload with each new sample, every 5 minutes.
+- What the app measures by itself, with the last measurement on screen meanwhile, runs at
+  background priority, on the efficiency cores and after whatever else the Mac is doing: the
+  whole disk again when its breakdown is over 6 hours old (which showed nothing until done: it
+  shows the old one now), the suggestions when a window comes forward, the folder map. A
+  window coming forward while the suggestions were being measured had them measured twice. The
+  folder map measures again every hour only while its window is on screen. Measure Again and
+  ⌘R still run at full speed.
 - Old Files said "Opened 56 years ago" for an app that was never opened; it says "Never opened".
 - Lite: the welcome window's "Open at login" starts off, so Lite opens at login only once you
   turn it on (App Review refused 0.1.2 for a switch that started on).

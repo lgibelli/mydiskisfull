@@ -24,7 +24,7 @@ final class MapModel: ObservableObject {
 
     /// A map older than this is measured again when the window opens.
     static let staleOnOpen: TimeInterval = 30 * 60
-    /// And this often while it stays open.
+    /// And this often while it stays on screen.
     static let refreshEvery: TimeInterval = 60 * 60
 
     private var loaded = false
@@ -93,7 +93,8 @@ final class MapModel: ObservableObject {
             // A folder rather than the disk: map that.
             if let root = AppDelegate.monitor?.access.mapRoot { args += ["--root", root] }
             #endif
-            let data = try await Core.run(args, timeout: 900,
+            // At background priority it takes longer, the more so the busier the Mac is.
+            let data = try await Core.run(args, timeout: automatic ? 3600 : 900,
                                           qos: automatic ? .background : .userInitiated)
             let fresh = try Wire.decode(DiskMap.self, from: data)
             map = fresh
@@ -137,10 +138,12 @@ struct FoldersView: View {
         .task {
             await model.loadKept()
             model.refreshIfOld(MapModel.staleOnOpen)
-            // While the view shows (the task ends when it goes).
+            // While the view shows (the task ends when it goes), and only
+            // while its window is on screen: the task goes on in a covered
+            // or minimised one, and each measure is the whole disk.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
-                model.refreshIfOld(MapModel.refreshEvery)
+                if MainWindow.onScreen { model.refreshIfOld(MapModel.refreshEvery) }
             }
         }
     }
