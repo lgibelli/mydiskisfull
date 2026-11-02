@@ -362,6 +362,7 @@ fn print_account(a: &chatgpt::Account, json_out: bool) -> Result<()> {
                 println!(
                     "Signed in with ChatGPT as {who}, but ChatGPT doesn't let MyDiskIsFull use your plan."
                 );
+                println!("To allow it: `mdif knowledge sign-in`.");
             }
         }
     }

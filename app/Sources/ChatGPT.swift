@@ -22,6 +22,8 @@ final class ChatGPT: ObservableObject {
     static let usage = URL(string: "https://chatgpt.com/settings/usage")!
 
     var signedIn: Bool { account?.signedIn == true }
+    /// Signed in, and allowed to use the plan: questions can be asked.
+    var usable: Bool { signedIn && account?.plan == true }
 
     func load() async {
         if let a = try? await Core.json(ChatGPTAccount.self, ["knowledge", "account"], timeout: 10) {
@@ -113,13 +115,17 @@ struct ChatGPTAccountRow: View {
         Group {
             if let a = gpt.account, a.signedIn {
                 LabeledContent {
-                    Button("Sign Out") { gpt.signOut() }
+                    HStack {
+                        // Signing in again asks to allow the plan.
+                        if !a.plan { ContinueWithChatGPT() }
+                        if !gpt.signingIn { Button("Sign Out") { gpt.signOut() } }
+                    }
                 } label: {
                     Text("Use your ChatGPT plan")
                     if a.plan {
                         Text("Signed in as \(a.email ?? "your account"). Questions use your plan; with ChatGPT Plus, its five-hour limit is shared with every app that uses it.")
                     } else {
-                        Text("Signed in as \(a.email ?? "your account"), but ChatGPT doesn't let MyDiskIsFull use your plan. Sign out, then sign in again and allow it.")
+                        Text("Signed in as \(a.email ?? "your account"), but ChatGPT doesn't let MyDiskIsFull use your plan. Continue with ChatGPT and allow it.")
                     }
                 }
                 if a.plan { UsingChatGPTPlan() }

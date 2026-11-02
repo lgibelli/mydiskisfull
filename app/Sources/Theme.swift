@@ -724,7 +724,8 @@ struct AskAI: View {
         case .confirm(let q):
             VStack(alignment: .leading, spacing: 10) {
                 Text("Ask AI what it is?").font(.subheadline.weight(.semibold))
-                Text(gpt.signedIn ? "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan:"
+                Text(gpt.usable ? "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan:"
+                     : gpt.signedIn ? "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan, once you allow it:"
                      : "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan (Plus or Pro), once you've signed in:")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(q.name).font(.body.monospaced()).textSelection(.enabled)
@@ -738,20 +739,20 @@ struct AskAI: View {
                 Text("Nothing inside the folder, no other names, nothing about you. The answer is kept on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    if gpt.signedIn { UsingChatGPTPlan() }
+                    if gpt.usable { UsingChatGPTPlan() }
                     Spacer()
                     Button("Cancel") {
                         gpt.cancel()
                         step = .offer
                     }
-                    if gpt.signedIn {
+                    if gpt.usable {
                         Button("Ask AI") { Task { await ask() } }
                             .keyboardShortcut(.defaultAction)
                     } else {
                         ContinueWithChatGPT()
                     }
                 }
-                if let p = gpt.problem, !gpt.signedIn {
+                if let p = gpt.problem, !gpt.usable {
                     Text(p).font(.caption).foregroundStyle(.orange)
                 }
             }

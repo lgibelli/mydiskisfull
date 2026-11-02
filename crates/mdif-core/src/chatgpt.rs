@@ -339,6 +339,11 @@ fn authorize_url(
             if let Some(e) = &s.email {
                 p.push(("login_hint", e));
             }
+            // Signing in again while signed in is to allow the plan: a
+            // returning sign-in skips the consent screen otherwise.
+            if s.tokens.is_some() {
+                p.push(("prompt", "consent"));
+            }
         }
     }
     p.extend([
@@ -759,7 +764,7 @@ fn refused(status: u16, code: Option<&str>) -> String {
             "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable",
         ) => "ChatGPT can't answer right now: try again later".into(),
         Some("chatpass_v2_scope_not_authorized" | "chatpass_v2_invalid_authorization_context") => {
-            "ChatGPT doesn't let MyDiskIsFull use your plan: sign out and sign in again".into()
+            "ChatGPT doesn't let MyDiskIsFull use your plan: sign in again and allow it".into()
         }
         Some("subscription_sharing_invalid_user") => {
             "ChatGPT didn't accept the sign-in: sign out and sign in again".into()
@@ -886,7 +891,7 @@ pub fn respond(
         bail!(SIGNED_OUT);
     }
     if !a.plan {
-        bail!("ChatGPT doesn't let MyDiskIsFull use your plan: sign out and sign in again");
+        bail!("ChatGPT doesn't let MyDiskIsFull use your plan: sign in again and allow it");
     }
     let (slug, name) = model(dir, ends)?;
     // What it may do without, if the route turns it down.
@@ -1003,6 +1008,27 @@ mod tests {
         assert_eq!(q["id_token_hint"], "a.b.c");
         assert_eq!(q["login_hint"], "me@example.com");
         assert_eq!(q["ext_agent_host_id"], "urn:uuid:h");
+        assert!(!q.contains_key("prompt"));
+        // Signed in still: it's to allow the plan, so consent is asked again.
+        let signed_in = Saved {
+            tokens: Some(Tokens {
+                access: "a".into(),
+                refresh: "r".into(),
+                expires: 0,
+                earliest_refresh: 0,
+                scopes: vec!["openid".into()],
+            }),
+            ..later
+        };
+        let u = authorize_url(
+            &ends,
+            &signed_in,
+            "http://127.0.0.1:9/auth/callback",
+            "s",
+            "n",
+            "c",
+        );
+        assert_eq!(query(u.split_once('?').unwrap().1)["prompt"], "consent");
     }
 
     #[test]
