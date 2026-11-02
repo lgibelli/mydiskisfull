@@ -327,9 +327,41 @@ pub fn has_mark(path: &Path, name: &str) -> io::Result<bool> {
     }
 }
 
+/// Waits for, then holds, `file`'s advisory lock (`flock`) until it's
+/// closed: one process at a time does what it guards.
+pub fn lock(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is the open file's, for as long as `file` is.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_waits_for_the_one_holding_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let open = || std::fs::File::create(&path).unwrap();
+        let held = open();
+        lock(&held).unwrap();
+        let start = std::time::Instant::now();
+        let other = {
+            let f = open();
+            std::thread::spawn(move || {
+                lock(&f).unwrap();
+                start.elapsed()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+        assert!(other.join().unwrap() >= std::time::Duration::from_millis(200));
+    }
 
     #[test]
     fn a_mark_goes_on_and_comes_off() {

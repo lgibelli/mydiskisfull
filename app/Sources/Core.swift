@@ -52,6 +52,23 @@ private final class Running: @unchecked Sendable {
     var processes: [Process] { lock.withLock { Array(all.values) } }
 }
 
+/// The process a command runs in, for whoever cancels it, which may be
+/// before it has started.
+private final class Started: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var stopped = false
+    func set(_ p: Process) { lock.withLock { process = p } }
+    var cancelled: Bool { lock.withLock { stopped } }
+    func cancel() {
+        let p: Process? = lock.withLock {
+            stopped = true
+            return process
+        }
+        if let p, p.isRunning { p.terminate() }
+    }
+}
+
 struct CoreError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -80,50 +97,59 @@ enum Core {
     static func run(_ args: [String], timeout: TimeInterval = 120,
                     qos: QualityOfService = .utility) async throws -> Data {
         let exe = executable
-        return try await Task.detached(priority: .utility) {
-            let p = Process()
-            p.executableURL = exe
-            p.arguments = args
-            p.qualityOfService = qos
-            let out = Pipe(), err = Pipe()
-            p.standardOutput = out
-            p.standardError = err
-            p.standardInput = FileHandle.nullDevice
-            let exit = Exit()
-            p.terminationHandler = { _ in exit.signal() }
-            try p.run()
-            Core.running.add(p)
-            defer { Core.running.remove(p) }
-            let timedOut = Flag()
-            let stop = DispatchWorkItem {
-                guard p.isRunning else { return }
-                timedOut.set()
-                p.terminate()
-            }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: stop)
-            defer { stop.cancel() }
-            // Both pipes are drained at once: a child that fills one while
-            // we wait on the other would never exit.
-            async let errData = Task.detached { err.fileHandleForReading.readDataToEndOfFile() }.value
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            let errText = String(decoding: await errData, as: UTF8.self)
-            // Not waitUntilExit(): it runs this thread's run loop until it
-            // hears of the exit, and after the await above it can miss it and
-            // wait for good. It did, in both editions: the next refresh never
-            // ran, so the app said the watcher had stopped while it sampled.
-            await exit.wait()
-            if timedOut.isSet {
-                log.error("mdif \(args.joined(separator: " "), privacy: .public) stopped after \(Int(timeout)) s")
-                throw CoreError(message: "mdif \(args.first ?? "") took longer than \(Int(timeout)) seconds and was stopped.")
-            }
-            guard p.terminationStatus == 0 else {
-                let msg = errText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .replacingOccurrences(of: "Error: ", with: "")
-                log.error("mdif \(args.joined(separator: " "), privacy: .public) failed: \(msg, privacy: .public)")
-                throw CoreError(message: msg.isEmpty ? "mdif exited with status \(p.terminationStatus)" : msg)
-            }
-            return data
-        }.value
+        // Cancelling the task that waits stops the command (Cancel while
+        // signing in): it ends as if stopped, and that's what's thrown.
+        let started = Started()
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                let p = Process()
+                started.set(p)
+                p.executableURL = exe
+                p.arguments = args
+                p.qualityOfService = qos
+                let out = Pipe(), err = Pipe()
+                p.standardOutput = out
+                p.standardError = err
+                p.standardInput = FileHandle.nullDevice
+                let exit = Exit()
+                p.terminationHandler = { _ in exit.signal() }
+                try p.run()
+                if started.cancelled { p.terminate() }
+                Core.running.add(p)
+                defer { Core.running.remove(p) }
+                let timedOut = Flag()
+                let stop = DispatchWorkItem {
+                    guard p.isRunning else { return }
+                    timedOut.set()
+                    p.terminate()
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: stop)
+                defer { stop.cancel() }
+                // Both pipes are drained at once: a child that fills one while
+                // we wait on the other would never exit.
+                async let errData = Task.detached { err.fileHandleForReading.readDataToEndOfFile() }.value
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                let errText = String(decoding: await errData, as: UTF8.self)
+                // Not waitUntilExit(): it runs this thread's run loop until it
+                // hears of the exit, and after the await above it can miss it and
+                // wait for good. It did, in both editions: the next refresh never
+                // ran, so the app said the watcher had stopped while it sampled.
+                await exit.wait()
+                if timedOut.isSet {
+                    log.error("mdif \(args.joined(separator: " "), privacy: .public) stopped after \(Int(timeout)) s")
+                    throw CoreError(message: "mdif \(args.first ?? "") took longer than \(Int(timeout)) seconds and was stopped.")
+                }
+                guard p.terminationStatus == 0 else {
+                    let msg = errText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .replacingOccurrences(of: "Error: ", with: "")
+                    log.error("mdif \(args.joined(separator: " "), privacy: .public) failed: \(msg, privacy: .public)")
+                    throw CoreError(message: msg.isEmpty ? "mdif exited with status \(p.terminationStatus)" : msg)
+                }
+                return data
+            }.value
+        } onCancel: {
+            started.cancel()
+        }
     }
 
     static func json<T: Decodable>(_ type: T.Type, _ args: [String], timeout: TimeInterval = 120,

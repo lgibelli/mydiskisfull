@@ -117,25 +117,3 @@ releases.
 
 A change to the format that older copies can't read goes out as `folders-2.json`, beside the old
 one.
-
-## Ask AI's server
-
-`worker/` is the Cloudflare Worker behind "Ask AI…" (`mdif knowledge ask`), at
-`https://ask.salamacchine.it/mydiskisfull/v1/folder`. `cd worker && npm ci && npm run check &&
-npm test` checks it locally, with a stand-in for Anthropic's API (nothing is asked for real).
-
-The first time, with the account that has salamacchine.it:
-
-1. `npx wrangler secret put ANTHROPIC_API_KEY` (a key of its own, with a spend limit in the
-   Anthropic Console as well as `DAILY_ASKS`).
-2. `npx wrangler deploy`: it creates the D1 database and the `ask.salamacchine.it` domain. If it
-   writes the database's id into `wrangler.jsonc`, commit it.
-3. `npx wrangler d1 migrations apply ANSWERS --remote`.
-
-After that, `npx wrangler deploy` again for a change, and `npx wrangler d1 migrations apply
-ANSWERS --remote` for a new migration. `DAILY_ASKS` in `wrangler.jsonc` is how many questions
-Claude answers in a day, for everyone; past it the app says to try again tomorrow.
-
-Now and then, `worker/answers.sh` lists what Claude said, most asked first, as entries for
-`folders.json`: check each, put the good ones in the list and publish it as above. A folder the
-list knows isn't asked about any more.

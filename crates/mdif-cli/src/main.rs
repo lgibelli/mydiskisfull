@@ -316,7 +316,7 @@ enum KnowledgeAction {
     },
     /// Ask AI what a folder is, when nothing's known about it: only its
     /// name (never your own folders, nothing in it), its size and the macOS
-    /// version are sent, to MyDiskIsFull's server, which asks Claude
+    /// version are sent, to OpenAI, on your ChatGPT plan (`sign-in` first)
     Ask {
         folder: PathBuf,
         /// Its size, sent rounded to two digits
@@ -326,6 +326,14 @@ enum KnowledgeAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Sign in with ChatGPT, in the browser, so that Ask AI uses your plan
+    /// (Plus or Pro)
+    SignIn,
+    /// Sign out of ChatGPT: the sign-in is revoked at OpenAI and forgotten
+    /// here
+    SignOut,
+    /// Whether you're signed in with ChatGPT, and as whom
+    Account,
     /// Check a list, and its signature, before it's put online
     Check {
         file: PathBuf,
@@ -459,6 +467,9 @@ fn main() -> Result<()> {
                 bytes,
                 dry_run,
             }) => knowledge_cmd::ask(&folder, bytes, dry_run, json)?,
+            Some(KnowledgeAction::SignIn) => knowledge_cmd::sign_in(json)?,
+            Some(KnowledgeAction::SignOut) => knowledge_cmd::sign_out(json)?,
+            Some(KnowledgeAction::Account) => knowledge_cmd::account(json)?,
             Some(KnowledgeAction::Check { file, sig }) => {
                 knowledge_cmd::check(&file, sig.as_deref())?
             }

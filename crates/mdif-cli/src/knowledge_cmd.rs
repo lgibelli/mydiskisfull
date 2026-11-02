@@ -1,12 +1,16 @@
 //! `mdif knowledge`: what's known about folders (see mdif_core::knowledge),
 //! `update` for a newer list, `about <folder>` for what's said of one,
 //! `missing` for this Mac's folders nothing in particular is said about,
-//! `ask <folder>` to ask AI about one (mdif_core::ask), and `check <file>`
-//! for a list before it's put online.
+//! `ask <folder>` to ask AI about one (mdif_core::ask), on the ChatGPT plan
+//! `sign-in` connects (`sign-out`, `account`; mdif_core::chatgpt), and
+//! `check <file>` for a list before it's put online.
 
 use std::path::{Path, PathBuf};
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
+use mdif_core::chatgpt::{self, Endpoints};
 use mdif_core::knowledge::{self, Known};
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
@@ -246,12 +250,21 @@ pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> R
             crate::watch_cmd::tilde(&p.to_string_lossy())
         )
     })?;
+    let dir = dir();
+    let me = chatgpt::account(&dir);
     if dry_run {
         if json_out {
-            let s = json!({"name": q.name, "bytes": q.bytes, "macos": q.macos, "url": mdif_core::ask::URL});
+            let s =
+                json!({"name": q.name, "bytes": q.bytes, "macos": q.macos, "account": me.email});
             println!("{}", serde_json::to_string_pretty(&s)?);
         } else {
-            println!("Would send to {}:", mdif_core::ask::URL);
+            match &me.email {
+                Some(e) => println!(
+                    "Would send to OpenAI, on the ChatGPT plan of {}:",
+                    printable(e)
+                ),
+                None => println!("Would send to OpenAI, on your ChatGPT plan (once you sign in):"),
+            }
             println!("  {}", printable(&q.name));
             if let Some(b) = q.bytes {
                 println!("  {}", bytes(b));
@@ -261,11 +274,10 @@ pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> R
         }
         return Ok(());
     }
-    let dir = dir();
     let now = unix_now();
     let a = match mdif_core::ask::kept(&dir, &q.name, now) {
         Some(a) => a,
-        None => mdif_core::ask::ask(&dir, &q, now)?,
+        None => mdif_core::ask::ask(&dir, &Endpoints::openai(), &q, now)?,
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&a)?);
@@ -286,6 +298,73 @@ pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> R
         }
     }
     println!("Written by AI ({}) and not checked: it may be wrong.", a.by);
+    Ok(())
+}
+
+pub fn sign_in(json_out: bool) -> Result<()> {
+    let open = |url: &str| -> Result<()> {
+        // Not for the app: what's printed is its error message.
+        if !json_out {
+            eprintln!("Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{url}");
+        }
+        let opened = std::process::Command::new("/usr/bin/open")
+            .arg(url)
+            .status();
+        if !opened.is_ok_and(|s| s.success()) {
+            eprintln!("(The browser didn't open.)");
+        }
+        Ok(())
+    };
+    let a = chatgpt::sign_in(
+        &dir(),
+        &Endpoints::openai(),
+        &open,
+        Duration::from_secs(300),
+    )?;
+    print_account(&a, json_out)
+}
+
+pub fn sign_out(json_out: bool) -> Result<()> {
+    let revoked = chatgpt::sign_out(&dir(), &Endpoints::openai())?;
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"revoked": revoked}))?
+        );
+    } else if revoked {
+        println!("Signed out of ChatGPT.");
+    } else {
+        println!(
+            "Signed out here, but OpenAI didn't confirm it: you can disconnect MyDiskIsFull in ChatGPT's settings ({}).",
+            chatgpt::USAGE
+        );
+    }
+    Ok(())
+}
+
+pub fn account(json_out: bool) -> Result<()> {
+    print_account(&chatgpt::account(&dir()), json_out)
+}
+
+fn print_account(a: &chatgpt::Account, json_out: bool) -> Result<()> {
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(a)?);
+        return Ok(());
+    }
+    match (&a.email, a.signed_in) {
+        (_, false) => println!("Not signed in with ChatGPT: `mdif knowledge sign-in`."),
+        (e, true) => {
+            let who = e.as_deref().map(printable).unwrap_or_default();
+            if a.plan {
+                println!("Signed in with ChatGPT as {who}: Ask AI uses your ChatGPT plan.");
+                println!("What apps use of it: {}", a.usage);
+            } else {
+                println!(
+                    "Signed in with ChatGPT as {who}, but ChatGPT doesn't let MyDiskIsFull use your plan."
+                );
+            }
+        }
+    }
     Ok(())
 }
 

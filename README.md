@@ -65,7 +65,8 @@ the newest list of what's known about folders (what one is, why it grows, what h
 salamacchine.it, signed the same way; nothing about your Mac is sent, and Settings turns it off.
 Where the list says nothing of a folder you can ask AI: it shows what would be sent (the folder's
 name, never one of your own folders nor what's in it, its size and the macOS version) and sends
-it only when you say so, to MyDiskIsFull's server, which asks Claude ([worker/](worker)).
+it only when you say so, from your Mac to OpenAI, on your own ChatGPT plan (Plus or Pro: "Continue
+with ChatGPT" signs in). No server of MyDiskIsFull's is in between.
 
 The command line is inside the app; to use it from a terminal:
 

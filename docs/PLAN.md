@@ -183,17 +183,17 @@ list only when that changed), which is taken only when it's signed with the upda
 back to an older signed copy). Text only: what may be deleted, emptied or moved stays in the code
 (`clean`, the handlers, whose text goes with their buttons). Published by `app/knowledge.sh`
 into the website (Cloudflare).
-**Ask AI** (`ask.rs`, `worker/`): where the list says nothing of a folder, the full edition offers
-"Ask AI…", which shows exactly what would be sent (`mdif knowledge ask <folder> --dry-run`: the
-name as `knowledge::generic` makes it, the size to two digits, the macOS version) and sends it
-only on "Ask AI". The Worker (Cloudflare, `ask.salamacchine.it`) checks the name against the same
-rule again (`worker/src/name.ts`), answers from D1 when the name was asked before, and otherwise
-asks Claude (structured output: known, what, grows, helps; a command or a link in a text drops
-it), within a per-Mac rate limit (a hash of the IP, never kept) and a daily cap for everyone.
-Nothing about who asked is stored or logged. The answer is kept on the Mac too (`answers.json`
-beside the history) and shown as the AI's, not checked; `worker/answers.sh` lists the most asked,
-which go into the list once checked, and from there to every Mac. Not in Lite (no network
-entitlement, and App Privacy would change).
+**Ask AI** (`ask.rs`, `chatgpt.rs`): where the list says nothing of a folder, the full edition
+offers "Ask AI…", which shows exactly what would be sent (`mdif knowledge ask <folder> --dry-run`:
+the name as `knowledge::generic` makes it, the size to two digits, the macOS version) and sends it
+only on "Ask AI", from the Mac to OpenAI's Responses API on the user's own ChatGPT plan: OpenAI's
+Sign in with ChatGPT for open-source apps that run locally (OAuth with PKCE in the browser, the
+callback on 127.0.0.1, the client registered by OpenAI at the first sign-in; `mdif knowledge
+sign-in`, `sign-out`, `account`). No server of ours, no API key, nothing to pay for. The tokens
+are kept in `chatgpt.json` beside the history (0600, out of Time Machine), refreshed one process
+at a time (the refresh token rotates). Structured output: known, what, grows, helps; a command or
+a link in a text drops it. The answer is kept on the Mac (`answers.json`) and shown as the AI's,
+not checked. Not in Lite (no network entitlement, and App Privacy would change).
 What's missing is found on each Mac (`mdif knowledge missing`, `unexplained` on items and
 changes): a folder shown (an item, a change since the last backup, a week's growth of 500 MB or
 more) that isn't your own nor explained by a rule (build output, apps, macOS's volumes), with no

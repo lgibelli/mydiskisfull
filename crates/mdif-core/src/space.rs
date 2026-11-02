@@ -744,14 +744,33 @@ fn output_within(cmd: Command, wait: Duration) -> Option<Vec<u8>> {
 
 /// What it printed and how it ended, if it ends within `wait`; killed
 /// otherwise.
-pub(crate) fn run_within(mut cmd: Command, wait: Duration) -> Option<std::process::Output> {
-    use std::io::Read;
+pub(crate) fn run_within(cmd: Command, wait: Duration) -> Option<std::process::Output> {
+    run_fed(cmd, None, wait)
+}
+
+/// The same, with `input` on its standard input: what mustn't show in its
+/// arguments, which any process can read.
+pub(crate) fn run_fed(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    wait: Duration,
+) -> Option<std::process::Output> {
+    use std::io::{Read, Write};
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // From a thread: a child that writes before it has read all of it
+        // would wait for us as we wait for it. Closed when written.
+        std::thread::spawn(move || stdin.write_all(&input));
+    }
     let read = |mut from: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();

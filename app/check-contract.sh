@@ -43,6 +43,8 @@ db="$T/history.sqlite3"
 "$MDIF" docker --json > "$T/docker.json"
 # What would be sent: nothing is.
 "$MDIF" knowledge ask "$HOME/.cache/codex-runtimes" --bytes 1734567890 --dry-run --json > "$T/question.json"
+# Who's signed in with ChatGPT, read from beside the history: nothing is sent.
+"$MDIF" knowledge account --json > "$T/account.json"
 # Refused (it isn't a build folder), so nothing is marked.
 "$MDIF" timemachine exclude "$T" --json --db "$db" > "$T/exclude.json"
 
@@ -72,6 +74,7 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     docker="$T/docker.json" \
     knowledge=app/Tests/knowledge-update.json \
     question="$T/question.json" \
+    account="$T/account.json" \
     answer=app/Tests/knowledge-answer.json \
     status=app/Tests/status-incidents.json \
     apply=app/Tests/apply-profile.json \

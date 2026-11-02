@@ -12,7 +12,8 @@
 //! - [`keep`]: what you keep, which nothing suggests deleting.
 //! - [`knowledge`]: what's known about folders (what one is, why it grows,
 //!   what helps), built in and updated as signed data; [`ask`]: asking AI
-//!   about one nothing's known about, when someone asks.
+//!   about one nothing's known about, when someone asks, with their ChatGPT
+//!   plan ([`chatgpt`]: signing in, and the requests).
 //! - [`space`]: where the space goes, sorted into kinds, and what of it is
 //!   waste.
 //! - [`worktrees`]: agent worktrees whose work is merged, with nothing left
@@ -29,6 +30,7 @@
 pub mod alerts;
 pub mod apfs;
 pub mod ask;
+pub mod chatgpt;
 pub mod clean;
 pub mod docker;
 pub mod forecast;

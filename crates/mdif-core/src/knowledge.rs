@@ -312,7 +312,7 @@ pub fn generic(path: &Path, home: &Path) -> Option<String> {
 }
 
 /// A name made for one Mac (a UUID, a long number) would tell it apart
-/// from others: as worker/src/name.ts says.
+/// from others, and from the account on it.
 fn identifies(name: &str) -> bool {
     let run = |ok: fn(char) -> bool| {
         name.chars()

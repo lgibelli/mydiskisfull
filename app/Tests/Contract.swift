@@ -66,6 +66,9 @@ enum Contract {
                 case "answer":
                     let a = try check(AskAnswer.self, path)
                     summary = "\(a.name): \(a.known ? "known" : "unknown"), by \(a.by)"
+                case "account":
+                    let a = try check(ChatGPTAccount.self, path)
+                    summary = a.signedIn ? "signed in\(a.plan ? ", on the plan" : "")" : "not signed in"
                 case "docker":
                     let r = try check(DockerReport.self, path)
                     summary = r.running ? "\(r.pruned.count) to prune, \(r.unused.count) unused images" : "not running: \(r.why ?? "")"

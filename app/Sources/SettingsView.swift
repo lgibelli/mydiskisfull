@@ -415,8 +415,9 @@ struct SettingsView: View {
                 }
                 Toggle(isOn: $askAI) {
                     Text("Ask AI about folders nothing's known about")
-                    Text("Shows Ask AI… where the list says nothing about a folder. Before anything is sent it shows what would be: the folder's name, its size and the macOS version, never what's in it. Claude, Anthropic's AI, answers through salamacchine.it.")
+                    Text("Shows Ask AI… where the list says nothing about a folder. Before anything is sent it shows what would be: the folder's name, its size and the macOS version, never what's in it. It goes from this Mac to OpenAI, on your ChatGPT plan.")
                 }
+                if askAI { ChatGPTAccountRow() }
             }
             #endif
         }

@@ -814,13 +814,29 @@ struct KnowledgeUpdate: Decodable {
     let folders: Int
 }
 
-/// What `mdif knowledge ask <folder> --dry-run` would send, all of it.
+/// What `mdif knowledge ask <folder> --dry-run` would send, all of it, to
+/// OpenAI on the ChatGPT plan of `account` (nil: not signed in).
 struct AskQuestion: Decodable {
     let name: String
     /// Rounded to two digits.
     let bytes: Int64?
     let macos: String
-    let url: String
+    let account: String?
+}
+
+/// Who's signed in with ChatGPT, for Ask AI (`mdif knowledge account`).
+struct ChatGPTAccount: Decodable {
+    let signedIn: Bool
+    let email: String?
+    /// Whether ChatGPT lets MyDiskIsFull's questions use the plan.
+    let plan: Bool
+    /// Where to see and limit what apps use of it.
+    let usage: String
+}
+
+/// `mdif knowledge sign-out`: false when OpenAI didn't confirm it.
+struct SignedOut: Decodable {
+    let revoked: Bool
 }
 
 /// What the AI said of a folder (`mdif knowledge ask <folder>`); `known`
@@ -833,8 +849,6 @@ struct AskAnswer: Decodable {
     let helps: String?
     /// The model that wrote it.
     let by: String
-    /// The server had it already, from someone else's question.
-    let cached: Bool
     let asked: Int64
 
     var said: Known { Known(what: what, grows: grows, helps: helps, source: nil, ai: by) }

@@ -660,7 +660,7 @@ struct KnownText: View {
                 Link("Where it's said", destination: url).font(.caption)
             }
             if let ai = known.ai {
-                Label("Written by AI (\(ai.hasPrefix("claude") ? "Claude" : ai)) and not checked: it may be wrong.",
+                Label("Written by AI (\(ai)) and not checked: it may be wrong.",
                       systemImage: "sparkles")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -679,13 +679,15 @@ struct KnownText: View {
 #if !APP_STORE
 /// Where nothing's known about a folder: "Ask AI…", which first shows what
 /// would be sent (its name as `mdif` makes it, its size, the macOS version)
-/// and sends it only on "Ask AI" (`mdif knowledge ask`). Settings turns it
-/// off.
+/// and sends it only on "Ask AI" (`mdif knowledge ask`), to OpenAI on the
+/// ChatGPT plan of whoever signed in ("Continue with ChatGPT" first).
+/// Settings turns it off.
 struct AskAI: View {
     let path: String
     /// Its size, when it's a folder's size (a backup's change isn't).
     let bytes: Int64?
     @AppStorage("askAI") private var enabled = true
+    @ObservedObject private var gpt = ChatGPT.shared
     @State private var step: Step
 
     enum Step {
@@ -722,7 +724,8 @@ struct AskAI: View {
         case .confirm(let q):
             VStack(alignment: .leading, spacing: 10) {
                 Text("Ask AI what it is?").font(.subheadline.weight(.semibold))
-                Text("MyDiskIsFull sends only this to its server at salamacchine.it, which asks Claude, Anthropic's AI:")
+                Text(gpt.signedIn ? "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan:"
+                     : "MyDiskIsFull sends only this to OpenAI, on your ChatGPT plan (Plus or Pro), once you've signed in:")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(q.name).font(.body.monospaced()).textSelection(.enabled)
                     Text([q.bytes.map { Format.bytes($0) }, "macOS \(q.macos)"].compactMap { $0 }
@@ -732,13 +735,24 @@ struct AskAI: View {
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                Text("Nothing inside the folder, no other names, nothing about you. The answer is kept for whoever asks about the same folder.")
+                Text("Nothing inside the folder, no other names, nothing about you. The answer is kept on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
+                    if gpt.signedIn { UsingChatGPTPlan() }
                     Spacer()
-                    Button("Cancel") { step = .offer }
-                    Button("Ask AI") { Task { await ask() } }
-                        .keyboardShortcut(.defaultAction)
+                    Button("Cancel") {
+                        gpt.cancel()
+                        step = .offer
+                    }
+                    if gpt.signedIn {
+                        Button("Ask AI") { Task { await ask() } }
+                            .keyboardShortcut(.defaultAction)
+                    } else {
+                        ContinueWithChatGPT()
+                    }
+                }
+                if let p = gpt.problem, !gpt.signedIn {
+                    Text(p).font(.caption).foregroundStyle(.orange)
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -757,13 +771,20 @@ struct AskAI: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(why).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button("Try Again") { Task { await prepare() } }
+                if why.hasPrefix("Usage limit reached") {
+                    // What OpenAI asks for at the plan's limit.
+                    Button("Manage Usage") { NSWorkspace.shared.open(ChatGPT.usage) }
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Try Again") { Task { await prepare() } }
+                }
             }
         }
     }
 
     /// What would be sent, from `mdif` itself: what's shown is what goes.
     private func prepare() async {
+        await gpt.load()
         do {
             step = .confirm(try await Core.json(AskQuestion.self, args + ["--dry-run"], timeout: 30))
         } catch {
@@ -783,7 +804,7 @@ struct AskAI: View {
     }
 
     /// `mdif`'s message, its first line, as a sentence.
-    private static func sentence(_ error: Error) -> String {
+    static func sentence(_ error: Error) -> String {
         let line = error.localizedDescription.split(separator: "\n").first.map(String.init) ?? ""
         let s = line.prefix(1).uppercased() + line.dropFirst()
         return s.hasSuffix(".") ? s : s + "."

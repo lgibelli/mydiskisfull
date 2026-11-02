@@ -51,12 +51,12 @@ All notable changes to this project are documented here. The format is based on
   Code's transcripts, `/usr/local`, `/private/var/db` and Playwright's browsers.
 - Ask AI: where nothing's known about a folder, Storage's (i) and Time Machine's rows offer "Ask
   AI…". It first shows exactly what would be sent (the folder's name as above, its size and the
-  macOS version: nothing inside it, nothing about you) and sends it only when you say so, to
-  MyDiskIsFull's server at salamacchine.it, which asks Claude, Anthropic's AI. Each folder is
-  asked once: the answer is kept for whoever asks about the same folder, and on your Mac, and
-  it's shown as written by AI and not checked. The most asked go into the list once checked.
-  Settings turns it off. `mdif knowledge ask <folder>` (`--dry-run` sends nothing). Not in
-  Lite.
+  macOS version: nothing inside it, nothing about you) and sends it only when you say so, from
+  your Mac to OpenAI, on your own ChatGPT plan (Plus or Pro): "Continue with ChatGPT" signs in,
+  in the browser, and no server of MyDiskIsFull's is in between. The answer is kept on your Mac
+  and shown as written by AI and not checked. Settings turns it off, and shows whom you're
+  signed in as, with Sign Out. `mdif knowledge ask <folder>` (`--dry-run` sends nothing), `mdif
+  knowledge sign-in`, `sign-out` and `account`. Not in Lite.
 
 ### Changed
 - The main window is laid out like Apple's own apps, in five pages instead of seven: Overview,
