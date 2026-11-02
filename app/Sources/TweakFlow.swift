@@ -1,5 +1,6 @@
 // Applying and undoing a tweak: what it changes and what you give up first,
-// from a dry run, then what happened. A tweak that installs a configuration
+// from a dry run, then what happened, in the window (Notices.swift) rather
+// than in another alert. A tweak that installs a configuration
 // profile shows everything the profile holds first (ProfileReview.swift). The
 // Rust core records every value it replaces before changing anything, so Undo
 // puts back exactly what was there. Not in the App Store edition (see
@@ -23,11 +24,11 @@ enum TweakFlow {
         do {
             plan = try await Core.json(TweakApplied.self, ["tweaks", "apply", id, "--dry-run"])
         } catch {
-            show(.warning, "Can't apply this tweak", error.localizedDescription)
+            Notices.shared.post(ok: false, "Can't apply this tweak", error.localizedDescription)
             return .unchanged
         }
         guard !plan.changes.isEmpty else {
-            show(.informational, plan.title, "Already applied: there is nothing to change.")
+            Notices.shared.post(ok: true, plan.title, "Already applied: there is nothing to change.")
             return .unchanged
         }
         if let profile = plan.profiles.first {
@@ -48,14 +49,14 @@ enum TweakFlow {
         do {
             let done = try await Core.json(TweakApplied.self, ["tweaks", "apply", id])
             // The review said what to do in System Settings, which is open
-            // now: an alert would only cover it.
+            // now.
             if plan.profiles.isEmpty {
-                show(.informational, done.title, done.next ?? "Done.")
+                Notices.shared.post(ok: true, done.title, done.next ?? "Done.")
             }
             return .done
         } catch {
-            show(.warning, "The tweak wasn't applied", error.localizedDescription
-                 + "\n\nAnything it had changed was put back.")
+            Notices.shared.post(ok: false, "The tweak wasn't applied", error.localizedDescription
+                                + "\n\nAnything it had changed was put back.")
             return .failed
         }
     }
@@ -74,10 +75,10 @@ enum TweakFlow {
                     + r.kept.map { "• \($0)" }.joined(separator: "\n")
             }
             if r.restart { text += "\n\nIt takes effect after a restart." }
-            show(.informational, "Undone: \(r.title)", text)
+            Notices.shared.post(ok: true, "Undone: \(r.title)", text)
             return .done
         } catch {
-            show(.warning, "Couldn't undo it", error.localizedDescription)
+            Notices.shared.post(ok: false, "Couldn't undo it", error.localizedDescription)
             return .unchanged
         }
     }
@@ -90,15 +91,6 @@ enum TweakFlow {
         a.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         return a.runModal() == .alertFirstButtonReturn
-    }
-
-    static func show(_ style: NSAlert.Style, _ title: String, _ text: String) {
-        let a = NSAlert()
-        a.alertStyle = style
-        a.messageText = title
-        a.informativeText = text
-        NSApp.activate(ignoringOtherApps: true)
-        a.runModal()
     }
 }
 #endif

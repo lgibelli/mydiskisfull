@@ -80,6 +80,7 @@ final class Navigator: ObservableObject {
 struct MainWindow: View {
     @ObservedObject var monitor: Monitor
     @ObservedObject private var nav = Navigator.shared
+    @ObservedObject private var notices = Notices.shared
 
     var body: some View {
         NavigationSplitView {
@@ -102,6 +103,17 @@ struct MainWindow: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // What a clean-up, a tweak or Tidy Now did, instead of an alert.
+            .overlay(alignment: .bottom) {
+                if let n = notices.current {
+                    NoticeBanner(notice: n)
+                        .id(n.id)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 16)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy, value: notices.current)
         }
         .frame(minWidth: 820, minHeight: 560)
         .sheet(isPresented: $nav.settingsOpen) {

@@ -2,8 +2,9 @@
 // checks each again first and refuses what changed (a worktree with new
 // work, something you keep, an app still running). What can't be undone is
 // asked first; what goes to the Trash isn't, and says its space comes back
-// once the Trash is emptied. Not in the App Store edition, which may only
-// read the disk (see Edition.swift).
+// once the Trash is emptied. What was done shows in the window, not in an
+// alert (Notices.swift). Not in the App Store edition, which may only read
+// the disk (see Edition.swift).
 
 #if !APP_STORE
 import AppKit
@@ -23,7 +24,7 @@ enum CleanFlow {
             // Removing build output can be hundreds of thousands of files.
             r = try await Core.json(Cleaned.self, ["clean"] + a.paths, timeout: 1800)
         } catch {
-            TweakFlow.show(.warning, "Nothing was cleaned", error.localizedDescription)
+            Notices.shared.post(ok: false, "Nothing was cleaned", error.localizedDescription)
             return false
         }
         var lines: [String] = []
@@ -65,9 +66,9 @@ enum CleanFlow {
         if !r.failed.isEmpty {
             lines.append("Not done:\n" + r.failed.map { "• \($0.why)" }.joined(separator: "\n"))
         }
-        TweakFlow.show(r.done.isEmpty ? .warning : .informational,
-                       r.done.isEmpty ? "Nothing was cleaned" : "Done",
-                       lines.joined(separator: "\n\n"))
+        // What wasn't done stays until it's closed, with why.
+        Notices.shared.post(ok: !r.done.isEmpty, r.done.isEmpty ? "Nothing was cleaned" : "Done",
+                            lines.joined(separator: "\n"), stays: !r.failed.isEmpty || r.done.isEmpty)
         return !r.done.isEmpty
     }
 }

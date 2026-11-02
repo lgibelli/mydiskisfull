@@ -320,14 +320,14 @@ final class Monitor: ObservableObject {
                 let r = try await Core.json(BackupExclusion.self,
                                             ["timemachine", backedUp ? "include" : "exclude"] + paths, timeout: 120)
                 if !r.refused.isEmpty {
-                    TweakFlow.show(.warning, backedUp ? "Not backed up again" : "Not kept out",
-                                   r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
+                    Notices.shared.post(ok: false, backedUp ? "Not backed up again" : "Not kept out",
+                                        r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
                 }
                 timeMachine = timeMachine?.marking(r.done, backedUp: backedUp)
                 // Those kept out weren't measured: their sizes, now.
                 if backedUp, !r.done.isEmpty { await loadTimeMachine() }
             } catch {
-                TweakFlow.show(.warning, "Nothing was changed", error.localizedDescription)
+                Notices.shared.post(ok: false, "Nothing was changed", error.localizedDescription)
             }
         }
     }
@@ -340,7 +340,7 @@ final class Monitor: ObservableObject {
             defer { backupStarting = false }
             let r = try? await Core.json(BackupStarted.self, ["timemachine", "back-up"], timeout: 60)
             if r?.started != true {
-                TweakFlow.show(.warning, "Time Machine didn't start", r?.why ?? "mdif couldn't ask it.")
+                Notices.shared.post(ok: false, "Time Machine didn't start", r?.why ?? "mdif couldn't ask it.")
             }
             await loadTimeMachine(quick: true)
         }
@@ -363,7 +363,7 @@ final class Monitor: ObservableObject {
             do {
                 tidies = try await Core.json(TidyList.self, ["tidy", on ? "on" : "off", id], timeout: 30).tidies
             } catch {
-                TweakFlow.show(.warning, "Couldn't change it", error.localizedDescription)
+                Notices.shared.post(ok: false, "Couldn't change it", error.localizedDescription)
             }
         }
     }
@@ -378,7 +378,7 @@ final class Monitor: ObservableObject {
             do {
                 r = try await Core.json(TidyRun.self, ["tidy", "run", id], timeout: 1800)
             } catch {
-                TweakFlow.show(.warning, "Nothing was tidied", error.localizedDescription)
+                Notices.shared.post(ok: false, "Nothing was tidied", error.localizedDescription)
                 return
             }
             var lines: [String] = []
@@ -392,7 +392,9 @@ final class Monitor: ObservableObject {
             if !r.failed.isEmpty {
                 lines.append("Not done:\n" + r.failed.map { "• \($0.why)" }.joined(separator: "\n"))
             }
-            TweakFlow.show(.informational, r.done.isEmpty ? "All tidy" : "Tidied", lines.joined(separator: "\n\n"))
+            Notices.shared.post(ok: !r.done.isEmpty || r.failed.isEmpty,
+                                r.done.isEmpty ? "All tidy" : "Tidied", lines.joined(separator: "\n"),
+                                stays: !r.failed.isEmpty)
             await loadTidies()
             if id == "backups" { await loadTimeMachine() }
             if !r.done.isEmpty {
