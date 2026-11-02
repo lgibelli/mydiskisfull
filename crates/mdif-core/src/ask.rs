@@ -216,20 +216,31 @@ fn reply(text: &str) -> Result<Reply> {
     serde_json::from_str(t.trim()).context("the AI's answer was unexpected: try again")
 }
 
+/// What's kept of the AI's reply. When it says it knows but what it says
+/// can't be shown, that's an error, not "doesn't know": nothing is kept,
+/// so asking again gets another answer.
+fn answer(q: &Question, r: Reply, by: &str, now: i64) -> Result<Answer> {
+    let what = plain(r.what);
+    if r.known && what.is_none() {
+        return Err(anyhow!(
+            "the AI's answer had a link, a command or too much in it, so it isn't shown: ask again"
+        ));
+    }
+    Ok(Answer {
+        name: q.name.clone(),
+        known: r.known,
+        what: what.filter(|_| r.known),
+        grows: plain(r.grows).filter(|_| r.known),
+        helps: plain(r.helps).filter(|_| r.known),
+        by: by.chars().take(60).collect(),
+        asked: now,
+    })
+}
+
 /// Asks with the ChatGPT plan, and keeps the answer in `dir`.
 pub fn ask(dir: &Path, ends: &Endpoints, q: &Question, now: i64) -> Result<Answer> {
     let said = chatgpt::respond(dir, ends, INSTRUCTIONS, &input(q), &schema())?;
-    let r = reply(&said.text)?;
-    let what = plain(r.what);
-    let a = Answer {
-        name: q.name.clone(),
-        known: r.known && what.is_some(),
-        what,
-        grows: plain(r.grows),
-        helps: plain(r.helps),
-        by: said.model.chars().take(60).collect(),
-        asked: now,
-    };
+    let a = answer(q, reply(&said.text)?, &said.model, now)?;
     let mut all = read(dir);
     all.answers.retain(|b| !same(&b.name, &a.name));
     all.answers.push(a.clone());
@@ -346,5 +357,28 @@ mod tests {
             macos: "27.2".into(),
         };
         assert_eq!(input(&q), "Folder: ~/.x\nSize: 1.7 GB\nmacOS: 27.2");
+    }
+
+    #[test]
+    fn a_known_answer_that_cant_be_shown_isnt_doesnt_know() {
+        let q = Question {
+            name: "~/.x".into(),
+            bytes: None,
+            macos: "27.2".into(),
+        };
+        let r = |known, what: &str| Reply {
+            known,
+            what: Some(what.into()),
+            grows: Some("".into()),
+            helps: Some("H.".into()),
+        };
+        let a = answer(&q, r(true, "W."), "GPT", 1).unwrap();
+        assert!(a.known);
+        assert_eq!((a.what.as_deref(), a.grows), (Some("W."), None));
+        assert!(answer(&q, r(true, "See https://example.com."), "GPT", 1).is_err());
+        // Said not to know: nothing it wrote anyway is kept.
+        let a = answer(&q, r(false, "W."), "GPT", 1).unwrap();
+        assert!(!a.known);
+        assert_eq!((a.what, a.helps), (None, None));
     }
 }
