@@ -17,7 +17,9 @@
 //! - [`space`]: where the space goes, sorted into kinds, and what of it is
 //!   waste.
 //! - [`worktrees`]: agent worktrees whose work is merged, with nothing left
-//!   in them.
+//!   in them; [`xcode`]: Xcode's DerivedData, simulator runtimes and
+//!   simulators; [`android`]: Android's emulators and their system images;
+//!   [`docker`]: what Docker can remove.
 //! - [`privacy`]: the folders a background process mustn't open without Full
 //!   Disk Access, because macOS would wait on a prompt.
 //! - [`incidents`]: runaway fillers (growth, churn), in one sentence;
@@ -28,6 +30,7 @@
 //!   each cause.
 
 pub mod alerts;
+pub mod android;
 pub mod apfs;
 pub mod ask;
 pub mod chatgpt;
@@ -55,3 +58,4 @@ pub mod tweaks;
 pub mod units;
 pub mod watch;
 pub mod worktrees;
+pub mod xcode;

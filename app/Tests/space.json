@@ -52,6 +52,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -69,6 +70,7 @@
           "note": "Not opened since March",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -84,6 +86,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -101,6 +104,7 @@
           "note": "Never opened",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -116,6 +120,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -140,6 +145,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -157,6 +163,7 @@
           "note": "Mostly unchanged since 2023",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -172,6 +179,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -187,6 +195,7 @@
           "note": "Freed when you empty the Trash",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -202,6 +211,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -226,6 +236,7 @@
           "note": "`brew cleanup` removes old versions",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -241,6 +252,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": {
             "what": "Gradle's caches: the dependencies and Gradle versions your projects' builds downloaded.",
@@ -262,6 +274,7 @@
           "note": "Xcode → Settings → Components removes it; it downloads again when needed",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -276,7 +289,37 @@
           "flags": [],
           "note": null,
           "detail": null,
-          "action": null,
+          "action": {
+            "kind": "simulators",
+            "label": "Erase Simulator",
+            "paths": [
+              "/Users/me/Library/Developer/CoreSimulator/Devices/6A1F0C52-3B9E-4D7A-9C11-0E5B2A7D4F38"
+            ],
+            "confirm": "Erase iPhone 17 (iOS 26.0)? Each stays in Xcode, as new: the apps installed in it and their data are deleted. 2.4 GB in all.",
+            "done": null,
+            "safe": true,
+            "quit": null,
+            "note": "Not used for a month: iPhone 17 (iOS 26.0)",
+            "frees": 2400000000
+          },
+          "parts": [
+            {
+              "name": "iPhone 17 (iOS 26.0)",
+              "action": {
+                "kind": "simulators",
+                "label": "Erase Simulator",
+                "paths": [
+                  "/Users/me/Library/Developer/CoreSimulator/Devices/6A1F0C52-3B9E-4D7A-9C11-0E5B2A7D4F38"
+                ],
+                "confirm": "Erase iPhone 17 (iOS 26.0)? It stays in Xcode, as new: the apps installed in it and their data are deleted. 2.4 GB.",
+                "done": null,
+                "safe": true,
+                "quit": null,
+                "note": "Not used since August",
+                "frees": 2400000000
+              }
+            }
+          ],
           "about": null,
           "known": {
             "what": null,
@@ -298,6 +341,7 @@
           "note": "Docker's disk image: `docker system prune` frees what no container uses",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": {
             "what": "Docker Desktop's disk image: every image, container, volume and build cache is in this one file.",
@@ -319,6 +363,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": {
             "what": "What Android Studio downloaded: SDK platforms, build tools and the emulators' system images.",
@@ -342,6 +387,7 @@
           "note": "Xcode's build output: the next build makes it again",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -366,6 +412,7 @@
           "note": "macOS itself, read-only",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -381,6 +428,7 @@
           "note": "What the Mac starts up from",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -396,6 +444,7 @@
           "note": "Voices, dictionaries and models macOS downloads",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -411,6 +460,7 @@
           "note": "Comes back after a restart",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -426,6 +476,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -441,6 +492,7 @@
           "note": "macOS Recovery",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -473,8 +525,13 @@
               "/Users/me/devel/app/src-tauri/target"
             ],
             "confirm": "Delete ~/devel/app/src-tauri/target? 38.7 GB on disk. It's deleted, not moved to the Trash; the next build makes it again.",
-            "done": null
+            "done": null,
+            "safe": true,
+            "quit": null,
+            "note": null,
+            "frees": null
           },
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -498,8 +555,13 @@
               "/Users/me/devel/app/src-tauri/target/debug/incremental"
             ],
             "confirm": "Delete the incremental caches in ~/devel/app/src-tauri/target/debug/incremental? 17.9 GB on disk. They're deleted, not moved to the Trash; only the next build of your own crates is slower.",
-            "done": null
+            "done": null,
+            "safe": true,
+            "quit": null,
+            "note": null,
+            "frees": null
           },
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -517,6 +579,7 @@
           "note": "Rust build output",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -535,6 +598,7 @@
           "note": "Packages npm installs again",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -559,6 +623,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -574,6 +639,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -589,6 +655,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -606,6 +673,7 @@
           "note": "Mostly unchanged since 2025",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -632,6 +700,7 @@
           "note": "Downloaded cloud files: Free Up Space keeps them in the cloud only",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -647,6 +716,7 @@
           "note": "OneDrive's copy of what it keeps on this Mac",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -662,6 +732,7 @@
           "note": "Downloaded iCloud files: Remove Download keeps them in iCloud only",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -688,6 +759,7 @@
           "note": "A virtual machine's disk: it grows as the guest writes",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -715,6 +787,7 @@
           "note": "Apps' temporary files and caches",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -733,6 +806,7 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": "~/Library/Caches/com.example.agent"
@@ -751,6 +825,7 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": "~/Library/Caches/Google"
@@ -769,6 +844,7 @@
           "note": "Apps fill it again as they run",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -800,8 +876,13 @@
               "com.apple.TimeMachine.2026-10-19-091502.local"
             ],
             "confirm": "Delete 2 local Time Machine snapshots? Backups on your backup disk aren't touched, but what changed since the last backup loses its local copy: Time Machine can't restore it from this Mac any more. This can't be undone.",
-            "done": null
+            "done": null,
+            "safe": false,
+            "quit": null,
+            "note": null,
+            "frees": null
           },
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -826,6 +907,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": {
             "path": "/Users/me/Library/Messages/Attachments",
             "bytes": 1780000000,
@@ -853,6 +935,7 @@
           "note": null,
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -879,6 +962,7 @@
           "note": "Mostly unchanged since 2025",
           "detail": null,
           "action": null,
+          "parts": [],
           "about": null,
           "known": null,
           "unexplained": null
@@ -902,7 +986,11 @@
           "/Users/me/Movies/Holiday 2019.mov"
         ],
         "confirm": null,
-        "done": null
+        "done": null,
+        "safe": false,
+        "quit": null,
+        "note": null,
+        "frees": null
       }
     },
     {

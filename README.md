@@ -103,6 +103,12 @@ disk is and whether the watcher is watching at its foot, and each page's title i
   attention (a runaway filler, a tweak something undid, the watcher stopped), each with what to
   do; recommendations, biggest first, each with its button (a category's many small clean-ups
   as one row that opens it); and what the disk filled or freed in the last day and week.
+  **Clean Up…** puts everything the app can clean itself in one checklist: what comes back by
+  itself (caches, build output, Xcode's DerivedData, simulators nobody used for a month, Android
+  system images no emulator uses, what Docker hasn't used in a week) is ticked, the rest says why
+  it isn't (each other simulator, with when it was last used; an Android emulator unused for a
+  month); Clean Up runs what's ticked in one go and says what each did beside it. Docker is started in the background for
+  it, and quit again after.
 - **Storage**: where your space goes, by category or folder by folder. By category: the same
   bar, then each category biggest first (apps, build output, developer tools, cloud copies, app
   data, caches, media, Mail and Messages, virtual machines, macOS, your files), opening to its

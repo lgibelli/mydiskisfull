@@ -37,6 +37,9 @@ struct StatusMenu: View {
         Divider()
         Button("Open \(Edition.name)") { AppDelegate.show(Navigator.shared.pane) }
             .keyboardShortcut("o")
+        #if !APP_STORE
+        Button("Clean Up…") { AppDelegate.showCleanUp() }
+        #endif
         Divider()
         #if !APP_STORE
         UpdateItem(updates: monitor.updates)

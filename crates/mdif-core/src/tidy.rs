@@ -13,6 +13,10 @@
 //!   touched for 30 days.
 //! - `caches`: app and tool caches of 50 MB or more that nothing has written
 //!   to or read for 30 days, emptied while their app is closed.
+//! - `docker`: what Docker has had no use for in a week (stopped containers
+//!   that haven't run since, images no tag points to, networks no container
+//!   uses, build cache no build has used since), only while Docker is
+//!   running: it's never started for this. Until it runs, it waits.
 //! - `backups`: folders a build or an install makes again
 //!   ([`timemachine::rebuildable`]) and tools' download caches of 10 MB or
 //!   more ([`timemachine::download_cache`]) kept out of Time Machine's
@@ -81,16 +85,18 @@ pub enum Id {
     Dependencies,
     Incremental,
     Caches,
+    Docker,
     Backups,
 }
 
 impl Id {
-    pub const ALL: [Id; 6] = [
+    pub const ALL: [Id; 7] = [
         Id::Simulators,
         Id::Builds,
         Id::Dependencies,
         Id::Incremental,
         Id::Caches,
+        Id::Docker,
         Id::Backups,
     ];
 
@@ -101,6 +107,7 @@ impl Id {
             Id::Dependencies => "node-modules",
             Id::Incremental => "incremental",
             Id::Caches => "caches",
+            Id::Docker => "docker",
             Id::Backups => "backups",
         }
     }
@@ -116,6 +123,7 @@ impl Id {
             Id::Dependencies => "Old node_modules",
             Id::Incremental => "Old Rust build caches",
             Id::Caches => "Caches apps stopped using",
+            Id::Docker => "Old Docker leftovers",
             Id::Backups => "Build folders and caches out of Time Machine",
         }
     }
@@ -144,6 +152,12 @@ impl Id {
                 "App and tool caches nothing has written to for 30 days, emptied while their \
                  app is closed; the app makes what it needs again."
             }
+            Id::Docker => {
+                "Stopped containers that haven't run for 7 days, images no tag points to, \
+                 networks no container uses, and build cache no build has used for 7 days. \
+                 Only while Docker is running: it's never started for this. Volumes and tagged \
+                 images stay."
+            }
             Id::Backups => {
                 "Keeps the folders a build or an install makes again (target, build, \
                  node_modules, .venv, Pods) and the caches tools download into out of Time \
@@ -162,9 +176,12 @@ impl Id {
     }
 
     /// Why it can't run on this Mac, if it can't.
-    pub fn unavailable(self) -> Option<String> {
+    pub fn unavailable(self, home: &Path) -> Option<String> {
         match self {
             Id::Simulators if simctl().is_none() => Some(NO_XCODE.into()),
+            Id::Docker if crate::docker::command(home).is_none() => {
+                Some("Needs Docker, which isn't installed.".into())
+            }
             _ => None,
         }
     }
@@ -174,6 +191,7 @@ impl Id {
         match self {
             Id::Caches => "emptied",
             Id::Backups => "excluded",
+            Id::Docker => "removed",
             _ => "deleted",
         }
     }
@@ -230,11 +248,11 @@ pub fn record(store: &Store, id: Id, last: &Last) -> Result<()> {
 }
 
 /// Every tidy-up, whether it's on, and what it did last.
-pub fn list(store: &Store) -> Result<Vec<Tidy>> {
+pub fn list(store: &Store, home: &Path) -> Result<Vec<Tidy>> {
     Id::ALL
         .into_iter()
         .map(|id| {
-            let why = id.unavailable();
+            let why = id.unavailable(home);
             Ok(Tidy {
                 id: id.id(),
                 title: id.title(),
@@ -268,7 +286,8 @@ pub fn due(store: &Store, now: i64) -> Result<Vec<Id>> {
 pub struct Done {
     pub id: &'static str,
     pub path: PathBuf,
-    /// `deleted` or `emptied` (on a dry run: what would be).
+    /// `deleted`, `emptied`, `removed` (from Docker) or `excluded` (on a dry
+    /// run: what would be).
     pub what: &'static str,
     pub bytes: u64,
 }
@@ -291,6 +310,9 @@ pub struct Outcome {
     pub skipped: Vec<(PathBuf, String)>,
     /// One sentence; `None` until the run ends.
     pub note: Option<String>,
+    /// Why it waits, when it can't run now (Docker isn't running): not a
+    /// run, so not recorded, and it's still due.
+    pub waits: Option<String>,
 }
 
 impl Outcome {
@@ -358,8 +380,81 @@ pub fn run(id: Id, home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome
         Id::Builds | Id::Dependencies => unused(id, home, keep, now, dry_run, &privacy::may_open),
         Id::Incremental => incremental(home, keep, now, dry_run),
         Id::Caches => caches(home, keep, now, dry_run, CACHE_MIN, &privacy::may_open),
+        Id::Docker => docker(home, keep, now, dry_run),
         Id::Backups => backups(home, keep, dry_run),
     }
+}
+
+/// What Docker has had no use for in a week ([`docker::old`]), while it's
+/// running; otherwise it waits.
+///
+/// [`docker::old`]: crate::docker::old
+fn docker(home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome {
+    use crate::docker;
+    let id = Id::Docker;
+    let mut o = Outcome::default();
+    let folder = home.join(docker::FOLDER);
+    if let Some(entry) = kept(keep, &folder) {
+        o.skipped.push((folder, kept_why(entry)));
+        o.finish(id, None);
+        return o;
+    }
+    if !docker::answers_now(home) {
+        o.waits = Some(format!(
+            "{} Its leftovers go the next time it is.",
+            docker::NOT_RUNNING
+        ));
+        return o;
+    }
+    let items = match docker::old_now(home, now) {
+        Ok(items) => items,
+        Err(why) => {
+            o.fail(id, PathBuf::new(), why);
+            o.finish(id, None);
+            return o;
+        }
+    };
+    let mut c = docker::Cleared::default();
+    for i in &items {
+        let done = dry_run || {
+            match docker::remove_item(i, home) {
+                Ok(()) => true,
+                Err(why) => {
+                    let why = format!("{}: {why}", crate::text::printable(&i.title));
+                    o.fail(id, &i.name, why);
+                    false
+                }
+            }
+        };
+        if !done {
+            continue;
+        }
+        o.did(id, &i.name, i.bytes);
+        match i.name.split(':').nth(1) {
+            Some("container") => c.containers += 1,
+            Some("image") => c.images += 1,
+            _ => c.networks += 1,
+        }
+    }
+    // Docker can't say what a filtered prune would remove without doing it.
+    if !dry_run {
+        match docker::prune_old_cache(home) {
+            Ok(0) => {}
+            Ok(n) => {
+                o.did(id, format!("{}build-cache", docker::PREFIX), n);
+                c.cache = n;
+            }
+            Err(why) => o.fail(id, PathBuf::new(), format!("Build cache: {why}")),
+        }
+    }
+    let what = (c != docker::Cleared::default()).then(|| {
+        c.said()
+            .trim_end_matches(" from Docker.")
+            .trim_end_matches('.')
+            .to_string()
+    });
+    o.finish(id, what);
+    o
 }
 
 /// The folders a build, an install or their tool makes again that are
@@ -590,7 +685,7 @@ pub fn device_delete_args(udid: &str) -> Option<Vec<String>> {
     is_uuid(udid).then(|| strings(&["delete", udid]))
 }
 
-fn is_uuid(s: &str) -> bool {
+pub(crate) fn is_uuid(s: &str) -> bool {
     s.len() == 36
         && s.char_indices().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => c == '-',
@@ -662,33 +757,14 @@ pub struct SimDevice {
 
 /// The simulators `simctl list devices -j` says aren't available.
 pub fn parse_unavailable(out: &[u8]) -> Vec<SimDevice> {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(out) else {
-        return Vec::new();
-    };
-    let Some(by_runtime) = v["devices"].as_object() else {
-        return Vec::new();
-    };
-    by_runtime
-        .values()
-        .filter_map(|list| list.as_array())
-        .flatten()
-        .filter(|d| {
-            d["isAvailable"].as_bool() == Some(false)
-                // Before Xcode 10.1: "(unavailable, runtime profile not found)".
-                || d["availability"]
-                    .as_str()
-                    .is_some_and(|a| a.contains("unavailable"))
-        })
-        .filter_map(|d| {
-            Some(SimDevice {
-                udid: d["udid"].as_str()?.to_string(),
-                name: d["name"].as_str().unwrap_or("").to_string(),
-                dir: d["dataPath"]
-                    .as_str()
-                    .and_then(|p| Path::new(p).parent())
-                    .map(Path::to_path_buf),
-                bytes: d["dataPathSize"].as_u64().unwrap_or(0),
-            })
+    crate::xcode::parse_simulators(out)
+        .into_iter()
+        .filter(|s| !s.available)
+        .map(|s| SimDevice {
+            udid: s.udid,
+            name: s.name,
+            dir: s.dir,
+            bytes: s.bytes,
         })
         .collect()
 }
@@ -1636,7 +1712,7 @@ mod tests {
             "clock set back"
         );
 
-        let listed = list(&store).unwrap();
+        let listed = list(&store, Path::new("/nonexistent")).unwrap();
         let ids: Vec<&str> = listed.iter().map(|t| t.id).collect();
         assert_eq!(
             ids,
@@ -1646,6 +1722,7 @@ mod tests {
                 "node-modules",
                 "incremental",
                 "caches",
+                "docker",
                 "backups"
             ]
         );

@@ -6,9 +6,36 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
-## [0.1.5] - 2026-10-31
+## [0.1.5] - 2026-11-10
 
 ### Added
+- Clean Up… (Overview's toolbar and Recommendations, the menu bar menu, ⇧⌘K): everything the app
+  can clean itself in one list, each with a checkbox. Ticked to start with: what comes back by
+  itself and nothing used lately (caches, build output, DerivedData, simulators nobody used for
+  a month, what Docker hasn't used in a week); the rest (the Trash, a simulator runtime, what
+  goes to the Trash) says why beside it and is yours to tick. Clean Up N runs what's ticked one
+  after the other, each checked again first, and says what each did on its row and what the
+  disk has more free at the foot: no alert before or after. A cache whose app is open is skipped,
+  with a Quit button beside it. A folder inside one that's ticked isn't a row of its own, and
+  less than 100 MB isn't worth one. Not in Lite.
+- Docker's old leftovers, without starting Docker yourself: Remove Old Leftovers (in Clean Up,
+  and `mdif clean docker:old`) starts Docker Desktop in the background if it isn't running,
+  removes stopped containers that ended a week ago or more, untagged images, unused networks
+  and build cache unused for a week, and quits Docker again if it started it; volumes and tagged
+  images stay. Docker's Review… offers Start Docker instead of saying it isn't running, and quits
+  it again when you close it (`mdif docker --start|--stop`). A daily tidy, Old Docker leftovers,
+  does the same while Docker is running; it never starts it.
+- Xcode's leftovers: Empty DerivedData and Empty Device Support (while Xcode is closed); a
+  simulator runtime's Delete, with when it was last used (or downloaded and never used); and
+  the simulators no one used for a month erased (their apps and data go, the simulator stays),
+  those whose runtime is gone deleted. Never a booted one. All through `mdif clean`, with
+  `simctl` from the selected Xcode. In Clean Up each simulator is a row of its own, with when
+  it was last used: those nobody used for a month are ticked, the rest are yours to tick.
+- Android's emulators: a system image no emulator uses (`~/Library/Android/sdk/system-images`)
+  is deleted, ticked in Clean Up, since Android Studio downloads it again when one needs it; an
+  emulator nothing started for a month is offered for deletion, not ticked (its apps, data and
+  settings go). Which image each emulator uses is read from its own settings; an image one uses
+  is refused, and so is an emulator while it runs. `mdif clean <image or .avd folder>`.
 - A Time Machine page: where it backs up, how often and the latest tries, finished or not; the
   local snapshots, which one the next backup starts from and why they hold space (they cover the
   whole disk, excluded folders too); what changed since the last backup; the build folders and
@@ -59,6 +86,10 @@ All notable changes to this project are documented here. The format is based on
   knowledge sign-in`, `sign-out` and `account`. Not in Lite.
 
 ### Changed
+- What a clean-up, a tweak, Tidy Now or Time Machine did is said at the foot of the main
+  window, not in an alert to dismiss: what went as asked goes by itself, what wasn't done
+  stays until you close it, with why. Only the question before what can't be undone is an
+  alert.
 - The main window is laid out like Apple's own apps, in five pages instead of seven: Overview,
   Storage, Old Files, History and Prevention (⌘1 to ⌘5). Each page's title is in the toolbar,
   the pages are grouped lists and tables, and the sidebar only holds the pages, with the disk
@@ -80,6 +111,10 @@ All notable changes to this project are documented here. The format is based on
   how many folders macOS keeps to itself. Its (i) explains both.
 
 ### Fixed
+- A suggestion about a folder that cleans one thing in it (a merged worktree among a repo's)
+  showed on a neighbour inside the same folder, with that neighbour's size.
+- A worktree whose blocks are all a clone's or a local snapshot's no longer says removing it
+  "frees at least 0 B".
 - Folders whose names have dots in them (`group.com.apple.VoiceMemos.shared`) had no icon.
 - A folder named like a Markdown link showed as a link in the app's texts; it's plain text now.
 - The main window read free space every 5 seconds for as long as it was open, even minimised or

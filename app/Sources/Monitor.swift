@@ -428,7 +428,12 @@ final class Monitor: ObservableObject {
                 let p = Self.dataless(i.path)
                 if let s = list.first(where: { s in
                     guard let sp = s.path.map(Self.dataless), !placed.contains(s.cause) else { return false }
-                    return sp == p || p.hasPrefix(sp + "/") || sp.hasPrefix(p + "/")
+                    // About a folder, cleaning something in it (a merged
+                    // worktree among a repo's): about that, not its neighbours.
+                    let inside = (s.action?.paths ?? []).map(Self.dataless).filter { $0.hasPrefix(sp + "/") }
+                    return (inside.isEmpty ? [sp] : inside).contains { a in
+                        a == p || p.hasPrefix(a + "/") || a.hasPrefix(p + "/")
+                    }
                 }) {
                     out[i.path] = s
                     placed.insert(s.cause)
@@ -645,8 +650,9 @@ final class Monitor: ObservableObject {
         Task { await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false) }
     }
 
-    /// Does a suggestion's clean-up, then measures again.
-    func clean(_ a: CleanAction) {
+    /// Does a suggestion's clean-up, then measures again; `after`, once it's
+    /// done or not (Docker quit, when it was started for it).
+    func clean(_ a: CleanAction, after: (() async -> Void)? = nil) {
         guard !a.paths.isEmpty, cleaning.isDisjoint(with: a.paths) else { return }
         // Busy only once it's confirmed: not "Moving to the Trash…" beside
         // the question.
@@ -655,16 +661,27 @@ final class Monitor: ObservableObject {
         Task {
             let done = await CleanFlow.run(a)
             cleaning.subtract(a.paths)
-            if done {
-                suggestions = suggestions?.filter { $0.action?.paths != a.paths }
-                measuredAt = nil
-                await refresh()
-                await measure()
-                // `mdif clean` measured again what it changed: the breakdown
-                // follows at once, without a whole-disk scan.
-                await loadSpace()
-            }
+            await after?()
+            if done { await cleaned([a]) }
         }
+    }
+
+    /// Clean Up's rows while it does them: their buttons elsewhere show it.
+    func setCleaning(_ paths: [String], _ on: Bool) {
+        if on { cleaning.formUnion(paths) } else { cleaning.subtract(paths) }
+    }
+
+    /// After clean-ups: their suggestions go, and what they changed is read
+    /// again.
+    func cleaned(_ actions: [CleanAction]) async {
+        let gone = actions.map(\.paths)
+        suggestions = suggestions?.filter { s in !gone.contains(s.action?.paths ?? []) }
+        measuredAt = nil
+        await refresh()
+        await measure()
+        // `mdif clean` measured again what it changed: the breakdown
+        // follows at once, without a whole-disk scan.
+        await loadSpace()
     }
 
     /// The switch shows the new state at once; the measurement that follows

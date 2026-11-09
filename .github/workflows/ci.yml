@@ -144,6 +144,8 @@ jobs:
           if strings "$store" | grep -q "once you empty the Trash"; then exit 1; fi
           strings "$full" | grep -q "Asking Docker what it can remove"
           if strings "$store" | grep -q "Asking Docker what it can remove"; then exit 1; fi
+          strings "$full" | grep -q "Comes back by itself"
+          if strings "$store" | grep -q "Comes back by itself"; then exit 1; fi
           # Asking AI: the store edition has no network entitlement for it.
           strings "$full" | grep -q "Continue with ChatGPT"
           if strings "$store" | grep -q "Continue with ChatGPT"; then exit 1; fi

@@ -9,8 +9,27 @@ use mdif_core::units::bytes;
 
 use crate::watch_cmd::home;
 
-pub fn show(json_out: bool) -> Result<()> {
-    let r = docker::report(&home());
+pub fn show(json_out: bool, start: bool, stop: bool) -> Result<()> {
+    let home = home();
+    if stop {
+        docker::stop(&home).map_err(|why| anyhow::anyhow!("{}", printable(&why)))?;
+        if json_out {
+            println!("{}", serde_json::json!({ "stopped": true }));
+        } else {
+            println!("Docker Desktop quit.");
+        }
+        return Ok(());
+    }
+    // Started here: the app quits it again after the clean-up.
+    let started = if start {
+        docker::start(&home).map_err(|why| anyhow::anyhow!("{}", printable(&why)))?
+    } else {
+        false
+    };
+    let r = Report {
+        started,
+        ..docker::report(&home)
+    };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&r)?);
     } else {
@@ -28,7 +47,13 @@ fn print(r: &Report) {
     }
     if let Some(why) = &r.why {
         println!("{}", printable(why));
+        if why == docker::NOT_RUNNING {
+            println!("`mdif docker --start` starts Docker Desktop in the background first.");
+        }
         return;
+    }
+    if r.started {
+        println!("Docker Desktop was started for this: `mdif docker --stop` quits it.");
     }
     let pruned: Vec<&Item> = r
         .containers

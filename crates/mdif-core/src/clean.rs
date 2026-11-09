@@ -46,10 +46,11 @@ use crate::tweaks::{self, CHROME_MODEL, Status};
 use crate::worktrees::{self, Finished};
 
 /// What a button does, offered with a suggestion.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Action {
-    /// `worktrees`, `trash`, `delete`, `empty`, `restart`, `snapshots` or
-    /// `docker` (its list first: what to remove is picked from it).
+    /// `worktrees`, `trash`, `delete`, `empty`, `restart`, `snapshots`,
+    /// `runtime`, `simulators`, `docker-old` or `docker` (its list first:
+    /// what to remove is picked from it).
     pub kind: &'static str,
     /// "Move to Trash", "Remove 8 Worktrees".
     pub label: String,
@@ -60,6 +61,18 @@ pub struct Action {
     /// When MyDiskIsFull did it, while it waits to see whether it worked
     /// (a restart): the app shows that instead of the button.
     pub done: Option<i64>,
+    /// What it takes comes back by itself, and nothing you used lately goes:
+    /// ticked to start with in the app's Clean Up. What isn't is offered
+    /// there unticked, with `confirm` beside it.
+    pub safe: bool,
+    /// The app to quit first (a bundle id, or a name): while it's open,
+    /// it's refused.
+    pub quit: Option<String>,
+    /// What goes, in a line, when the item it's offered with doesn't say:
+    /// "Not used since September: iPhone 17, iPad Air".
+    pub note: Option<String>,
+    /// What it frees, when that isn't all of the item it's offered with.
+    pub frees: Option<u64>,
 }
 
 /// One clean-up, checked.
@@ -105,6 +118,40 @@ pub enum Step {
         name: PathBuf,
         removal: crate::docker::Removal,
     },
+    /// What Docker has had no use for in a week ([`docker::clear_old`]),
+    /// Docker Desktop started for it if it isn't running, and quit again
+    /// after.
+    ///
+    /// [`docker::clear_old`]: crate::docker::clear_old
+    DockerOld,
+    /// A simulator runtime (its asset folder), deleted with `simctl runtime
+    /// delete`: Xcode downloads it again when it's needed.
+    DeleteRuntime {
+        path: PathBuf,
+        uuid: String,
+        name: String,
+    },
+    /// A simulator erased with `simctl erase` (it stays, as new), or, once
+    /// its runtime is gone (`erase` false), deleted.
+    Simulator {
+        dir: PathBuf,
+        udid: String,
+        name: String,
+        erase: bool,
+    },
+    /// An Android system image no emulator uses, deleted: Android Studio
+    /// downloads it again when one needs it.
+    DeleteImage {
+        dir: PathBuf,
+        name: String,
+    },
+    /// An Android emulator, deleted with the `.ini` that lists it, unless
+    /// it's running.
+    DeleteAvd {
+        dir: PathBuf,
+        ini: Option<PathBuf>,
+        name: String,
+    },
 }
 
 impl Step {
@@ -118,18 +165,28 @@ impl Step {
             | Step::FinderTrash(path) => path,
             Step::Restart { app, .. } => app,
             Step::DeleteSnapshot { name, .. } | Step::Docker { name, .. } => name,
+            Step::DockerOld => Path::new(crate::docker::OLD),
+            Step::DeleteRuntime { path, .. } => path,
+            Step::Simulator { dir, .. }
+            | Step::DeleteImage { dir, .. }
+            | Step::DeleteAvd { dir, .. } => dir,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Done {
     pub path: PathBuf,
     /// `removed`, `trashed`, `deleted`, `emptied`, `erased` (the Trash),
-    /// `restarted`, `released` (a snapshot) or `docker`.
+    /// `restarted`, `released` (a snapshot), `runtime` (a simulator
+    /// runtime deleted), `reset` (a simulator erased), `docker` or
+    /// `docker-old`.
     pub how: &'static str,
     /// Where it went in the Trash.
     pub to: Option<PathBuf>,
+    /// What was done, when the path doesn't say: "Deleted the iOS 26.0
+    /// Simulator", "Removed 3 stopped containers".
+    pub note: Option<String>,
 }
 
 /// What cleaning `path` means, or why it isn't done. `finished` are the
@@ -143,6 +200,11 @@ pub fn plan(
     churning: &[String],
 ) -> Result<Step, String> {
     let shown = display(path, home);
+    if path == Path::new(crate::docker::OLD) {
+        return crate::docker::command(home)
+            .map(|_| Step::DockerOld)
+            .ok_or_else(|| "Docker isn't installed.".into());
+    }
     if path.extension().is_some_and(|e| e == "app") {
         // The helper that writes the most is this app's: another app's
         // helper of the same name isn't the one suggested.
@@ -194,6 +256,12 @@ pub fn plan(
             quit: Some("Google Chrome"),
         });
     }
+    if let Some(step) = crate::xcode::plan(path, home) {
+        return step;
+    }
+    if let Some(step) = crate::android::plan(path, home) {
+        return step;
+    }
     if path.join(".git").is_file() {
         return Err(format!(
             "{shown} isn't a finished worktree now: it has changes, isn't merged, or was used \
@@ -203,7 +271,7 @@ pub fn plan(
     if build_output(path) || incremental_caches(path) || dependencies(path) {
         return deletable(path, home).map(|()| Step::Delete(path.to_path_buf()));
     }
-    if let Some(owner) = cache_of(path, home) {
+    if let Some(owner) = emptied_for(path, home) {
         return deletable(path, home).map(|()| Step::Empty {
             path: path.to_path_buf(),
             owner,
@@ -228,6 +296,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
             path: f.path.clone(),
             how: "removed",
             to: None,
+            ..Default::default()
         }),
         Step::Trash { path, quit } => {
             match quit {
@@ -245,6 +314,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     path: path.clone(),
                     how: "trashed",
                     to: Some(to),
+                    ..Default::default()
                 })
                 .map_err(|e| format!("{}: {e}", display(path, home)))
         }
@@ -277,6 +347,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 path: app.clone(),
                 how: "restarted",
                 to: None,
+                ..Default::default()
             })
         }
         Step::Delete(path) => {
@@ -299,6 +370,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     path: path.clone(),
                     how: "deleted",
                     to: None,
+                    ..Default::default()
                 })
                 .map_err(|e| format!("{}: {e}", display(path, home)))
         }
@@ -309,6 +381,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     path: path.clone(),
                     how: "erased",
                     to: None,
+                    ..Default::default()
                 })
                 .map_err(|e| format!("The Trash: {e}"))
         }
@@ -317,12 +390,13 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 path: path.clone(),
                 how: "trashed",
                 to: None,
+                ..Default::default()
             })
             .map_err(|e| format!("{}: {e}", path.display())),
         Step::Empty { path, owner } => {
             deletable(path, home)?;
             let shown = display(path, home);
-            if cache_of(path, home).as_ref() != Some(owner) {
+            if emptied_for(path, home).as_ref() != Some(owner) {
                 return Err(format!("{shown} isn't an app's cache folder now."));
             }
             if let Some(app) = open_app(owner) {
@@ -336,6 +410,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     path: path.clone(),
                     how: "emptied",
                     to: None,
+                    ..Default::default()
                 })
                 .map_err(|e| format!("{shown}: {e}"))
         }
@@ -365,6 +440,55 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 path: name.clone(),
                 how: "released",
                 to: None,
+                ..Default::default()
+            })
+        }
+        Step::DockerOld => crate::docker::clear_old(home, crate::watch::unix_now()).map(|c| Done {
+            path: PathBuf::from(crate::docker::OLD),
+            how: "docker-old",
+            note: Some(c.said()),
+            ..Default::default()
+        }),
+        Step::DeleteRuntime { path, uuid, name } => {
+            crate::xcode::delete_runtime(uuid, name).map(|()| Done {
+                path: path.clone(),
+                how: "runtime",
+                note: Some(format!("Deleted the {name}")),
+                ..Default::default()
+            })
+        }
+        Step::Simulator {
+            dir,
+            udid,
+            name,
+            erase,
+        } => crate::xcode::reset(udid, name, *erase).map(|()| Done {
+            path: dir.clone(),
+            how: if *erase { "reset" } else { "deleted" },
+            note: Some(if *erase {
+                format!("Erased {name}")
+            } else {
+                format!("Deleted {name}, whose runtime is gone")
+            }),
+            ..Default::default()
+        }),
+        Step::DeleteImage { dir, name } => {
+            crate::android::delete_image(dir, name, home).map(|()| Done {
+                path: dir.clone(),
+                how: "deleted",
+                note: Some(format!("Deleted the {name}")),
+                ..Default::default()
+            })
+        }
+        Step::DeleteAvd { dir, ini, name } => {
+            crate::android::delete_avd(dir, ini.as_deref(), name, home).map(|()| Done {
+                path: dir.clone(),
+                how: "deleted",
+                note: Some(format!(
+                    "Deleted the emulator {}",
+                    crate::text::printable(name)
+                )),
+                ..Default::default()
             })
         }
         Step::Docker { name, removal } => crate::docker::remove(removal, home)
@@ -372,6 +496,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 path: name.clone(),
                 how: "docker",
                 to: None,
+                ..Default::default()
             })
             .map_err(|why| format!("{}: {why}", crate::text::printable(&name.to_string_lossy()))),
     }
@@ -423,6 +548,7 @@ pub fn snapshots_action(names: &[String]) -> Option<Action> {
         )),
         paths: names,
         done: None,
+        ..Default::default()
     })
 }
 
@@ -785,6 +911,16 @@ pub fn cache_of(dir: &Path, home: &Path) -> Option<String> {
     (!apple && !owner.starts_with('.')).then(|| owner.to_string())
 }
 
+/// Whose folder `dir` is, when emptying it is a clean-up: an app's cache
+/// ([`cache_of`]), or what Xcode makes again ([`xcode::rebuilt`]), emptied
+/// while Xcode is closed.
+///
+/// [`xcode::rebuilt`]: crate::xcode::rebuilt
+pub fn emptied_for(dir: &Path, home: &Path) -> Option<String> {
+    cache_of(dir, home)
+        .or_else(|| crate::xcode::rebuilt(dir, home).then(|| crate::xcode::XCODE.to_string()))
+}
+
 /// The name of the open app `owner` names (a bundle id, or an app's name),
 /// as Launch Services knows it.
 fn open_app(owner: &str) -> Option<String> {
@@ -972,7 +1108,7 @@ pub fn incremental_caches(dir: &Path) -> bool {
 
 /// Whether deleting `dir` deletes only what it seems to: a real folder (not
 /// a symlink to one), in the home folder, on its volume.
-fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
+pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
     let shown = display(dir, home);
     // `..` would make "in the home folder" and what you keep mean nothing.
     if dir.components().any(|c| {
@@ -1073,6 +1209,7 @@ pub fn restart_action(helper: &str, app: &mdif_macos::proc::App) -> Action {
              loading loads again, and a download under way stops.",
             app.name
         )),
+        ..Default::default()
     }
 }
 
@@ -1473,6 +1610,44 @@ mod tests {
         let err = plan(&linked, h, &none, &[], &[]).unwrap_err();
         assert!(err.contains("isn't a folder"), "{err}");
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn xcodes_derived_data_is_emptied_while_xcode_is_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let none = Keep::default();
+        let xcode = h.join("Library/Developer/Xcode");
+        for d in [
+            "DerivedData/App-abc/Build",
+            "iOS DeviceSupport/18.0",
+            "Archives/x",
+        ] {
+            std::fs::create_dir_all(xcode.join(d)).unwrap();
+        }
+        // Whether Xcode is open is asked when it's done (not run here: it
+        // may be open on this Mac).
+        for d in ["DerivedData", "iOS DeviceSupport"] {
+            let step = plan(&xcode.join(d), h, &none, &[], &[]).unwrap();
+            assert!(
+                matches!(&step, Step::Empty { owner, .. } if owner == crate::xcode::XCODE),
+                "{d}"
+            );
+        }
+        // Not its archives (apps you shipped), nor one project's folder.
+        for d in ["Archives", "DerivedData/App-abc"] {
+            assert!(plan(&xcode.join(d), h, &none, &[], &[]).is_err(), "{d}");
+        }
+        let keep = Keep::parse("~/Library/Developer/Xcode/DerivedData\n", h);
+        assert!(plan(&xcode.join("DerivedData"), h, &keep, &[], &[]).is_err());
+        // What Docker hasn't used goes by name, only where Docker is.
+        let old = plan(Path::new(crate::docker::OLD), h, &none, &[], &[]);
+        assert_eq!(
+            old.is_ok(),
+            crate::docker::command(h).is_some(),
+            "{:?}",
+            old.err()
+        );
     }
 
     #[test]

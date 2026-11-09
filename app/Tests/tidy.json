@@ -58,6 +58,15 @@
       }
     },
     {
+      "id": "docker",
+      "title": "Old Docker leftovers",
+      "detail": "Stopped containers that haven't run for 7 days, images no tag points to, networks no container uses, and build cache no build has used for 7 days. Only while Docker is running: it's never started for this. Volumes and tagged images stay.",
+      "on": false,
+      "available": false,
+      "unavailable_why": "Needs Docker, which isn't installed.",
+      "last": null
+    },
+    {
       "id": "backups",
       "title": "Build folders out of Time Machine",
       "detail": "Keeps the folders a build or an install makes again (target, build, node_modules, .venv, Pods) out of Time Machine's backups, new ones too: less to send over the network and less room on the backup disk. Nothing is deleted.",

@@ -63,6 +63,8 @@ final class Navigator: ObservableObject {
     @Published var storagePath: [String] = []
     /// Settings, a sheet of the main window, and the page it opens on.
     @Published var settingsOpen = false
+    /// Clean Up, a sheet of the main window (CleanUpView.swift).
+    @Published var cleanUpOpen = false
     var settingsPage: SettingsPage?
 
     func openSettings(_ page: SettingsPage? = nil) {
@@ -114,6 +116,9 @@ struct MainWindow: View {
                 }
             }
             .animation(.snappy, value: notices.current)
+            #if !APP_STORE
+            .sheet(isPresented: $nav.cleanUpOpen) { CleanUpSheet(monitor: monitor) }
+            #endif
         }
         .frame(minWidth: 820, minHeight: 560)
         .sheet(isPresented: $nav.settingsOpen) {

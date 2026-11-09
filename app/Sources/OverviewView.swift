@@ -33,6 +33,16 @@ struct OverviewPage: View {
         }
         .navigationTitle("Overview")
         .navigationSubtitle(subtitle)
+        #if !APP_STORE
+        .trailingToolbar {
+            Button {
+                Navigator.shared.cleanUpOpen = true
+            } label: {
+                Label("Clean Up…", systemImage: "sparkles")
+            }
+            .help("Pick what to clean up, and do it all at once (⇧⌘K)")
+        }
+        #endif
         .task {
             await monitor.loadSpace()
             #if !APP_STORE
@@ -267,7 +277,18 @@ private struct RecommendationsSection: View {
                 .buttonStyle(.link)
             }
         } header: {
-            Text("Recommendations")
+            HStack {
+                Text("Recommendations")
+                Spacer()
+                #if !APP_STORE
+                if !list.isEmpty {
+                    Button("Clean Up…") { Navigator.shared.cleanUpOpen = true }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                        .help("Pick what to clean up, and do it all at once")
+                }
+                #endif
+            }
         }
     }
 }
@@ -392,7 +413,9 @@ private struct MoreButton: View {
 /// Needs Attention instead.
 @MainActor
 enum Recommendations {
-    static func all(_ m: Monitor, minBytes: Int64, minDays: Int) -> [Recommendation] {
+    /// `grouped`: three or more plain clean-ups of a category as one row,
+    /// which opens it (Clean Up wants each).
+    static func all(_ m: Monitor, minBytes: Int64, minDays: Int, grouped: Bool = true) -> [Recommendation] {
         guard let r = m.space else { return [] }
         let forgotten = SpaceText.forgotten(r, min: minBytes, days: minDays, limit: .max)
         let skip = Set(forgotten.map(\.id))
@@ -419,8 +442,8 @@ enum Recommendations {
                                     fallback: i.action))
                 } else if let a = i.action {
                     plain.append(Recommendation(id: i.id, symbol: SpaceText.symbol(k.id), tint: SpaceText.color(k.id),
-                                                title: i.name, detail: SpaceText.marks(i).first?.0 ?? i.note,
-                                                bytes: i.frees > 0 ? i.frees : i.bytes, act: .clean(a),
+                                                title: i.name, detail: a.note ?? SpaceText.marks(i).first?.0 ?? i.note,
+                                                bytes: a.frees ?? (i.frees > 0 ? i.frees : i.bytes), act: .clean(a),
                                                 path: i.path, keepable: SpaceText.mayGo(i), more: i.note))
                 } else if let about = i.about, let a = about.action {
                     out.append(Recommendation(id: i.id, symbol: SpaceText.symbol(k.id), tint: SpaceText.color(k.id),
@@ -429,7 +452,7 @@ enum Recommendations {
                 }
             }
             plain = plain.filter { ($0.bytes ?? 0) >= minRow }
-            if plain.count >= 3 {
+            if grouped && plain.count >= 3 {
                 out.append(group(k, plain))
             } else {
                 out += plain
@@ -470,7 +493,8 @@ enum Recommendations {
         }
         for t in (m.tidies ?? []) where !t.on && t.available {
             out.append(Recommendation(id: "tidy:\(t.id)", symbol: "sparkles", tint: .green,
-                                      title: "Clean up \(t.title.lowercased()) every day", detail: t.detail,
+                                      title: "Clean up \(t.title.prefix(1).lowercased() + t.title.dropFirst()) every day",
+                                      detail: t.detail,
                                       act: .tidy(t.id)))
         }
         #endif

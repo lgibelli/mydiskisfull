@@ -11,6 +11,13 @@
 //! uses). Volumes are never offered: they hold data. Docker Desktop keeps it
 //! all in one disk image, which gives the space back to macOS a few seconds
 //! later ([`settle`]).
+//!
+//! What Docker has had no use for in a week ([`old`]): stopped containers
+//! that haven't run since, images no tag points to, networks no container
+//! uses, and build cache no build has used since. The app's Clean Up removes
+//! it ([`clear_old`]), starting Docker Desktop in the background for it when
+//! it isn't running and quitting it again after; the daily tidy-up does too,
+//! but only while Docker is running ([`answers_now`]): it never starts it.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -29,6 +36,13 @@ pub const DISK: &str = "Library/Containers/com.docker.docker/Data/vms/0/data/Doc
 pub const FOLDER: &str = "Library/Containers/com.docker.docker";
 /// What `mdif clean` takes for Docker's items: `docker:container:<id>`.
 pub const PREFIX: &str = "docker:";
+/// What `mdif clean` takes for what Docker has had no use for in a week.
+pub const OLD: &str = "docker:old";
+/// A stopped container that hasn't run for this long is old, and so is
+/// build cache no build has used for this long.
+pub const OLD_AFTER: i64 = 7 * 86_400;
+/// What Docker says when it isn't running, said our way.
+pub const NOT_RUNNING: &str = "Docker isn't running.";
 
 /// What Docker can remove, as `mdif docker` shows it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -55,6 +69,9 @@ pub struct Report {
     /// What Docker counts as reclaimable: what `docker system prune -a`
     /// would free.
     pub reclaimable: u64,
+    /// Docker Desktop was started for this (`mdif docker --start`): it's to
+    /// be quit again after.
+    pub started: bool,
 }
 
 /// One thing that can go.
@@ -393,13 +410,283 @@ fn run(docker: &Path, args: &[&str], wait: u64) -> Result<String, String> {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim();
-    if said.contains("Cannot connect to the Docker daemon")
-        || said.contains("docker daemon is not running")
-        || said.contains("Is the docker daemon running")
-    {
-        return Err("Docker isn't running. Open Docker Desktop, then look again.".into());
+    if not_running(said) {
+        return Err(NOT_RUNNING.into());
     }
     Err(format!("Docker: {}", printable(said)))
+}
+
+/// Whether Docker said it isn't running: in Docker 28's words and before,
+/// or in 29's ("failed to connect to the docker API at unix://…: connect:
+/// no such file or directory").
+pub fn not_running(said: &str) -> bool {
+    said.contains("Cannot connect to the Docker daemon")
+        || said.contains("docker daemon is not running")
+        || said.contains("Is the docker daemon running")
+        || said.contains("failed to connect to the docker API")
+}
+
+/// Whether Docker would answer now, by connecting to its socket: a few
+/// microseconds, so the watcher may ask every few minutes. Docker Desktop's
+/// socket, then the usual one.
+pub fn answers_now(home: &Path) -> bool {
+    [
+        home.join(".docker/run/docker.sock"),
+        PathBuf::from("/var/run/docker.sock"),
+    ]
+    .iter()
+    .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+}
+
+/// Starts Docker Desktop in the background when Docker isn't running, and
+/// waits for it to answer, three minutes at most: whether it was started
+/// here (and so is to be quit after, [`stop`]).
+pub fn start(home: &Path) -> Result<bool, String> {
+    let docker = command(home).ok_or("Docker isn't installed.")?;
+    if answers(&docker) {
+        return Ok(false);
+    }
+    // Docker Desktop's own command waits until it's up. Without it (before
+    // Docker Desktop 4.37), the app, opened hidden.
+    if run(&docker, &["desktop", "start", "--timeout", "180"], 200).is_err() {
+        let app = Path::new("/Applications/Docker.app");
+        if !app.is_dir() {
+            return Err(format!(
+                "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
+            ));
+        }
+        let opened = Command::new("/usr/bin/open")
+            .args(["-g", "-j", "-a"])
+            .arg(app)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !opened {
+            return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
+        }
+    }
+    let begun = Instant::now();
+    while begun.elapsed() < Duration::from_secs(180) {
+        if answers(&docker) {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    Err("Docker Desktop didn't start in three minutes.".into())
+}
+
+/// Quits Docker Desktop, once it was started for a clean-up.
+pub fn stop(home: &Path) -> Result<(), String> {
+    let docker = command(home).ok_or("Docker isn't installed.")?;
+    run(&docker, &["desktop", "stop", "--timeout", "60"], 90).map(|_| ())
+}
+
+fn answers(docker: &Path) -> bool {
+    run(docker, &["info", "--format", "{{.ServerVersion}}"], 30).is_ok()
+}
+
+/// What Docker has had no use for in [`OLD_AFTER`], from `r` (Docker's
+/// answer) and when each stopped container last ran (`ran`, by id: its
+/// end, or when it was made if it never ran): stopped containers that
+/// haven't run since, images no tag points to and networks no container
+/// uses. Not tagged images, nor volumes, nor a container Docker didn't say
+/// when it ran. Build cache goes by Docker's own filter
+/// ([`prune_old_cache`]).
+pub fn old(r: &Report, ran: &[(String, i64)], now: i64) -> Vec<Item> {
+    let ended = |item: &Item| {
+        let id = item.name.strip_prefix(&format!("{PREFIX}container:"))?;
+        ran.iter()
+            .find(|(full, _)| full.starts_with(id) || id.starts_with(full.as_str()))
+            .map(|(_, at)| *at)
+    };
+    r.containers
+        .iter()
+        .filter(|c| ended(c).is_some_and(|at| now - at >= OLD_AFTER))
+        .chain(&r.dangling)
+        .chain(&r.networks)
+        .cloned()
+        .collect()
+}
+
+/// When each container last ran: `docker container inspect`'s answer, a
+/// line each, `<id> <FinishedAt> <Created>`.
+pub fn parse_ran(out: &str) -> Vec<(String, i64)> {
+    out.lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (id, finished, created) = (w.next()?, w.next()?, w.next()?);
+            // Never ran: Docker's zero time.
+            let at = time(finished)
+                .filter(|&t| t > 0)
+                .or_else(|| time(created))?;
+            id_ok(id).then(|| (id.to_string(), at))
+        })
+        .collect()
+}
+
+/// Docker's times, to the second: "2026-11-02T10:11:12.123456789Z".
+fn time(s: &str) -> Option<i64> {
+    let (whole, rest) = s.split_at_checked(19)?;
+    let zone = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    crate::space::parse_time(&format!("{whole}{zone}"))
+}
+
+/// What's old now ([`old`]): Docker asked, then when its stopped
+/// containers last ran.
+pub fn old_now(home: &Path, now: i64) -> Result<Vec<Item>, String> {
+    let docker = command(home).ok_or("Docker isn't installed.")?;
+    let r = report(home);
+    if let Some(why) = r.why {
+        return Err(why);
+    }
+    let ids: Vec<&str> = r
+        .containers
+        .iter()
+        .filter_map(|c| c.name.strip_prefix(&format!("{PREFIX}container:")))
+        .collect();
+    let ran = if ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut args = vec![
+            "container",
+            "inspect",
+            "--format",
+            "{{.Id}} {{.State.FinishedAt}} {{.Created}}",
+            "--",
+        ];
+        args.extend(&ids);
+        parse_ran(&run(&docker, &args, 60)?)
+    };
+    Ok(old(&r, &ran, now))
+}
+
+/// Removes one of what [`old`] found, without forcing.
+pub fn remove_item(item: &Item, home: &Path) -> Result<(), String> {
+    let rest = item.name.strip_prefix(PREFIX).unwrap_or_default();
+    let removal = match rest.split_once(':') {
+        Some(("container", id)) => Removal::Container(id.into()),
+        Some(("image", id)) => Removal::Image {
+            id: id.into(),
+            refs: item.refs.clone(),
+        },
+        Some(("network", id)) => Removal::Network(id.into()),
+        _ => return Err(format!("{}: not one of Docker's.", printable(&item.name))),
+    };
+    remove(&removal, home)
+}
+
+/// Deletes the build cache no build has used for [`OLD_AFTER`]: what Docker
+/// says it reclaimed.
+pub fn prune_old_cache(home: &Path) -> Result<u64, String> {
+    let docker = command(home).ok_or("Docker isn't installed.")?;
+    let until = format!("until={}h", OLD_AFTER / 3600);
+    let out = run(
+        &docker,
+        &["builder", "prune", "--force", "--filter", &until],
+        600,
+    )?;
+    // "Total:\t1.2GB", or "Total reclaimed space: 1.2GB" before.
+    Ok(out
+        .lines()
+        .rev()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("Total reclaimed space:")
+                .or_else(|| l.strip_prefix("Total:"))
+        })
+        .map(|n| size(n.trim()))
+        .unwrap_or(0))
+}
+
+/// What [`clear_old`] did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Cleared {
+    pub containers: usize,
+    pub images: usize,
+    pub networks: usize,
+    /// What the build cache gave back, as Docker counts it.
+    pub cache: u64,
+    /// Docker Desktop was started for it.
+    pub started: bool,
+    /// Started for it, and still running: it didn't quit when asked.
+    pub left_running: bool,
+    /// What Docker refused (in use by then), or couldn't do.
+    pub failed: Vec<String>,
+}
+
+impl Cleared {
+    /// "Removed 3 stopped containers and 2 untagged images, and 1.2 GB of
+    /// build cache. Docker Desktop was started for it, and quit again."
+    pub fn said(&self) -> String {
+        let n = |k: usize, one: &str, many: &str| match k {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            k => Some(format!("{k} {many}")),
+        };
+        let mut what: Vec<String> = [
+            n(self.containers, "stopped container", "stopped containers"),
+            n(self.images, "untagged image", "untagged images"),
+            n(self.networks, "unused network", "unused networks"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if self.cache > 0 {
+            what.push(format!(
+                "{} of build cache",
+                crate::units::bytes(self.cache)
+            ));
+        }
+        let mut out = match what.as_slice() {
+            [] => "Nothing in Docker had gone unused for a week.".to_string(),
+            [one] => format!("Removed {one} from Docker."),
+            [rest @ .., last] => format!("Removed {} and {last} from Docker.", rest.join(", ")),
+        };
+        if self.started {
+            out.push_str(if self.left_running {
+                " Docker Desktop was started for it, and is still running: quit it from its menu."
+            } else {
+                " Docker Desktop was started for it, and quit again."
+            });
+        }
+        out
+    }
+}
+
+/// Removes what Docker has had no use for in a week ([`old`], and old build
+/// cache), starting Docker Desktop for it if it isn't running and quitting
+/// it after; waits for its disk image to give the space back first
+/// ([`settle`]). Refused only when nothing could be asked; what Docker
+/// refuses (in use by then) is in `failed`.
+pub fn clear_old(home: &Path, now: i64) -> Result<Cleared, String> {
+    let started = start(home)?;
+    let mut c = Cleared {
+        started,
+        ..Cleared::default()
+    };
+    let before = disk_size(home);
+    let done = old_now(home, now).map(|items| {
+        for i in &items {
+            match remove_item(i, home) {
+                Ok(()) if i.name.contains(":container:") => c.containers += 1,
+                Ok(()) if i.name.contains(":image:") => c.images += 1,
+                Ok(()) => c.networks += 1,
+                Err(why) => c.failed.push(format!("{}: {why}", printable(&i.title))),
+            }
+        }
+        match prune_old_cache(home) {
+            Ok(n) => c.cache = n,
+            Err(why) => c.failed.push(format!("Build cache: {why}")),
+        }
+    });
+    let removed = c.containers + c.images + c.networks > 0 || c.cache > 0;
+    // The disk image shrinks only while Docker runs.
+    if let (Some(before), true) = (before, removed) {
+        settle(home, before);
+    }
+    if started && stop(home).is_err() {
+        c.left_running = true;
+    }
+    done.map(|()| c)
 }
 
 /// An id as Docker shows it: 12 characters, without `sha256:`.
@@ -645,5 +932,83 @@ mod tests {
         assert_eq!(size("994.3MB*"), 994_300_000);
         assert_eq!(size("9.075GB (80%)"), 9_075_000_000);
         assert_eq!(size("N/A"), 0);
+    }
+
+    #[test]
+    fn docker_not_running_is_said_in_every_version() {
+        for said in [
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "failed to connect to the docker API at unix:///Users/me/.docker/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/me/.docker/run/docker.sock: connect: no such file or directory",
+        ] {
+            assert!(not_running(said), "{said}");
+        }
+        assert!(!not_running(
+            "Error response from daemon: conflict: unable to remove"
+        ));
+    }
+
+    #[test]
+    fn what_docker_hasnt_used_in_a_week_is_old() {
+        let now = crate::space::parse_time("2026-11-09T12:00:00Z").unwrap();
+        // Ended 10 days ago; never ran, made 2 days ago; one Docker
+        // doesn't know.
+        let out = format!(
+            "{HEX} 2026-10-30T09:15:02.123456789Z 2026-10-01T08:00:00.5Z\n\
+             9185107c3261e393732a218940febb8dac8d1c4655c11082dba754d4c2556cb4 0001-01-01T00:00:00Z 2026-11-07T08:00:00Z\n\
+             not-an-id 2026-10-30T09:15:02Z 2026-10-01T08:00:00Z\n"
+        );
+        let ran = parse_ran(&out);
+        assert_eq!(ran.len(), 2);
+        assert_eq!(
+            ran[0].1,
+            crate::space::parse_time("2026-10-30T09:15:02Z").unwrap()
+        );
+        assert_eq!(
+            ran[1].1,
+            crate::space::parse_time("2026-11-07T08:00:00Z").unwrap()
+        );
+
+        let r = parse(&df(), TOTALS, NETWORKS).unwrap();
+        let names: Vec<String> = old(&r, &ran, now).into_iter().map(|i| i.title).collect();
+        // The stopped container ended 10 days ago, the untagged image, the
+        // network; never the tagged image no container uses.
+        assert_eq!(names, ["db-old", "Untagged image 4105e2bb7b57", "old-net"]);
+        // Stopped yesterday: it stays.
+        let lately = [(HEX.to_string(), now - 86_400)];
+        let names: Vec<String> = old(&r, &lately, now).into_iter().map(|i| i.title).collect();
+        assert_eq!(names, ["Untagged image 4105e2bb7b57", "old-net"]);
+        // Docker didn't say when it ran: it stays too.
+        assert_eq!(old(&r, &[], now).len(), 2);
+    }
+
+    #[test]
+    fn what_was_cleared_is_said_in_a_sentence() {
+        let c = Cleared {
+            containers: 3,
+            images: 1,
+            cache: 1_200_000_000,
+            started: true,
+            ..Cleared::default()
+        };
+        assert_eq!(
+            c.said(),
+            "Removed 3 stopped containers, 1 untagged image and 1.2 GB of build cache from \
+             Docker. Docker Desktop was started for it, and quit again."
+        );
+        assert_eq!(
+            Cleared::default().said(),
+            "Nothing in Docker had gone unused for a week."
+        );
+        let left = Cleared {
+            networks: 1,
+            started: true,
+            left_running: true,
+            ..Cleared::default()
+        };
+        assert!(
+            left.said()
+                .starts_with("Removed 1 unused network from Docker.")
+        );
+        assert!(left.said().ends_with("quit it from its menu."));
     }
 }

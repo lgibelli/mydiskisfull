@@ -33,10 +33,9 @@ pub fn clean(
         })
         .collect();
     // Docker, asked once, right before: only what's still as shown goes.
-    let docker_now = paths
-        .iter()
-        .any(|p| docker::is_item(p))
-        .then(|| docker::report(&home));
+    // What's old is asked when it's done, Docker started for it if need be.
+    let one_item = |p: &PathBuf| docker::is_item(p) && p != Path::new(docker::OLD);
+    let docker_now = paths.iter().any(one_item).then(|| docker::report(&home));
     // Only worth running tmutil when one of them is a snapshot.
     let snapshots = if paths.iter().any(|p| clean::snapshot_date(p).is_some()) {
         mdif_core::apfs::local_snapshots(volume).map_err(|e| format!("{e:#}"))
@@ -62,7 +61,7 @@ pub fn clean(
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     for p in &paths {
         let step = match (&snapshots, &docker_now) {
-            (_, Some(now)) if docker::is_item(p) => match &now.why {
+            (_, Some(now)) if one_item(p) => match &now.why {
                 Some(why) => Err(why.clone()),
                 None => docker::check(p, now).map(|removal| Step::Docker {
                     name: p.clone(),
@@ -103,6 +102,14 @@ pub fn clean(
                     Step::Restart { .. } => "Would restart a helper of",
                     Step::DeleteSnapshot { .. } => "Would delete the local snapshot",
                     Step::Docker { .. } => "Would remove from Docker",
+                    Step::DockerOld => {
+                        "Would start Docker if need be, and remove what it hasn't used in a week"
+                    }
+                    Step::DeleteRuntime { .. } => "Would delete the simulator runtime",
+                    Step::Simulator { erase: true, .. } => "Would erase the simulator",
+                    Step::Simulator { .. } => "Would delete the simulator",
+                    Step::DeleteImage { .. } => "Would delete the Android system image",
+                    Step::DeleteAvd { .. } => "Would delete the Android emulator",
                 };
                 println!("{verb}: {}", printable(&tilde(&s.path().to_string_lossy())));
             }
@@ -128,7 +135,7 @@ pub fn clean(
                     Done {
                         path,
                         how: "trashed",
-                        to: None,
+                        ..Default::default()
                     },
                     None,
                 )
@@ -154,6 +161,7 @@ pub fn clean(
     // Docker Desktop gives back what went from its disk image a few seconds
     // later: waited for, so what's freed is counted.
     let from_docker = done.iter().any(|(d, _)| d.how == "docker");
+    let docker_changed = from_docker || done.iter().any(|(d, _)| d.how == "docker-old");
     if let Some(disk) = docker_disk.filter(|_| from_docker) {
         docker::settle(&home, disk);
     }
@@ -168,13 +176,13 @@ pub fn clean(
         // What went to the Trash is there now too.
         let mut changed: Vec<PathBuf> = done
             .iter()
-            .filter(|(d, _)| d.how != "docker")
+            .filter(|(d, _)| !d.how.starts_with("docker"))
             .map(|(d, _)| d.path.clone())
             .collect();
         if done.iter().any(|(d, _)| d.how == "trashed") {
             changed.push(home.join(".Trash"));
         }
-        if from_docker {
+        if docker_changed {
             changed.push(home.join(docker::FOLDER));
         }
         crate::space_cmd::patch(db, &changed);
@@ -188,6 +196,7 @@ pub fn clean(
                 "how": d.how,
                 "to": d.to,
                 "size": size,
+                "note": d.note,
             })).collect::<Vec<_>>(),
             "failed": failed.iter().map(|(p, why)| json!({"path": p, "why": why})).collect::<Vec<_>>(),
             "freed": freed,
@@ -211,6 +220,9 @@ pub fn clean(
                 "restarted" => println!("Restarted a helper of {shown}"),
                 "released" => println!("Deleted the local snapshot {shown}"),
                 "docker" => println!("Removed from Docker: {shown}"),
+                "docker-old" | "runtime" | "reset" => {
+                    println!("{}", printable(d.note.as_deref().unwrap_or(&shown)))
+                }
                 _ => println!("Removed: {shown} (its branch stays)"),
             }
         }
@@ -239,6 +251,10 @@ fn how(s: &Step) -> &'static str {
         Step::Restart { .. } => "restart",
         Step::DeleteSnapshot { .. } => "snapshots",
         Step::Docker { .. } => "docker",
+        Step::DockerOld => "docker-old",
+        Step::DeleteRuntime { .. } => "runtime",
+        Step::Simulator { .. } => "simulators",
+        Step::DeleteImage { .. } | Step::DeleteAvd { .. } => "android",
     }
 }
 

@@ -142,6 +142,35 @@ would. An app's or a tool's cache folder is emptied, the folder kept, unless the
 containers' are left alone (a service may spend hours making one again: `mediaanalysisd` analyses
 the photo library anew). An app's helper that keeps rewriting the disk (Safari's WebKit
 networking process) is ended, and the app starts a fresh one. More kinds go there, never by running a printed command.
+Xcode's: DerivedData and Device Support are emptied while Xcode is closed; a simulator runtime
+(an asset under `/System/Library/AssetsV2`) is deleted with `simctl runtime delete <id>`; a
+simulator (`CoreSimulator/Devices/<UDID>`) is erased (`simctl erase`: its apps and data go, it
+stays), or deleted when its runtime is gone; never a booted one. `simctl` straight from the
+selected Xcode, as the tidy does. Android's: a system image
+(`<sdk>/system-images/<api>/<tag>/<abi>`) no emulator uses, deleted, the folders it leaves empty
+too; an emulator (`~/.android/avd/<id>.avd` and its `<id>.ini`), deleted unless it runs (its
+`-avd <id>` among the processes). Which image each uses is read from its `config.ini`
+(`image.sysdir.1`); when one can't be read, no image goes. `ANDROID_AVD_HOME` and `ANDROID_HOME`
+are honoured when set; the app, which has neither, uses Android Studio's defaults. Docker's old leftovers (`docker:old`): Docker Desktop started
+in the background when it isn't running (`docker desktop start`, else `open -g -j`), then each
+stopped container that ended 7 days ago or more (or was created then and never ran), untagged
+image and unused network removed by id, unforced, and build cache unused for 7 days pruned
+(`--filter until=168h`); Docker quit again if it was started for this. Volumes and tagged images
+stay.
+
+**Clean Up** (the app, full edition): what the app can clean itself in one sheet, a checkbox
+each, run as a batch. An action marked `safe` (`clean::Action`) is ticked to start with: it
+comes back by itself and loses nothing used lately (caches, build output, DerivedData,
+simulators unused for a month, Docker's old leftovers, merged worktrees); the rest (the Trash, a
+runtime, what goes to the Trash) says why and waits to be ticked. An action may name an app to
+`quit` first (a cache's owner): while it's open its row says so, with a Quit button, and is
+skipped. Rows are by what they clean: one inside another that's ticked isn't listed, and under
+100 MB isn't worth a row. An item whose action cleans several things lists them as `parts`, each
+with its own action, and Clean Up offers those one by one: each simulator (not one running, nor
+one holding under 100 MB), ticked when nothing used it for a month or its runtime is gone. An
+Android system image no emulator uses is ticked; an emulator unused for a month is offered, not
+ticked. Each goes through `mdif clean` in turn, and what it did is said on its
+row; the sheet is the question, so no alert before or after (closed meanwhile, a banner says it).
 
 **Keep tidy** (`mdif tidy`, switches under Prevent; full edition only, each off until turned
 on): clean-ups the watcher does by itself, once a day, at background priority, after a sample.
@@ -162,7 +191,8 @@ button empties, 50 MB or more, with nothing written in them for 30 days, nor a f
 hold what isn't fetched again by itself, or only as gigabytes (Playwright's and Puppeteer's
 browsers, LM Studio's and Hugging Face's models). Files go only through `clean::plan` and
 `clean::run`, so what you keep, links, other volumes and open apps are refused as with the
-button; a kept simulator stays too. What each did last (when, freed, done, failed, one sentence)
+button; a kept simulator stays too. Old Docker leftovers: what Remove Old Leftovers takes, only
+while Docker is running (the watcher never starts it; otherwise the next day). What each did last (when, freed, done, failed, one sentence)
 is kept in the history's `meta` table with its switch; what it deleted goes to the watcher's log.
 
 **What apps keep** (`handlers.rs`): a catalogue of folders by their place under the home folder
@@ -237,7 +267,9 @@ than in the week before (from the watcher's history).
 | Homebrew, Gradle caches | retention settings | tweaks: `HOMEBREW_CLEANUP_MAX_AGE_DAYS=30` in `~/.homebrew/brew.env`; a Gradle init script (14 days, from Gradle 8.0). Cargo cleans its own cache since 1.88. | no |
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
 | Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
-| Docker disk image | prune it; cap it in Docker's settings | Review… (`mdif docker`): what `docker system prune` would remove, item by item, and the images no container uses (`-a`), asked from Docker since it has no dry run; what you tick goes through `mdif clean`, by id and unforced, after asking Docker again; volumes never. Shrinking the image deletes its contents, so no tweak. The command in Lite. | no |
+| Docker disk image | prune it; cap it in Docker's settings | Review… (`mdif docker`): what `docker system prune` would remove, item by item, and the images no container uses (`-a`), asked from Docker since it has no dry run; what you tick goes through `mdif clean`, by id and unforced, after asking Docker again; volumes never. Start Docker there when it isn't running, quit again after. Remove Old Leftovers (`docker:old`, in Clean Up) takes what Docker hasn't used in a week, starting Docker if needed. Shrinking the image deletes its contents, so no tweak. The command in Lite. | no |
+| Xcode leftovers (DerivedData, Device Support, old simulators and runtimes) | empty, erase or delete them | Empty DerivedData / Device Support while Xcode is closed; Clean Up N Simulators (erase those unused for a month, delete those whose runtime is gone), and in Clean Up each simulator on its own; a runtime's Delete with when it was last used. All `mdif clean`, `simctl` from the selected Xcode | no |
+| Android emulators and system images | delete what isn't used | Delete System Image when no emulator uses it (ticked in Clean Up); Delete Emulator once nothing started it for a month (not ticked); refused while it runs. `mdif clean` | no |
 | Local Time Machine snapshots holding deleted space | release them (when the disk is tight) | Delete Snapshots (`mdif clean`, `tmutil deletelocalsnapshots <date>` after a confirmation); the command in Lite. Sized by what macOS counts as purgeable, and ranked by it | no |
 | Swap | restart | shown with its size when the disk is tight | no |
 | A macOS update prepared, waiting for its restart (the running macOS's cryptexes kept beside the update's in Preboot, its staging on the Update volume, its download in AssetsV2) | restart to install it | shown with what the restart frees, measured (clones once), beside purgeable and swap | no |
@@ -495,6 +527,8 @@ mydiskisfull/
     the last backup, the build folders still backed up with Keep Out) and Prevention (keep tidy,
     and the tweaks, each a switch that applies or undoes it after showing what it changes and
     what you give up). ⌘1 to ⌘6. One visual system (`Theme.swift`).
+  - Clean Up… (Overview, the menu, ⇧⌘K): every clean-up the app does itself in one checklist,
+    the safe ones ticked, run as a batch with what each did on its row (`CleanUpView.swift`).
   - The menu bar: a plain menu (free space, forecast and the last day as text, what needs
     attention, Open, Check for Updates, About, Settings, Quit). The app is in the Dock like any
     app; with Settings → Show in the Dock off (or Hide from Dock in its Dock menu), it joins the

@@ -3,8 +3,10 @@
 // Docker when the sheet opens (`mdif docker`). Each has a checkbox, and the
 // sheet is the confirmation. What's ticked goes through `mdif clean`, which
 // asks Docker again first and removes each by id: only what you saw goes,
-// and Docker refuses what's in use by then. Not in the App Store edition,
-// which may only read the disk.
+// and Docker refuses what's in use by then. When Docker isn't running, Start
+// Docker starts it in the background (`mdif docker --start`), and it's quit
+// again once the sheet is done with it. Not in the App Store edition, which
+// may only read the disk.
 
 #if !APP_STORE
 import AppKit
@@ -16,12 +18,21 @@ struct DockerReview: View {
     @State private var report: DockerReport?
     @State private var failed: String?
     @State private var chosen: Set<String> = []
+    @State private var starting = false
+    /// Docker Desktop was started here: it's quit again after.
+    @State private var started = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Clean Up Docker").font(.headline)
             if let r = report, r.running {
                 lists(r)
+            } else if starting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting Docker in the background: up to a minute…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 120)
             } else if let why = report?.why ?? failed {
                 stopped(why)
             } else {
@@ -36,13 +47,19 @@ struct DockerReview: View {
         .padding(20)
         .frame(width: 600)
         .task { await load() }
+        // Closed without removing anything: Docker goes back to how it was.
+        .onDisappear { Task { await quitIfStarted() } }
     }
 
-    private func load() async {
+    private func load(start: Bool = false) async {
         report = nil
         failed = nil
+        starting = start
+        defer { starting = false }
         do {
-            let r = try await Core.json(DockerReport.self, ["docker"], timeout: 120)
+            let r = try await Core.json(DockerReport.self, ["docker"] + (start ? ["--start"] : []),
+                                        timeout: start ? 300 : 120)
+            started = started || r.started
             report = r
             // What prune would remove, to start; an image once you tick it.
             chosen = Set(r.pruned.map(\.name))
@@ -52,17 +69,23 @@ struct DockerReview: View {
     }
 
     @ViewBuilder private func stopped(_ why: String) -> some View {
-        Text(why)
+        let canStart = report?.running == false && why.hasPrefix("Docker isn't running")
+        Text(canStart ? "\(why) Start it to see what can go: it's started in the background, and quit again once you're done here." : why)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         HStack {
-            if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.docker.docker") {
-                Button("Open Docker Desktop") {
-                    NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
-                }
+            if canStart {
+                Button("Start Docker") { Task { await load(start: true) } }
             }
             Button("Look Again") { Task { await load() } }
         }
+    }
+
+    /// Docker Desktop, quit again when it was started here.
+    private func quitIfStarted() async {
+        guard started else { return }
+        started = false
+        _ = try? await Core.run(["docker", "--stop"], timeout: 120)
     }
 
     @ViewBuilder private func lists(_ r: DockerReport) -> some View {
@@ -146,8 +169,12 @@ struct DockerReview: View {
             // An image's size is its own layers: those it shares go with the
             // last image using them, so the total is about that.
             Button(picked.isEmpty ? "Remove" : size > 0 ? "Remove \(picked.count) (about \(Format.bytes(size)))" : "Remove \(picked.count)") {
+                let quit = started
+                started = false
                 monitor.clean(CleanAction(kind: "docker", label: "Remove from Docker",
-                                          paths: picked.map(\.name), confirm: nil, done: nil))
+                                          paths: picked.map(\.name), confirm: nil, done: nil)) {
+                    if quit { _ = try? await Core.run(["docker", "--stop"], timeout: 120) }
+                }
                 dismiss()
             }
             .keyboardShortcut(.defaultAction)

@@ -335,7 +335,8 @@ struct Suggestion: Decodable {
 /// What a suggestion's button does: `mdif clean` on its paths, which checks
 /// each again first.
 struct CleanAction: Decodable {
-    /// "worktrees", "trash", "delete", "empty", "restart" or "snapshots".
+    /// "worktrees", "trash", "delete", "empty", "restart", "snapshots",
+    /// "runtime", "simulators", "docker-old" or "docker" (its list first).
     let kind: String
     /// "Move to Trash", "Remove 8 Worktrees".
     let label: String
@@ -344,11 +345,23 @@ struct CleanAction: Decodable {
     let confirm: String?
     /// When it was done, while the watcher waits to see whether it worked.
     let done: Int64?
+    /// What it takes comes back by itself and nothing used lately goes:
+    /// ticked to start with in Clean Up.
+    var safe: Bool? = nil
+    /// The app to quit first: a bundle id, or a name.
+    var quit: String? = nil
+    /// What goes, in a line, when the item doesn't say.
+    var note: String? = nil
+    /// What it frees, when that isn't all of the item.
+    var frees: Int64? = nil
 
     var symbol: String {
         switch kind {
         case "worktrees": "arrow.triangle.branch"
         case "restart": "arrow.clockwise"
+        case "runtime", "simulators": "iphone"
+        case "docker-old": "shippingbox"
+        case "android": "smartphone"
         default: "trash"
         }
     }
@@ -377,6 +390,20 @@ struct CleanAction: Decodable {
         case "docker":
             // It lists what it removes, and asks.
             return "docker system prune"
+        case "docker-old":
+            // Near enough: Docker's filters go by when a container was made,
+            // not when it last ran.
+            return "docker container prune --filter until=168h; docker image prune; docker network prune; docker builder prune --filter until=168h"
+        case "simulators":
+            // Each simulator's folder is named by its UDID.
+            return paths.map { "xcrun simctl erase \(Self.quote(URL(fileURLWithPath: $0).lastPathComponent))" }
+                .joined(separator: "; ")
+        case "android":
+            // A system image's folder, or an emulator's with the .ini that
+            // lists it (Device Manager deletes both).
+            return paths.map { p in
+                p.hasSuffix(".avd") ? "rm -rf \(Self.quote(p)) \(Self.quote(String(p.dropLast(4)) + ".ini"))" : "rm -rf \(Self.quote(p))"
+            }.joined(separator: " && ")
         case "finder-trash":
             // Finder asks for the password these need.
             return #"osascript -e 'on run argv' -e 'repeat with p in argv' -e 'tell application "Finder" to delete (POSIX file (p as text) as alias)' -e 'end repeat' -e 'end run' "# + q
@@ -400,6 +427,10 @@ struct CleanAction: Decodable {
         case "restart": "Restarting…"
         case "snapshots": "Deleting the snapshots…"
         case "docker": "Removing from Docker…"
+        case "docker-old": "Asking Docker…"
+        case "runtime": "Deleting the runtime…"
+        case "simulators": "Erasing…"
+        case "android": "Deleting…"
         default: "Removing…"
         }
     }
@@ -411,10 +442,13 @@ struct Cleaned: Decodable {
     struct Item: Decodable {
         let path: String
         /// "removed", "trashed", "deleted", "emptied", "erased" (the Trash),
-        /// "restarted", "released" (a local snapshot) or "docker".
+        /// "restarted", "released" (a local snapshot), "runtime", "reset"
+        /// (a simulator erased), "docker" or "docker-old".
         let how: String
         /// What went to the Trash, which still takes its space there.
         let size: Int64?
+        /// What was done, when the path doesn't say.
+        let note: String?
     }
     struct Refused: Decodable {
         let path: String
@@ -659,6 +693,9 @@ struct SpaceReport: Decodable {
         /// data): what's in it and why.
         let detail: String?
         let action: CleanAction?
+        /// What its action cleans, each on its own (each simulator): Clean
+        /// Up offers them one by one.
+        var parts: [Piece]? = nil
         /// What an app keeps in it, and where to make it smaller.
         let about: About?
         /// What's known about it: what's in it, why it grows, what helps.
@@ -669,6 +706,11 @@ struct SpaceReport: Decodable {
 
         var id: String { path }
         func has(_ flag: String) -> Bool { flags.contains(flag) }
+    }
+
+    struct Piece: Decodable {
+        let name: String
+        let action: CleanAction
     }
 
     /// From an app's handler in `mdif`: the biggest folder in an item it
@@ -876,6 +918,8 @@ struct DockerReport: Decodable {
     let volumes: Int
     /// What `docker system prune -a` would free, as Docker counts it.
     let reclaimable: Int64
+    /// Docker Desktop was started for this: it's quit again after.
+    let started: Bool
 
     struct Item: Decodable, Identifiable {
         /// What `mdif clean` takes: "docker:image:sha256:…".

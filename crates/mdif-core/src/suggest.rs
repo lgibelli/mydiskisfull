@@ -519,6 +519,8 @@ fn measure_folders(
                     display(&path, home),
                     bytes(size.allocated)
                 )),
+                safe: true,
+                ..Default::default()
             });
         }
         if delete || trash {
@@ -707,6 +709,7 @@ fn from_tweaks(
                     label: "Move to Trash".into(),
                     paths: vec![p.to_string_lossy().into_owned()],
                     confirm: None,
+                    ..Default::default()
                 });
                 out.push(Suggestion {
                     cause,
@@ -837,6 +840,7 @@ fn from_leftovers(out: &mut Vec<Suggestion>) {
                     .collect(),
                 confirm: None,
                 done: None,
+                ..Default::default()
             }),
             title: Some("Leftovers from macOS updates".into()),
             measured: Measured::default(),
@@ -943,6 +947,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
                 paths: Vec::new(),
                 confirm: None,
                 done: None,
+                ..Default::default()
             }),
             title: Some("Docker's disk image".into()),
             measured: Measured::default(),
@@ -1008,12 +1013,16 @@ fn from_worktrees(
         };
         let mut size = format!("{they} {take} {}", bytes(allocated));
         // Blocks shared with clones elsewhere stay.
-        if private * 10 < allocated * 9 {
+        let it = if n == 1 { "it" } else { "them" };
+        if private < 1_000_000 {
+            // All of it a clone's, or a local snapshot's until it goes.
             size += &format!(
-                "; removing {} frees at least {}",
-                if n == 1 { "it" } else { "them" },
-                bytes(private)
+                "; removing {it} frees little now: {} blocks are shared with copies \
+                 elsewhere (a clone, or a local snapshot)",
+                if n == 1 { "its" } else { "their" }
             );
+        } else if private * 10 < allocated * 9 {
+            size += &format!("; removing {it} frees at least {}", bytes(private));
         }
         let rel = |f: &Finished| shell_quote(f.path.strip_prefix(repo).unwrap_or(&f.path));
         let lost = "nothing is lost: git refuses a worktree with changes, and what it ignores \
@@ -1093,6 +1102,9 @@ fn from_worktrees(
                 show(repo),
                 bytes(private)
             )),
+            safe: true,
+            frees: Some(private),
+            ..Default::default()
         };
         out.push(Suggestion {
             cause,
@@ -1531,6 +1543,7 @@ mod tests {
                 label: String::new(),
                 paths: vec![],
                 confirm: None,
+                ..Default::default()
             }),
             title: None,
             measured: Measured {

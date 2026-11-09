@@ -28,7 +28,7 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
         Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
         _ => None,
     };
-    let m = match fresh {
+    let mut m = match fresh {
         Some(m) => m,
         None => {
             let m = space::measure(&home())?;
@@ -38,6 +38,14 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
             m
         }
     };
+    // Which simulators can be erased goes by how they are now: a fraction
+    // of a second, and only with Xcode's simulators on the disk.
+    if m.home.join(mdif_core::xcode::DEVICES).is_dir() {
+        m.simulators = mdif_core::xcode::simulators();
+    }
+    // Which system images Android's emulators use, the same way: their
+    // settings, a few small files.
+    m.avds = mdif_core::android::avds(&m.home).ok();
     // The snapshots as they are now, not as they were at the scan: Time
     // Machine takes and deletes them by the hour.
     let snapshots =

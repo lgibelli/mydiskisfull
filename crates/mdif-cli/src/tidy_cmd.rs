@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use mdif_core::docker;
 use mdif_core::keep::Keep;
 use mdif_core::privacy;
 use mdif_core::store::Store;
@@ -18,7 +19,7 @@ use crate::watch_cmd::{home, local, tilde};
 
 pub fn list(db: &Path, json_out: bool) -> Result<()> {
     let store = Store::open(db)?;
-    let tidies = tidy::list(&store)?;
+    let tidies = tidy::list(&store, &home())?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&list_value(&tidies))?);
         return Ok(());
@@ -69,7 +70,7 @@ pub fn set(db: &Path, id: &str, on: bool, json_out: bool) -> Result<()> {
             "Off"
         };
         println!("{how}: {} ({}).", id.title(), id.id());
-        if let Some(why) = id.unavailable().filter(|_| on) {
+        if let Some(why) = id.unavailable(&home()).filter(|_| on) {
             println!("Not on this Mac, though: {why}");
         }
         println!();
@@ -112,7 +113,7 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
     let now = unix_now();
     let mut ran: Vec<(Id, Outcome)> = Vec::new();
     for id in ids {
-        if let Some(why) = id.unavailable() {
+        if let Some(why) = id.unavailable(&home) {
             let mut o = Outcome::default();
             o.failed.push(tidy::Failed {
                 id: id.id(),
@@ -122,8 +123,15 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
             ran.push((id, o));
             continue;
         }
-        let o = tidy::run(id, &home, &keep, now, dry_run);
-        if !dry_run {
+        let mut o = tidy::run(id, &home, &keep, now, dry_run);
+        // Not a run: it's still due, and does its work when it can.
+        if let Some(why) = o.waits.take() {
+            o.failed.push(tidy::Failed {
+                id: id.id(),
+                path: Default::default(),
+                why,
+            });
+        } else if !dry_run {
             tidy::record(&store, id, &o.last(now))?;
             cleaned(&store, db, now, &o);
         }
@@ -184,9 +192,11 @@ fn print_outcome(id: Id, o: &Outcome, dry_run: bool) {
         let verb = match (dry_run, d.what) {
             (true, "emptied") => "Would empty",
             (true, "excluded") => "Would keep out of Time Machine",
+            (true, "removed") => "Would remove from Docker",
             (true, _) => "Would delete",
             (false, "emptied") => "Emptied",
             (false, "excluded") => "Kept out of Time Machine",
+            (false, "removed") => "Removed from Docker",
             (false, _) => "Deleted",
         };
         if d.what == "excluded" {
@@ -230,7 +240,7 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
     };
     let due: Vec<Id> = due
         .into_iter()
-        .filter(|id| id.unavailable().is_none())
+        .filter(|id| id.unavailable(&home()).is_none())
         .collect();
     if due.is_empty() {
         return;
@@ -247,6 +257,10 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
     let home = home();
     for id in due {
         let o = tidy::run(id, &home, &keep, now, false);
+        // Docker isn't running: the next sample asks again, quietly.
+        if o.waits.is_some() {
+            continue;
+        }
         for d in &o.done {
             eprintln!(
                 "{} tidy {}: {} {} ({})",
@@ -276,12 +290,17 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
 /// it out) and the kept measurement. Folders only kept out of Time Machine
 /// changed neither.
 fn cleaned(store: &Store, db: &Path, start: i64, o: &Outcome) {
-    let changed: Vec<PathBuf> = o
+    let mut changed: Vec<PathBuf> = o
         .done
         .iter()
         .filter(|d| d.what != "excluded")
-        .map(|d| d.path.clone())
+        // Docker's items are in its disk image.
+        .map(|d| match docker::is_item(&d.path) {
+            true => home().join(docker::FOLDER),
+            false => d.path.clone(),
+        })
         .collect();
+    changed.dedup();
     if !changed.is_empty() {
         crate::watch_cmd::record_cleanup(store, start, o.freed());
         crate::space_cmd::patch(db, &changed);
@@ -317,7 +336,7 @@ mod tests {
             },
         )
         .unwrap();
-        let real = list_value(&tidy::list(&store).unwrap());
+        let real = list_value(&tidy::list(&store, Path::new("/nonexistent")).unwrap());
         assert_eq!(keys(&fixture), keys(&real));
         // Caches, the one with a last run.
         let real_tidy = &real["tidies"][Id::ALL.iter().position(|&i| i == Id::Caches).unwrap()];

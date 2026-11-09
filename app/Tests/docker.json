@@ -49,5 +49,6 @@
   "cache_total": 10490000000,
   "cache_shared": 10190000000,
   "volumes": 1,
-  "reclaimable": 3438012300
+  "reclaimable": 3438012300,
+  "started": false
 }

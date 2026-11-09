@@ -56,7 +56,11 @@
       "com.apple.TimeMachine.2026-10-29-091521.local"
     ],
     "confirm": "Delete 2 local Time Machine snapshots? Backups on your backup disk aren't touched, but what changed since the last backup loses its local copy: Time Machine can't restore it from this Mac any more. This can't be undone.",
-    "done": null
+    "done": null,
+    "safe": false,
+    "quit": null,
+    "note": null,
+    "frees": null
   },
   "changes": [
     {

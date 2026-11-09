@@ -164,11 +164,18 @@ enum Cmd {
         json: bool,
     },
     /// Docker: what `docker system prune` would remove, item by item, and
-    /// the images no container uses (`-a`). `mdif clean <item>` removes one
+    /// the images no container uses (`-a`). `mdif clean <item>` removes one;
+    /// `mdif clean docker:old` what Docker hasn't used in a week
     Docker {
         /// Print the list as JSON
         #[arg(long)]
         json: bool,
+        /// Start Docker Desktop in the background first, if it isn't running
+        #[arg(long, conflicts_with = "stop")]
+        start: bool,
+        /// Quit Docker Desktop (once it was started for a clean-up)
+        #[arg(long)]
+        stop: bool,
     },
     /// Time Machine: what goes into the backups, what the local snapshots
     /// hold and why, and the build folders and caches still backed up
@@ -474,7 +481,7 @@ fn main() -> Result<()> {
                 knowledge_cmd::check(&file, sig.as_deref())?
             }
         },
-        Cmd::Docker { json } => docker_cmd::show(json)?,
+        Cmd::Docker { json, start, stop } => docker_cmd::show(json, start, stop)?,
         Cmd::Timemachine {
             action,
             quick,

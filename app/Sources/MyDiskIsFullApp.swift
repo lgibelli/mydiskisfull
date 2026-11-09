@@ -75,6 +75,10 @@ struct AppCommands: Commands {
             Divider()
             Button("Refresh") { monitor.refreshAll() }
                 .keyboardShortcut("r", modifiers: .command)
+            #if !APP_STORE
+            Button("Clean Up…") { AppDelegate.showCleanUp() }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
+            #endif
             Divider()
         }
         CommandGroup(replacing: .help) {
@@ -288,6 +292,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor static func show(_ pane: Pane) {
         Navigator.shared.pane = pane
         open("main")
+    }
+
+    /// The main window on Overview, with Clean Up over it.
+    @MainActor static func showCleanUp() {
+        show(.overview)
+        Navigator.shared.cleanUpOpen = true
     }
 
     /// The main window with Settings over it, on a page or the first.

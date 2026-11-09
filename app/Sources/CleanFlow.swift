@@ -3,7 +3,8 @@
 // work, something you keep, an app still running). What can't be undone is
 // asked first; what goes to the Trash isn't, and says its space comes back
 // once the Trash is emptied. What was done shows in the window, not in an
-// alert (Notices.swift). Not in the App Store edition, which may only read
+// alert (Notices.swift); Clean Up (CleanUpView.swift) runs several and says
+// each beside its row. Not in the App Store edition, which may only read
 // the disk (see Edition.swift).
 
 #if !APP_STORE
@@ -17,52 +18,28 @@ enum CleanFlow {
         return TweakFlow.ask("\(a.label)?", confirm, button: a.label)
     }
 
+    /// `mdif clean` on its paths, nothing said: what it did, or why it
+    /// couldn't ask.
+    static func perform(_ a: CleanAction) async -> Result<Cleaned, Error> {
+        do {
+            // Removing build output can be hundreds of thousands of files;
+            // Docker may be started first.
+            return .success(try await Core.json(Cleaned.self, ["clean"] + a.paths, timeout: 1800))
+        } catch {
+            return .failure(error)
+        }
+    }
+
     /// Once `confirmed`; returns whether anything was done.
     static func run(_ a: CleanAction) async -> Bool {
         let r: Cleaned
-        do {
-            // Removing build output can be hundreds of thousands of files.
-            r = try await Core.json(Cleaned.self, ["clean"] + a.paths, timeout: 1800)
-        } catch {
+        switch await perform(a) {
+        case .success(let c): r = c
+        case .failure(let error):
             Notices.shared.post(ok: false, "Nothing was cleaned", error.localizedDescription)
             return false
         }
-        var lines: [String] = []
-        let removed = r.done.filter { $0.how == "removed" }.count
-        if removed > 0 {
-            lines.append(removed == 1 ? "Removed the worktree; its branch stays."
-                                      : "Removed \(removed) worktrees; their branches stay.")
-        }
-        if r.done.contains(where: { $0.how == "restarted" }) {
-            lines.append("Restarted: a fresh one starts when it's needed. If the writes come back, quit and reopen the app.")
-        }
-        let deleted = r.done.filter { $0.how == "deleted" }.count
-        if deleted > 0 {
-            lines.append("Deleted. The next build makes it again.")
-        }
-        let released = r.done.filter { $0.how == "released" }.count
-        if released > 0 {
-            lines.append(released == 1 ? "Deleted the local snapshot. Your backups on the backup disk are as they were."
-                                       : "Deleted \(released) local snapshots. Your backups on the backup disk are as they were.")
-        }
-        let docker = r.done.filter { $0.how == "docker" }.count
-        if docker > 0 {
-            lines.append("Removed \(docker == 1 ? "1 item" : "\(docker) items") from Docker. It downloads or builds an image again when it's needed.")
-        }
-        if r.done.contains(where: { $0.how == "erased" }) {
-            lines.append("Emptied the Trash.")
-        }
-        let emptied = r.done.filter { $0.how == "emptied" }.count
-        if emptied > 0 {
-            lines.append(emptied == 1 ? "Emptied. The app makes what it needs again."
-                                      : "Emptied \(emptied) caches. Apps make what they need again.")
-        }
-        if r.done.contains(where: { $0.how == "trashed" }) {
-            lines.append(r.inTrash > 0
-                ? "Moved to the Trash: its \(Format.bytes(r.inTrash)) comes back once you empty the Trash."
-                : "Moved to the Trash: its space comes back once you empty the Trash.")
-        }
-        if r.freed > 0 { lines.append("The disk has \(Format.bytes(r.freed)) more free.") }
+        var lines = said(r)
         if !r.failed.isEmpty {
             lines.append("Not done:\n" + r.failed.map { "• \($0.why)" }.joined(separator: "\n"))
         }
@@ -70,6 +47,51 @@ enum CleanFlow {
         Notices.shared.post(ok: !r.done.isEmpty, r.done.isEmpty ? "Nothing was cleaned" : "Done",
                             lines.joined(separator: "\n"), stays: !r.failed.isEmpty || r.done.isEmpty)
         return !r.done.isEmpty
+    }
+
+    /// What was done, a line each kind, and what the disk has more free.
+    static func said(_ r: Cleaned) -> [String] {
+        var lines: [String] = []
+        // What says itself: a runtime, a simulator, Docker's leftovers.
+        let noted = r.done.filter { $0.note != nil }
+        let rest = r.done.filter { $0.note == nil }
+        lines += noted.compactMap(\.note).map { $0.hasSuffix(".") ? $0 : $0 + "." }
+        let removed = rest.filter { $0.how == "removed" }.count
+        if removed > 0 {
+            lines.append(removed == 1 ? "Removed the worktree; its branch stays."
+                                      : "Removed \(removed) worktrees; their branches stay.")
+        }
+        if rest.contains(where: { $0.how == "restarted" }) {
+            lines.append("Restarted: a fresh one starts when it's needed. If the writes come back, quit and reopen the app.")
+        }
+        let deleted = rest.filter { $0.how == "deleted" }.count
+        if deleted > 0 {
+            lines.append("Deleted. The next build makes it again.")
+        }
+        let released = rest.filter { $0.how == "released" }.count
+        if released > 0 {
+            lines.append(released == 1 ? "Deleted the local snapshot. Your backups on the backup disk are as they were."
+                                       : "Deleted \(released) local snapshots. Your backups on the backup disk are as they were.")
+        }
+        let docker = rest.filter { $0.how == "docker" }.count
+        if docker > 0 {
+            lines.append("Removed \(docker == 1 ? "1 item" : "\(docker) items") from Docker. It downloads or builds an image again when it's needed.")
+        }
+        if rest.contains(where: { $0.how == "erased" }) {
+            lines.append("Emptied the Trash.")
+        }
+        let emptied = rest.filter { $0.how == "emptied" }.count
+        if emptied > 0 {
+            lines.append(emptied == 1 ? "Emptied. The app makes what it needs again."
+                                      : "Emptied \(emptied) caches. Apps make what they need again.")
+        }
+        if rest.contains(where: { $0.how == "trashed" }) {
+            lines.append(r.inTrash > 0
+                ? "Moved to the Trash: its \(Format.bytes(r.inTrash)) comes back once you empty the Trash."
+                : "Moved to the Trash: its space comes back once you empty the Trash.")
+        }
+        if r.freed > 0 { lines.append("The disk has \(Format.bytes(r.freed)) more free.") }
+        return lines
     }
 }
 #endif

@@ -182,6 +182,16 @@ pub struct Measured {
     /// [`FILES`].
     #[serde(default)]
     pub files: Vec<BigFile>,
+    /// The simulators as they are now, for what's offered with their folder
+    /// ([`xcode::DEVICES`]): read when the report is made, not kept.
+    ///
+    /// [`xcode::DEVICES`]: crate::xcode::DEVICES
+    #[serde(skip)]
+    pub simulators: Vec<crate::xcode::Simulator>,
+    /// Android's emulators as they are now, for which system images are
+    /// used: `None` when they weren't read (none is offered then).
+    #[serde(skip)]
+    pub avds: Option<Vec<crate::android::Avd>>,
 }
 
 /// A file of yours of at least [`clean::BIG_FILE`] allocated bytes, as the
@@ -372,6 +382,9 @@ pub struct Item {
     pub detail: Option<String>,
     /// What `mdif clean` would do with it now.
     pub action: Option<Action>,
+    /// What its action cleans, each on its own, for Clean Up to offer one
+    /// by one (each simulator).
+    pub parts: Vec<Piece>,
     /// The biggest folder in it that an app's handler knows
     /// ([`handlers`](crate::handlers)): what it is and how to make it smaller.
     pub about: Option<About>,
@@ -382,6 +395,13 @@ pub struct Item {
     /// ask ([`knowledge::generic`](crate::knowledge::generic)). Not for your
     /// own folders, nor what a rule explains (build output, apps).
     pub unexplained: Option<String>,
+}
+
+/// One of the things an item's action cleans, with its own.
+#[derive(Debug, Clone, Serialize)]
+pub struct Piece {
+    pub name: String,
+    pub action: Action,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -463,6 +483,8 @@ pub fn measure(home: &Path) -> Result<Measured> {
         apps: Vec::new(),
         runtimes: Vec::new(),
         files: own_files(&s.big_files, home),
+        simulators: Vec::new(),
+        avds: None,
     };
     let sorted = sort(&m, &Keep::default());
     let apps: Vec<String> = sorted
@@ -815,6 +837,10 @@ enum What {
     Incremental,
     /// A simulator runtime's asset.
     Simulator,
+    /// An Android emulator's folder.
+    Avd,
+    /// An Android system image.
+    AndroidImage,
     /// Caches apps fill again.
     Cache,
     /// Xcode's DerivedData.
@@ -949,6 +975,8 @@ fn in_home(c: &[String], name: &str) -> Option<Class> {
             item(Dev, What::Plain)
         }
         ["Library", "Android"] => item(Dev, What::Plain),
+        ["Library", "Android", "sdk", "system-images", _, _, _] => item(Dev, What::AndroidImage),
+        [".android", "avd", x] if x.ends_with(".avd") => item(Dev, What::Avd),
         ["Library", "CloudStorage"] => group(Cloud),
         ["Library", "CloudStorage", _] | ["Library", "Mobile Documents"] => {
             item(Cloud, What::Plain)
@@ -1217,7 +1245,6 @@ fn visit(d: &Dir, path: PathBuf, up: &Owner, twice: i64, home: &Path, keep: &Kee
 /// would take them now.
 pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
     let t = sort(m, keep);
-    let home = m.home.as_path();
 
     // Clones counted once: take off what each part's clones count twice,
     // then what's still counted twice (blocks shared between parts, hard
@@ -1324,6 +1351,7 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
             note: note.map(String::from),
             detail: None,
             action: None,
+            parts: Vec::new(),
             about: None,
             known: None,
             unexplained: None,
@@ -1368,7 +1396,8 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
             items.truncate(ITEMS);
             // System data comes with its own (the snapshots').
             for i in items.iter_mut().filter(|i| i.action.is_none()) {
-                i.action = action(i, home, keep, &t);
+                i.action = action(i, m, keep, &t);
+                i.parts = pieces(i, m, keep);
             }
             Some(KindReport {
                 id: kind.id(),
@@ -1487,6 +1516,7 @@ fn unseen(bytes: u64, m: &Measured, snapshots: &[String]) -> Item {
         note: Some(note),
         detail: Some(detail),
         action,
+        parts: Vec::new(),
         about: None,
         known: None,
         unexplained: None,
@@ -1533,6 +1563,7 @@ fn old_files(m: &Measured, keep: &Keep) -> Vec<OldFile> {
                     paths: vec![f.path.clone()],
                     confirm: None,
                     done: None,
+                    ..Default::default()
                 }),
             }
         })
@@ -1631,12 +1662,41 @@ fn describe(
         What::Simulator => {
             let r = m.runtimes.iter().find(|r| Path::new(&r.path) == s.path);
             last_used = r.and_then(|r| r.last_used);
-            note = Some(
-                "Xcode → Settings → Components removes it; it downloads again when needed".into(),
-            );
+            note = Some("Xcode downloads it again when it's needed".into());
         }
         What::Vm => {
             note = Some("A virtual machine's disk: it grows as the guest writes".into());
+        }
+        What::Avd => {
+            let a = m.avds.iter().flatten().find(|a| a.dir == s.path);
+            last_used = a.and_then(|a| a.last_used);
+            note = Some(match last_used {
+                Some(t) if m.measured - t >= crate::android::UNUSED => {
+                    format!(
+                        "An Android emulator, not used since {}",
+                        month(t, m.measured)
+                    )
+                }
+                _ => "An Android emulator: its apps, their data and its settings".into(),
+            });
+        }
+        What::AndroidImage => {
+            note = Some(match &m.avds {
+                Some(avds) => match crate::android::users(&s.path, avds).as_slice() {
+                    [] => {
+                        "No emulator uses it: Android Studio downloads it again when one needs it"
+                            .into()
+                    }
+                    used => format!(
+                        "Used by {}",
+                        used.iter()
+                            .map(|a| crate::text::printable(&a.name).into_owned())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                },
+                None => "What Android's emulators start from".into(),
+            });
         }
         What::Trash => note = Some("Freed when you empty the Trash".into()),
         What::Plain => note = crate::knowledge::note(&s.path, &m.home),
@@ -1709,6 +1769,7 @@ fn describe(
         note,
         detail: None,
         action: None,
+        parts: Vec::new(),
         about,
         known,
         unexplained,
@@ -1879,6 +1940,7 @@ fn trash_action(h: &crate::handlers::Handler, at: &Path, home: &Path, size: u64)
             bytes(size)
         )),
         done: None,
+        ..Default::default()
     })
 }
 
@@ -1939,7 +2001,8 @@ fn empty_action(h: &crate::handlers::Handler, base: &Path, home: &Path) -> Optio
              to the Trash; quit {app} first.",
             bytes(size)
         )),
-        done: None,
+        safe: true,
+        ..Default::default()
     })
 }
 
@@ -2004,6 +2067,13 @@ fn name(s: &Sorted, m: &Measured) -> String {
                     .join("/");
             }
         }
+        What::Avd => {
+            if let Some(a) = m.avds.iter().flatten().find(|a| a.dir == s.path) {
+                return a.name.clone();
+            }
+            return stem(".avd");
+        }
+        What::AndroidImage => return crate::android::image_name(&s.path),
         What::Simulator => {
             return m
                 .runtimes
@@ -2068,13 +2138,33 @@ fn name(s: &Sorted, m: &Measured) -> String {
 }
 
 /// What `mdif clean` would do with a listed item now: build output, a Rust
-/// build's incremental caches and an app's cache, unless kept.
-fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
+/// build's incremental caches, an app's cache, Xcode's DerivedData,
+/// simulator runtimes and simulators, and what Docker hasn't used in a
+/// week, unless kept.
+fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
+    let home = m.home.as_path();
     let s = t
         .items
         .iter()
         .find(|s| s.path.as_os_str() == i.path.as_str())?;
     let shown = display(&s.path, home);
+    if !keep.touches(&s.path) {
+        if s.what == What::Simulator {
+            return runtime_action(i, m, s.whole);
+        }
+        if s.path == home.join(crate::xcode::DEVICES) {
+            return simulators_action(&m.simulators, keep, m.measured);
+        }
+        if s.path == home.join(crate::docker::FOLDER) && crate::docker::command(home).is_some() {
+            return Some(docker_action());
+        }
+        if s.what == What::AndroidImage {
+            return image_action(i, m, s.whole);
+        }
+        if s.what == What::Avd {
+            return avd_action(i, m, s.whole);
+        }
+    }
     if matches!(s.what, What::Plain)
         && crate::privacy::may_open(&s.path)
         && clean::minecraft(&s.path)
@@ -2096,19 +2186,51 @@ fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
                 worlds(&s.path)
             )),
             done: None,
+            ..Default::default()
         });
     }
-    if !matches!(s.what, What::Artifact | What::Incremental | What::Cache) || keep.touches(&s.path)
+    if !matches!(
+        s.what,
+        What::Artifact | What::Incremental | What::Cache | What::DerivedData | What::DevCache
+    ) || keep.touches(&s.path)
     {
         return None;
     }
     match clean::plan(&s.path, home, keep, &[], &[]) {
         Ok(Step::Delete(_)) => {}
+        Ok(Step::Empty { owner, .. }) if owner == crate::xcode::XCODE => {
+            let derived = s.path.ends_with("DerivedData");
+            return Some(Action {
+                kind: "empty",
+                label: if derived {
+                    "Empty DerivedData"
+                } else {
+                    "Empty Device Support"
+                }
+                .into(),
+                paths: vec![i.path.clone()],
+                confirm: Some(format!(
+                    "Empty {shown}? {} on disk. What's in it is deleted, not moved to the Trash; \
+                     Xcode makes it again: {}",
+                    bytes(s.whole),
+                    if derived {
+                        "each project's next build starts from scratch."
+                    } else {
+                        "it copies a device's files again the next time it's connected."
+                    }
+                )),
+                safe: true,
+                quit: Some(owner),
+                ..Default::default()
+            });
+        }
         // Whether its app is open is asked when it's done: this is cached.
-        Ok(Step::Empty { .. }) => {
+        Ok(Step::Empty { owner, .. }) => {
             return Some(Action {
                 kind: "empty",
                 label: "Empty Cache".into(),
+                safe: true,
+                quit: Some(owner),
                 paths: vec![i.path.clone()],
                 confirm: Some(format!(
                     "Empty {shown}? {} on disk. What's in it is deleted, not moved to the \
@@ -2117,6 +2239,7 @@ fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
                     bytes(s.whole)
                 )),
                 done: None,
+                ..Default::default()
             });
         }
         _ => return None,
@@ -2155,8 +2278,243 @@ fn action(i: &Item, home: &Path, keep: &Keep, t: &Tree) -> Option<Action> {
         label: label.into(),
         paths: vec![i.path.clone()],
         confirm: Some(confirm),
-        done: None,
+        safe: true,
+        ..Default::default()
     })
+}
+
+/// A simulator runtime's button: deleted, Xcode downloads it again. Ticked
+/// in Clean Up when nothing has used it for a month.
+fn runtime_action(i: &Item, m: &Measured, size: u64) -> Option<Action> {
+    let r = m.runtimes.iter().find(|r| r.path == i.path)?;
+    let added = crate::xcode::added(Path::new(&r.path));
+    let note = match (r.last_used, added) {
+        (Some(t), _) => format!("Last used in {}", month(t, m.measured)),
+        (None, Some(a)) => format!("Never used; downloaded in {}", month(a, m.measured)),
+        (None, None) => "Never used".into(),
+    };
+    Some(Action {
+        kind: "runtime",
+        label: "Delete Runtime".into(),
+        paths: vec![i.path.clone()],
+        confirm: Some(format!(
+            "Delete the {}? {}. Xcode downloads it again when you build for it or start one of \
+             its simulators; until then they can't start.",
+            r.name,
+            bytes(size)
+        )),
+        safe: crate::xcode::runtime_unused(r.last_used, added, m.measured),
+        note: Some(note),
+        ..Default::default()
+    })
+}
+
+/// The simulators' button: those nothing has used for a month erased (they
+/// stay in Xcode, as new), and those whose runtime is gone deleted.
+fn simulators_action(sims: &[crate::xcode::Simulator], keep: &Keep, now: i64) -> Option<Action> {
+    let going: Vec<&crate::xcode::Simulator> = sims
+        .iter()
+        .filter(|s| s.unused(now) || !s.available)
+        .filter(|s| s.dir.as_ref().is_some_and(|d| !keep.touches(d)))
+        .collect();
+    if going.is_empty() {
+        return None;
+    }
+    let (erased, gone): (Vec<_>, Vec<_>) = going.iter().partition(|s| s.available);
+    let names = |l: &[&&crate::xcode::Simulator]| {
+        let mut n: Vec<String> = l.iter().take(3).map(|s| s.title()).collect();
+        if l.len() > 3 {
+            n.push(format!("{} more", l.len() - 3));
+        }
+        n.join(", ")
+    };
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            one.to_string()
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let label = match (erased.len(), gone.len()) {
+        (n, 0) => format!("Erase {}", plural(n, "Simulator", "Simulators")),
+        (0, n) => format!("Delete {}", plural(n, "Simulator", "Simulators")),
+        (a, b) => format!("Clean Up {} Simulators", a + b),
+    };
+    let mut note = Vec::new();
+    let mut confirm = Vec::new();
+    let size: u64 = going.iter().map(|s| s.bytes).sum();
+    if !erased.is_empty() {
+        note.push(format!("Not used for a month: {}", names(&erased)));
+        confirm.push(format!(
+            "Erase {}? Each stays in Xcode, as new: the apps installed in it and their data are \
+             deleted.",
+            names(&erased)
+        ));
+    }
+    if !gone.is_empty() {
+        note.push(format!("Their runtime is gone: {}", names(&gone)));
+        confirm.push(format!(
+            "{} whose runtime is gone {} deleted, as `xcrun simctl delete unavailable` does.",
+            names(&gone),
+            if gone.len() == 1 { "is" } else { "are" }
+        ));
+    }
+    confirm.push(format!("{} in all.", bytes(size)));
+    Some(Action {
+        kind: "simulators",
+        label,
+        paths: going
+            .iter()
+            .filter_map(|s| s.dir.as_ref())
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect(),
+        confirm: Some(confirm.join(" ")),
+        safe: true,
+        note: Some(note.join("; ")),
+        frees: Some(size),
+        ..Default::default()
+    })
+}
+
+/// What an item's action cleans, each on its own: each simulator, to erase
+/// (delete, once its runtime is gone) one by one. Every one that isn't
+/// running and holds enough to matter, those nothing used for a month
+/// ticked.
+fn pieces(i: &Item, m: &Measured, keep: &Keep) -> Vec<Piece> {
+    if i.path != m.home.join(crate::xcode::DEVICES).to_string_lossy()
+        || keep.touches(Path::new(&i.path))
+    {
+        return Vec::new();
+    }
+    simulator_parts(&m.simulators, keep, m.measured)
+}
+
+fn simulator_parts(sims: &[crate::xcode::Simulator], keep: &Keep, now: i64) -> Vec<Piece> {
+    let mut sims: Vec<&crate::xcode::Simulator> = sims
+        .iter()
+        .filter(|s| !s.booted && (s.bytes >= crate::xcode::SIMULATOR_MIN || !s.available))
+        .filter(|s| s.dir.as_ref().is_some_and(|d| !keep.touches(d)))
+        .collect();
+    sims.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(&b.name)));
+    sims.into_iter()
+        .filter_map(|s| {
+            let dir = s.dir.as_ref()?.to_string_lossy().into_owned();
+            let title = s.title();
+            let (label, note, confirm) = if !s.available {
+                (
+                    "Delete Simulator",
+                    "Its runtime is gone: it can't start".to_string(),
+                    format!("Delete {title}? Its runtime is gone, so it can't start."),
+                )
+            } else {
+                let note = match s.last_used {
+                    Some(t) if now - t >= crate::xcode::UNUSED => {
+                        format!("Not used since {}", month(t, now))
+                    }
+                    Some(t) => format!("Last used in {}", month(t, now)),
+                    None => "Never used".into(),
+                };
+                (
+                    "Erase Simulator",
+                    note,
+                    format!(
+                        "Erase {title}? It stays in Xcode, as new: the apps installed in it and \
+                         their data are deleted."
+                    ),
+                )
+            };
+            Some(Piece {
+                name: title,
+                action: Action {
+                    kind: "simulators",
+                    label: label.into(),
+                    paths: vec![dir],
+                    confirm: Some(format!("{confirm} {}.", bytes(s.bytes))),
+                    safe: s.unused(now) || !s.available,
+                    note: Some(note),
+                    frees: Some(s.bytes),
+                    ..Default::default()
+                },
+            })
+        })
+        .collect()
+}
+
+/// An Android system image's button, once no emulator uses it.
+fn image_action(i: &Item, m: &Measured, size: u64) -> Option<Action> {
+    let avds = m.avds.as_ref()?;
+    let path = Path::new(&i.path);
+    if !crate::android::users(path, avds).is_empty() {
+        return None;
+    }
+    Some(Action {
+        kind: "android",
+        label: "Delete System Image".into(),
+        paths: vec![i.path.clone()],
+        confirm: Some(format!(
+            "Delete the {}? {}. No emulator uses it; Android Studio downloads it again when you \
+             make one that needs it.",
+            crate::android::image_name(path),
+            bytes(size)
+        )),
+        safe: true,
+        note: Some(
+            "No emulator uses it: Android Studio downloads it again when one needs it".into(),
+        ),
+        ..Default::default()
+    })
+}
+
+/// An Android emulator's button, once nothing has started it for a month:
+/// deleting it loses what's in it, so it's never ticked to start with.
+fn avd_action(i: &Item, m: &Measured, size: u64) -> Option<Action> {
+    let a = m
+        .avds
+        .as_ref()?
+        .iter()
+        .find(|a| a.dir.as_os_str() == i.path.as_str())?;
+    let used = a.last_used?;
+    if m.measured - used < crate::android::UNUSED {
+        return None;
+    }
+    Some(Action {
+        kind: "android",
+        label: "Delete Emulator".into(),
+        paths: vec![i.path.clone()],
+        confirm: Some(format!(
+            "Delete the emulator {}? {}: the apps installed in it, their data and its settings \
+             go. Android Studio's Device Manager makes a new one.",
+            crate::text::printable(&a.name),
+            bytes(size)
+        )),
+        safe: false,
+        note: Some(format!("Not used since {}", month(used, m.measured))),
+        ..Default::default()
+    })
+}
+
+/// Docker's button: what it hasn't used in a week, removed, Docker Desktop
+/// started for it if it isn't running (`mdif clean docker:old`).
+fn docker_action() -> Action {
+    Action {
+        kind: "docker-old",
+        label: "Remove Old Leftovers".into(),
+        paths: vec![crate::docker::OLD.into()],
+        confirm: Some(
+            "Remove what Docker hasn't used in a week? Stopped containers that haven't run for 7 \
+             days, images no tag points to, networks no container uses, and build cache no build \
+             has used for 7 days. Volumes and tagged images stay. If Docker isn't running, it's \
+             started in the background for this and quit after."
+                .into(),
+        ),
+        safe: true,
+        note: Some(
+            "Stopped containers and build cache unused for a week, untagged images; volumes and \
+             tagged images stay"
+                .into(),
+        ),
+        ..Default::default()
+    }
 }
 
 struct ComingBack {
@@ -2429,6 +2787,8 @@ mod tests {
             apps: Vec::new(),
             runtimes: Vec::new(),
             files: Vec::new(),
+            simulators: Vec::new(),
+            avds: None,
         }
     }
 
@@ -2676,7 +3036,7 @@ mod tests {
         assert_eq!(named(&r, "dev", "Gradle").bytes, 3 * GB);
         let sim = named(&r, "dev", "iOS Simulator");
         assert_eq!(sim.bytes, 8 * GB);
-        assert!(sim.note.as_deref().unwrap().contains("Components"));
+        assert!(sim.note.as_deref().unwrap().contains("downloads it again"));
         assert_eq!(named(&r, "macos", "System downloads").bytes, 3 * GB);
         // A system folder goes by its path.
         assert_eq!(named(&r, "macos", "/private/var/db").bytes, 4 * GB);
@@ -3073,6 +3433,258 @@ mod tests {
         let r = report(&m, &Keep::default(), &[]);
         let sim = named(&r, "dev", "iOS 27.0 Simulator");
         assert_eq!(sim.last_used, Some(1_792_132_973));
+        // Its button: used five days ago, so not ticked in Clean Up.
+        let a = sim.action.as_ref().expect("a button");
+        assert_eq!((a.kind, a.label.as_str()), ("runtime", "Delete Runtime"));
+        assert_eq!(a.paths, [m.runtimes[0].path.clone()]);
+        assert_eq!(a.note.as_deref(), Some("Last used in October"));
+        assert!(!a.safe);
+        // Unused for two months: ticked.
+        m.runtimes[0].last_used = Some(NOW - 60 * 86_400);
+        let r = report(&m, &Keep::default(), &[]);
+        assert!(
+            named(&r, "dev", "iOS 27.0 Simulator")
+                .action
+                .as_ref()
+                .unwrap()
+                .safe
+        );
+        // Kept: no button.
+        let keep = Keep::parse(&m.runtimes[0].path, Path::new(HOME));
+        let r = report(&m, &keep, &[]);
+        assert!(named(&r, "dev", "iOS 27.0 Simulator").action.is_none());
+    }
+
+    #[test]
+    fn simulators_nothing_used_for_a_month_are_erased_and_orphans_deleted() {
+        use crate::xcode::Simulator;
+        let dir = |u: &str| {
+            Some(PathBuf::from(format!(
+                "{HOME}/{}/{u}",
+                crate::xcode::DEVICES
+            )))
+        };
+        let sim = |udid: &str, name: &str, bytes: u64, days: Option<i64>| Simulator {
+            udid: udid.into(),
+            name: name.into(),
+            runtime: "iOS 27.0".into(),
+            dir: dir(udid),
+            bytes,
+            last_used: days.map(|d| NOW - d * 86_400),
+            booted: false,
+            available: true,
+        };
+        let mut sims = vec![
+            sim("A", "Old", 3 * GB, Some(40)),
+            sim("B", "Lately", 5 * GB, Some(3)),
+            sim("C", "Never", 2 * GB, None),
+            sim("D", "Empty", 10_000_000, Some(400)),
+            Simulator {
+                booted: true,
+                ..sim("E", "Running", 4 * GB, Some(90))
+            },
+            Simulator {
+                available: false,
+                runtime: "iOS 26.0".into(),
+                ..sim("F", "Orphan", 0, None)
+            },
+        ];
+        let a = simulators_action(&sims, &Keep::default(), NOW).expect("a button");
+        assert_eq!(a.kind, "simulators");
+        assert_eq!(a.label, "Clean Up 3 Simulators");
+        let paths: Vec<String> = ["A", "C", "F"]
+            .iter()
+            .map(|u| dir(u).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(a.paths, paths);
+        assert_eq!(a.frees, Some(5 * GB));
+        assert!(a.safe);
+        assert_eq!(
+            a.note.as_deref(),
+            Some(
+                "Not used for a month: Old (iOS 27.0), Never (iOS 27.0); Their runtime is gone: Orphan (iOS 26.0)"
+            )
+        );
+        // One you keep stays; none left, no button.
+        let keep = Keep::parse(&paths[0], Path::new(HOME));
+        let a = simulators_action(&sims, &keep, NOW).unwrap();
+        assert_eq!(a.label, "Clean Up 2 Simulators");
+        sims.retain(|s| s.udid == "B" || s.udid == "E");
+        assert!(simulators_action(&sims, &Keep::default(), NOW).is_none());
+    }
+
+    #[test]
+    fn each_simulator_is_offered_on_its_own() {
+        use crate::xcode::Simulator;
+        let sim = |udid: &str, name: &str, bytes: u64, days: Option<i64>| Simulator {
+            udid: udid.into(),
+            name: name.into(),
+            runtime: "iOS 27.0".into(),
+            dir: Some(PathBuf::from(format!(
+                "{HOME}/{}/{udid}",
+                crate::xcode::DEVICES
+            ))),
+            bytes,
+            last_used: days.map(|d| NOW - d * 86_400),
+            booted: false,
+            available: true,
+        };
+        let sims = vec![
+            sim("A", "Old", 3 * GB, Some(40)),
+            sim("B", "Lately", 5 * GB, Some(3)),
+            sim("D", "Empty", 10_000_000, Some(400)),
+            Simulator {
+                booted: true,
+                ..sim("E", "Running", 4 * GB, Some(90))
+            },
+            Simulator {
+                available: false,
+                ..sim("F", "Orphan", 0, None)
+            },
+        ];
+        let parts = simulator_parts(&sims, &Keep::default(), NOW);
+        let said: Vec<(&str, &str, bool, &str)> = parts
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.action.label.as_str(),
+                    p.action.safe,
+                    p.action.note.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        // Biggest first; not one that's running, nor one holding next to
+        // nothing; one used lately is offered, not ticked.
+        assert_eq!(
+            said,
+            [
+                (
+                    "Lately (iOS 27.0)",
+                    "Erase Simulator",
+                    false,
+                    "Last used in October"
+                ),
+                (
+                    "Old (iOS 27.0)",
+                    "Erase Simulator",
+                    true,
+                    "Not used since September"
+                ),
+                (
+                    "Orphan (iOS 27.0)",
+                    "Delete Simulator",
+                    true,
+                    "Its runtime is gone: it can't start"
+                ),
+            ]
+        );
+        assert_eq!(parts[0].action.frees, Some(5 * GB));
+        assert_eq!(
+            parts[0].action.paths,
+            [format!("{HOME}/{}/B", crate::xcode::DEVICES)]
+        );
+        let keep = Keep::parse(&parts[0].action.paths[0], Path::new(HOME));
+        assert_eq!(simulator_parts(&sims, &keep, NOW).len(), 2);
+    }
+
+    #[test]
+    fn android_images_no_emulator_uses_go_and_old_emulators_are_offered() {
+        use crate::android::Avd;
+        let image = |api: &str| {
+            dir(
+                api,
+                0,
+                vec![dir("google_apis", 0, vec![leaf("arm64-v8a", 4 * GB)])],
+            )
+        };
+        let me = dir(
+            "me",
+            GB,
+            vec![
+                dir(
+                    "Library",
+                    0,
+                    vec![dir(
+                        "Android",
+                        0,
+                        vec![dir(
+                            "sdk",
+                            0,
+                            vec![
+                                leaf("ndk", 3 * GB),
+                                dir(
+                                    "system-images",
+                                    0,
+                                    vec![image("android-34"), image("android-33")],
+                                ),
+                            ],
+                        )],
+                    )],
+                ),
+                dir(
+                    ".android",
+                    0,
+                    vec![dir(
+                        "avd",
+                        0,
+                        vec![leaf("Pixel_8.avd", 3 * GB), leaf("Old_Tablet.avd", 2 * GB)],
+                    )],
+                ),
+            ],
+        );
+        let tree = dir(DATA_ROOT, 0, vec![dir("Users", 0, vec![me])]);
+        let mut m = measured(tree, Vec::new(), 0);
+        let sdk = format!("{HOME}/{}", crate::android::SDK);
+        let avd = |id: &str, name: &str, api: &str, days: i64| Avd {
+            id: id.into(),
+            name: name.into(),
+            dir: PathBuf::from(format!("{HOME}/{}/{id}.avd", crate::android::AVDS)),
+            ini: None,
+            image: Some(PathBuf::from(format!(
+                "{sdk}/system-images/{api}/google_apis/arm64-v8a"
+            ))),
+            last_used: Some(NOW - days * 86_400),
+        };
+        // Not read: nothing is offered.
+        let r = report(&m, &Keep::default(), &[]);
+        let unused = named(
+            &r,
+            "dev",
+            "Android 13 system image (Google APIs, arm64-v8a)",
+        );
+        assert!(unused.action.is_none());
+        assert_eq!(named(&r, "dev", "Android SDK").bytes, 3 * GB);
+        m.avds = Some(vec![
+            avd("Pixel_8", "Pixel 8", "android-34", 2),
+            avd("Old_Tablet", "Old Tablet", "android-34", 90),
+        ]);
+        let r = report(&m, &Keep::default(), &[]);
+        let used = named(
+            &r,
+            "dev",
+            "Android 14 system image (Google APIs, arm64-v8a)",
+        );
+        assert!(used.action.is_none());
+        assert_eq!(used.note.as_deref(), Some("Used by Pixel 8, Old Tablet"));
+        let unused = named(
+            &r,
+            "dev",
+            "Android 13 system image (Google APIs, arm64-v8a)",
+        );
+        let a = unused.action.as_ref().expect("a button");
+        assert_eq!(
+            (a.kind, a.label.as_str(), a.safe),
+            ("android", "Delete System Image", true)
+        );
+        // An emulator used lately has no button; one unused for months is
+        // offered, not ticked.
+        assert!(named(&r, "dev", "Pixel 8").action.is_none());
+        let old = named(&r, "dev", "Old Tablet");
+        assert_eq!(old.last_used, Some(NOW - 90 * 86_400));
+        let a = old.action.as_ref().expect("a button");
+        assert_eq!((a.label.as_str(), a.safe), ("Delete Emulator", false));
+        assert_eq!(a.note.as_deref(), Some("Not used since July"));
     }
 
     #[test]
@@ -3366,7 +3978,15 @@ mod tests {
                         paths: Vec::new(),
                         confirm: None,
                         done: None,
+                        ..Default::default()
                     }),
+                    parts: vec![Piece {
+                        name: String::new(),
+                        action: Action {
+                            kind: "simulators",
+                            ..Default::default()
+                        },
+                    }],
                     about: Some(About {
                         path: String::new(),
                         bytes: 1,
@@ -3400,6 +4020,7 @@ mod tests {
                     paths: Vec::new(),
                     confirm: None,
                     done: None,
+                    ..Default::default()
                 }),
             }],
         })
@@ -3423,6 +4044,7 @@ mod tests {
         let mut actions = 0;
         let mut abouts = 0;
         let mut knowns = 0;
+        let mut parts = 0;
         for k in fixture["kinds"].as_array().unwrap() {
             assert_eq!(keys(k), keys(real_kind));
             assert!(Kind::ALL.iter().any(|kind| kind.id() == k["id"]), "{k}");
@@ -3431,6 +4053,11 @@ mod tests {
                 if !i["action"].is_null() {
                     assert_eq!(keys(&i["action"]), keys(&real_item["action"]));
                     actions += 1;
+                }
+                for p in i["parts"].as_array().unwrap() {
+                    assert_eq!(keys(p), keys(&real_item["parts"][0]));
+                    assert_eq!(keys(&p["action"]), keys(&real_item["parts"][0]["action"]));
+                    parts += 1;
                 }
                 if !i["about"].is_null() {
                     assert_eq!(keys(&i["about"]), keys(&real_item["about"]));
@@ -3445,6 +4072,7 @@ mod tests {
         }
         assert!(knowns > 0, "the fixture shows what's known about a folder");
         assert!(actions > 0, "the fixture shows an action");
+        assert!(parts > 0, "the fixture shows an action's parts");
         assert!(abouts > 0, "the fixture shows what an app keeps");
         let real_old = &real["old_files"][0];
         let old = fixture["old_files"].as_array().unwrap();
