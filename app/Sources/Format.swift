@@ -24,11 +24,6 @@ enum Format {
         return n == 1 ? "1 \(unit)" : "\(Int(n)) \(unit)s"
     }
 
-    /// The short form for the menu bar: "12d", "5h".
-    static func daysShort(_ d: Double) -> String {
-        d < 1 ? "\(max(1, Int((d * 24).rounded())))h" : "\(Int(d.rounded()))d"
-    }
-
     /// The day `in_days` from `at`: "Oct 31", or "Tue 14:00" when close.
     static func date(at: Int64, inDays d: Double) -> String {
         let when = Date(timeIntervalSince1970: TimeInterval(at) + d * 86_400)

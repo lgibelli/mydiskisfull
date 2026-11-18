@@ -559,12 +559,11 @@ final class Monitor: ObservableObject {
         return !s.incidents.isEmpty || s.alert >= .within3Days || !undone.isEmpty
     }
 
-    /// Days to full, next to the icon, once there's an alert.
+    /// Free space, next to the icon, once there's an alert. Not the days to
+    /// full: a forecast jumps about, what's free doesn't.
     var menuBarText: String? {
-        guard let s = status else { return nil }
-        if s.alert == .low { return Format.bytes(s.avail) }
-        if s.alert > .none, let d = s.forecast?.fullIn?.days { return Format.daysShort(d) }
-        return nil
+        guard let s = status, s.alert > .none else { return nil }
+        return Format.bytes(s.avail)
     }
 
     // MARK: - Notifications
