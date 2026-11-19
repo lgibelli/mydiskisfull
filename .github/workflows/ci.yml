@@ -184,10 +184,11 @@ jobs:
           rm -rf "$busy"; mkdir -p "$busy"
           # A folder that changes after the first period, so the cost includes a listing.
           ( sleep 40; for i in $(seq 1 10); do head -c 3000000 /dev/urandom > "$busy/f$i.bin"; sleep 3; done ) &
+          writer=$!
           status=0
           timeout 120 $mdif watch --quiet --interval 5 --owners-every 30 --db "$db" || status=$?
           [ "$status" = 124 ] || { echo "the watcher ended with $status"; exit 1; }
-          wait
+          wait $writer
           $mdif forecast --db "$db"
           $mdif owners --db "$db" --hours 1 --json > "$RUNNER_TEMP/budget-owners.json"
           cat "$RUNNER_TEMP/budget-owners.json"
