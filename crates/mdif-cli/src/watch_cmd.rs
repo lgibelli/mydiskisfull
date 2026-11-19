@@ -160,16 +160,27 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let Some(guard) = mdif_core::os::startup::claim(&crate::agent_windows::lock_path(db))?
-        else {
-            anyhow::bail!(
+        let lock = crate::agent_windows::lock_path(db);
+        let busy = || {
+            anyhow::anyhow!(
                 "the watcher is already running on this history (`mdif agent status`); \
                  `mdif status` shows what it has seen"
-            );
+            )
         };
-        // A stop asked for before this watcher began was for another.
-        let _ = std::fs::remove_file(crate::agent_windows::stop_path(db));
-        guard
+        if once {
+            // One sample by hand doesn't take the lock (the agent may be installed
+            // while it runs), but doesn't write beside a watcher either.
+            if mdif_core::os::startup::is_claimed(&lock) {
+                return Err(busy());
+            }
+            None
+        } else {
+            let Some(guard) = mdif_core::os::startup::claim(&lock)? else {
+                return Err(busy());
+            };
+            crate::agent_windows::clear_stale_stop(db);
+            Some(guard)
+        }
     };
     if attached {
         exit_when_stdin_closes();
@@ -206,6 +217,8 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         None
     };
     let mut tidy_next = watch::unix_now() + TIDY_DELAY;
+    #[cfg(windows)]
+    let mut acknowledged = false;
     watch::run(
         &mut w,
         interval,
@@ -213,6 +226,11 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         stop_asked(db),
         |s| match s {
             Ok(s) => {
+                #[cfg(windows)]
+                if !acknowledged {
+                    acknowledged = true;
+                    crate::agent_windows::acknowledge(db);
+                }
                 if !quiet {
                     print_sample(s);
                 }

@@ -63,9 +63,46 @@ pub fn stop_path(db: &std::path::Path) -> PathBuf {
     beside(db, ".stop")
 }
 
+/// What a stop request says. A file of that name that says anything else isn't
+/// ours: a watcher neither obeys it nor removes it.
+const STOP_REQUEST: &str = "mdif: please stop watching";
+
+fn is_stop_request(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(256).read_to_string(&mut text))
+        .is_ok()
+        && text == STOP_REQUEST
+}
+
 /// Whether a stop has been asked for.
 pub fn stop_asked(db: &std::path::Path) -> bool {
-    stop_path(db).exists()
+    is_stop_request(&stop_path(db))
+}
+
+/// A stop asked for before this watcher began was for another: removed, if it
+/// is a request of ours.
+pub fn clear_stale_stop(db: &std::path::Path) {
+    if is_stop_request(&stop_path(db)) {
+        let _ = std::fs::remove_file(stop_path(db));
+    }
+}
+
+/// What `agent install` gives the watcher it starts, to be told that this very
+/// watcher took its first sample (in the environment, so it needs no argument).
+const NONCE_VAR: &str = "MDIF_WATCH_NONCE";
+
+fn started_path(db: &std::path::Path) -> PathBuf {
+    beside(db, ".started")
+}
+
+/// Called by a watcher after its first sample: says so to whoever started it
+/// (and gave it a nonce), by writing the nonce where they look.
+pub fn acknowledge(db: &std::path::Path) {
+    if let Ok(nonce) = std::env::var(NONCE_VAR) {
+        let _ = std::fs::write(started_path(db), nonce);
+    }
 }
 
 pub fn install(interval: u64) -> Result<()> {
@@ -88,20 +125,26 @@ pub fn install(interval: u64) -> Result<()> {
              (`mdif agent uninstall` stops it now)."
         );
     } else {
-        let began = mdif_core::watch::unix_now() - 1;
+        // Started is when this very watcher has taken its first sample: it says
+        // so with the nonce given it. One that gave up before that has said why
+        // in its log.
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
+        let _ = std::fs::remove_file(started_path(&db));
         let mut child = Command::new(&exe)
             .args(["--interval", &interval.to_string()])
+            .env(NONCE_VAR, &nonce)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
             .with_context(|| format!("starting {}", exe.display()))?;
-        // Started is when its first sample is in the history; one that gave up
-        // before that has said why in its log.
-        let key = mdif_core::os::fs::statfs(&mdif_core::map::boot_volume())
-            .map(|s| s.history_key())
-            .context("looking at the disk")?;
         let up = std::time::Instant::now();
         loop {
             if let Some(status) = child.try_wait()? {
@@ -110,11 +153,7 @@ pub fn install(interval: u64) -> Result<()> {
                     watch_cmd::log_path().display()
                 );
             }
-            let sampled = db.exists()
-                && Store::open(&db)
-                    .and_then(|s| s.space_since(&key, began))
-                    .is_ok_and(|pts| !pts.is_empty());
-            if sampled {
+            if std::fs::read_to_string(started_path(&db)).is_ok_and(|t| t == nonce) {
                 break;
             }
             if up.elapsed() > std::time::Duration::from_secs(30) {
@@ -145,7 +184,7 @@ pub fn uninstall() -> Result<()> {
     let mut stopped = false;
     if startup::is_claimed(&lock) {
         // Ask it to finish, and wait until it has let go of its history.
-        std::fs::write(stop_path(&db), b"stop").with_context(|| {
+        std::fs::write(stop_path(&db), STOP_REQUEST).with_context(|| {
             format!("asking the watcher to stop ({})", stop_path(&db).display())
         })?;
         let asked = std::time::Instant::now();
@@ -153,8 +192,15 @@ pub fn uninstall() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         stopped = !startup::is_claimed(&lock);
-        // A request left behind would stop the next watcher at once.
-        let _ = std::fs::remove_file(stop_path(&db));
+        if !stopped {
+            // The request stays: a watcher busy with a long sample will find it.
+            bail!(
+                "the watcher didn't stop within 20 s (it may be in a long sample); the request \
+                 stays, and it will stop when it next looks"
+            );
+        }
+        // Gone with it; one left behind would stop the next watcher at once.
+        clear_stale_stop(&db);
     }
     println!(
         "{} {} The history stays in {}.",
