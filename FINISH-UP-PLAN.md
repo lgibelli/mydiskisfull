@@ -22,8 +22,9 @@ Actions Windows runner as the only test box, a per-user watcher with an optional
 What runs on Windows today: `watch`, `status`, `forecast`, `alerts`, `keep`, `knowledge` (no Ask AI),
 `agent`, `owners`, `incidents`, `map`. Still refused with "isn't available on this operating system
 yet" (`NOT_HERE_YET` in `crates/mdif-cli/src/main.rs`): `suggest`, `clean`, `tidy`, `docker`,
-`timemachine`, `tweaks`, `space`, `writers`. Remove a name from that list (and from the refusal loop in
-`ci.yml`) when its Windows half lands.
+`timemachine`, `tweaks`, `space`, `writers`. When a command's Windows half lands: remove its name from
+that list, remove its `#[command(hide = !cfg!(target_os = "macos"))]` (the commands are hidden from
+`--help` on Windows until then), and remove it from the refusal loop in `ci.yml`.
 
 ## Do first: the last commit's review findings (`mdif map` on Windows)
 
@@ -58,7 +59,8 @@ never the user's real settings.
 - **`clean` and `tidy`**: Recycle Bin (needs `fs::trash`, a stub today), empty the Recycle Bin,
   build output, emptying a cache while its app is closed (checked by process image path, using
   `proc::terminate_program`'s identity check), Docker (`docker.exe`), Android. Add `temp`
-  (`%TEMP%` older than 7 days). Every new kind goes through `clean::plan` and `clean::run`, which
+  (`%TEMP%` older than 7 days *and* not in use, not on the keep list, and re-checked by `clean::plan`:
+  age alone is not enough, a program may still need what it wrote last week). Every new kind goes through `clean::plan` and `clean::run`, which
   re-check each path. Simulators and backups drop out.
 - **`tweaks`**: `Setting::Registry` and `Setting::Ini`, the Windows catalogue (Storage Sense and
   Recycle Bin days, Chrome/Edge model policies under `HKCU\Software\Policies`, WSL sparse VHD,
@@ -71,7 +73,9 @@ never the user's real settings.
   `ms-settings:appsfeatures`, never an uninstaller.
 - **Old files**: if `NtfsDisableLastAccessUpdate` is on, "old" uses mtime alone, and the report says so.
 - **Ask AI** on Windows: needs an ACL-protected token file (`portable::private_files()` is false
-  there, so sign-in is refused) and a Windows version string instead of `sw_vers`.
+  there, so sign-in is refused), a Windows version string instead of `sw_vers`, and the prompts and
+  knowledge entries that name macOS folders and apps need Windows folder names (AppData, Program
+  Files, Packages) so answers aren't about the wrong system.
 - **`writers` and per-process churn**: the Windows write counter includes pipes (measured), so
   writers are not recorded (`WRITES_ARE_DISK_WRITES = false`). Needs evidence from the disk (journal
   activity under the process's folders, or the service's ETW disk I/O) before it is switched on.
@@ -115,8 +119,10 @@ Unmeasured spikes still to do first: toasts from an unpackaged exe, WebView2 pre
 ## Phase 7: packaging and release
 
 Tauri NSIS per-user installer (no admin) with `mdif.exe` and `mdif-watch.exe`; Authenticode signing
-(the author picks a certificate or Azure Trusted Signing); updater feed (`latest.json`) on the latest
-*published* release, so only publishing ships; a `release.yml` Windows job that uploads a draft; a
+(the author picks a certificate or Azure Trusted Signing); the Tauri updater's own signing key (like
+the Sparkle one: generated once, private key kept off the repo, public key in the app, every update
+artifact signed in `release.yml`); updater feed (`latest.json`) on the latest *published* release, so
+only publishing ships; a `release.yml` Windows job that uploads a draft; a
 Windows section in `docs/RELEASING.md`, the README and the site. A Microsoft Store (MSIX) edition is
 out of scope for the first release. The author installs it on a real Windows PC and clicks through:
 that is the only step that needs a box outside CI.
@@ -132,8 +138,10 @@ that is the only step that needs a box outside CI.
   x86_64-pc-windows-msvc`. CI's clippy is newer than local 1.95, so trust CI for new lints.
 - Real Windows: `git push origin windows-port` (SSH), then `gh workflow run ci.yml --ref windows-port`
   (CI only triggers on main and pull requests). Measurements: `-f spikes=true`.
-- Review every commit with Codex: `node ~/.claude/plugins/cache/openai-codex/codex/*/scripts/
-  codex-companion.mjs review --wait --base HEAD~1`. Fix the P1/P2s that are real, write down the
+- Review every commit with Codex, from a checkout of that commit:
+  `node "$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | tail -1)"
+  review --wait --base HEAD~1`. (A branch-wide review is not a per-commit one: to review an older
+  commit, `git worktree add --detach <dir> <sha>` and run it there with `--base <sha>~1`.) Fix the P1/P2s that are real, write down the
   rest in `docs/WINDOWS.md` known gaps. Never amend a pushed commit.
 - Known flakes, not caused by this work: `timemachine::tests::a_tool_says_which_of_its_folders_are_caches`
   under load; the macOS `e2e` job (`fill folder grew`, or two churn episodes on a slow runner): rerun
@@ -148,3 +156,11 @@ Mac tests, the e2e and the app jobs pass on it; still do a Mac smoke test of the
 (`app/build.sh`, `app/check-contract.sh`) and a look at `git diff main --stat` before opening the pull
 request. `mdif-watch` is built on macOS too (same source, harmless): decide whether to keep that or
 gate it.
+
+## Review record
+
+Every commit on the branch has had a Codex review against its parent, either as it was made or, for
+the early ones and the docs commits, afterwards from a detached worktree at that commit. What those
+afterwards-reviews found was either already fixed by a later commit or is listed above and in
+`docs/WINDOWS.md` (history keys of Windows histories made before the volume-GUID key, and locks of
+watchers started by older builds, are not handled: nothing was released).
