@@ -1,6 +1,7 @@
 //! Measurements for `docs/WINDOWS.md`, not tests: what a design waits on, asked
 //! of a real Windows. Each prints `SPIKE …` lines and is ignored in a normal
-//! run; the `windows-spikes` workflow runs them all on a runner:
+//! run; CI runs them all on a runner (`gh workflow run ci.yml --ref <branch> -f
+//! spikes=true`), or by hand:
 //!
 //! ```text
 //! cargo test -p mdif-windows --test spikes --release -- --ignored --nocapture --test-threads=1
@@ -76,7 +77,7 @@ fn delta(label: &str, before: &IO_COUNTERS, after: &IO_COUNTERS, sent: usize) {
 /// Does `GetProcessIoCounters` count network and pipe traffic as writes? It
 /// decides whether a process "writing" a lot says anything about the disk.
 #[test]
-#[ignore = "a measurement, run by the windows-spikes workflow"]
+#[ignore = "a measurement, run by the CI workflow's spikes input"]
 fn io_counters_by_kind_of_traffic() {
     let total = 64 * MIB;
     let chunk = vec![0x5Au8; MIB];
@@ -279,7 +280,7 @@ fn list_all_by_handle(dirs: &[PathBuf]) -> (usize, Duration) {
 /// How fast is a listing from an open handle, against `std`'s? And does a
 /// file still open for appending show its size?
 #[test]
-#[ignore = "a measurement, run by the windows-spikes workflow"]
+#[ignore = "a measurement, run by the CI workflow's spikes input"]
 fn listing_speed_and_stale_sizes() {
     // The same folders, each listed both ways, in alternating order so
     // neither always has the file cache warmed by the other.
@@ -341,7 +342,7 @@ fn listing_speed_and_stale_sizes() {
 
 /// What does a link count cost per file, when the listing doesn't give it?
 #[test]
-#[ignore = "a measurement, run by the windows-spikes workflow"]
+#[ignore = "a measurement, run by the CI workflow's spikes input"]
 fn link_count_cost_per_file() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..3000 {
@@ -524,7 +525,7 @@ fn try_journal(who: &str) {
 /// as the runner's (administrator) user, and as the same user with a
 /// restricted ("LUA") token, which is what a standard user's session has.
 #[test]
-#[ignore = "a measurement, run by the windows-spikes workflow"]
+#[ignore = "a measurement, run by the CI workflow's spikes input"]
 fn usn_journal_as_administrator_and_as_a_restricted_user() {
     try_journal("administrator");
 
