@@ -158,6 +158,8 @@ pub struct FileInfo {
     pub links: u32,
     /// Bytes it takes on the disk.
     pub allocated: u64,
+    /// Its length, as the file system has it now.
+    pub logical: u64,
 }
 
 /// A handle on `path` for attributes only, not following a link at `path`
@@ -212,6 +214,7 @@ pub fn file_info(path: &Path) -> io::Result<FileInfo> {
         index: u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
         links: info.nNumberOfLinks,
         allocated: std_info.AllocationSize.max(0) as u64,
+        logical: std_info.EndOfFile.max(0) as u64,
     })
 }
 

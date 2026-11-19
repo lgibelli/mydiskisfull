@@ -166,8 +166,43 @@ pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
     let dev = fs::by_handle(&file)?.dwVolumeSerialNumber as i32;
     let mut out = Vec::new();
     each_record(&file, |e, name| out.push(entry(dir, dev, name, e)))?;
+    refresh_recent(dir, &mut out);
     Ok(out)
 }
+
+/// A file's directory entry can be behind a file that is open for writing: a
+/// log growing is listed as it was (measured, Phase 0: 0 bytes for 4 MiB
+/// written). The files changed lately are asked of the file itself, which is
+/// what the product hunts; the rest are as listed. Bounded per folder.
+fn refresh_recent(dir: &Path, entries: &mut [Entry]) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let mut left = REFRESH_MAX;
+    for e in entries.iter_mut() {
+        if left == 0 {
+            break;
+        }
+        if e.kind != Kind::File || e.is_dataless() || now - e.mtime.max(e.crtime) > RECENT {
+            continue;
+        }
+        left -= 1;
+        // The same file, or the listing stands: a name reused since is not it.
+        if let Ok(info) = fs::file_info(&dir.join(&e.name))
+            && info.volume == e.dev as u32
+            && info.index == e.inode
+        {
+            e.logical = info.logical;
+            e.allocated = info.allocated;
+            e.private = info.allocated;
+        }
+    }
+}
+
+/// How long, in seconds, a file counts as changed lately.
+const RECENT: i64 = 15 * 60;
+/// Files asked of themselves, at most, in one folder.
+const REFRESH_MAX: usize = 512;
 
 /// The names in `dir`, from the same checked open as [`read_dir`] and nothing
 /// else read of what's in it: no entry is sized and no file is opened.
@@ -349,6 +384,23 @@ mod tests {
             .as_secs() as i64;
         assert!((now - file.mtime).abs() < 120, "{} {now}", file.mtime);
         assert_eq!(entries.len(), 2 + usize::from(linked));
+    }
+
+    #[test]
+    fn a_file_held_open_and_growing_is_listed_at_its_size() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let chunk = noise(1 << 20);
+        for _ in 0..4 {
+            f.write_all(&chunk).unwrap();
+        }
+        // Still open, nothing closed or flushed.
+        let e = by_name(&read_dir(dir.path()).unwrap(), "growing.log");
+        assert_eq!(e.logical, 4 << 20, "{e:?}");
+        assert!(e.allocated >= 4 << 20, "{e:?}");
+        drop(f);
     }
 
     #[test]

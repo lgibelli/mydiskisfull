@@ -137,8 +137,78 @@ impl Default for Rules {
 }
 
 impl Rules {
-    /// The rules for a Mac with `home` as the user's home folder.
+    /// The rules for this computer, with `home` as the user's home folder.
     pub fn for_home(home: &Path) -> Rules {
+        if cfg!(windows) {
+            Rules::for_windows(home)
+        } else {
+            Rules::for_mac(home)
+        }
+    }
+
+    /// The rules for Windows: Program Files and the profile's folders, one name
+    /// deep, so what a program keeps is told from what another does. `home` is
+    /// the profile folder, `C:\Users\me`; its drive is the system drive. Names
+    /// are as Windows spells them (the journal and the listing give them so).
+    pub fn for_windows(home: &Path) -> Rules {
+        let drive: PathBuf = home
+            .components()
+            .take_while(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+            .collect();
+        // `a/b` as its names, so the path has no mixed separators.
+        let below =
+            |base: &Path, p: &str| p.split('/').fold(base.to_path_buf(), |acc, n| acc.join(n));
+        let at = |p: &str| below(&drive, p);
+        let mut r = Rules { rules: Vec::new() }
+            .depth(drive.clone(), 1)
+            .depth(at("Users"), 1)
+            .depth(at("Program Files"), 1)
+            .depth(at("Program Files (x86)"), 1)
+            .depth(at("ProgramData"), 1)
+            .depth(at("Windows"), 1)
+            .depth(at("Windows/Installer"), 1)
+            .depth(at("Windows/SoftwareDistribution"), 1)
+            // The recycle bin of every user is one owner.
+            .depth(at("$Recycle.Bin"), 0)
+            .depth(home, 1)
+            .depth(home.join(".cache"), 1);
+        for sub in [
+            "AppData",
+            "AppData/Local",
+            "AppData/LocalLow",
+            "AppData/Roaming",
+            "AppData/Local/Packages",
+            "AppData/Local/Temp",
+            "AppData/Local/Programs",
+            "AppData/Local/Microsoft",
+            "AppData/Local/Google",
+        ] {
+            r = r.depth(below(home, sub), 1);
+        }
+        for media in [
+            "Documents",
+            "Desktop",
+            "Downloads",
+            "Pictures",
+            "Videos",
+            "Music",
+            "OneDrive",
+        ] {
+            r = r.depth(home.join(media), 1);
+        }
+        for code in CODE_ROOTS {
+            r = r.projects(home.join(code));
+        }
+        r
+    }
+
+    /// The rules for a Mac with `home` as the user's home folder.
+    fn for_mac(home: &Path) -> Rules {
         let mut r = Rules::default()
             .depth("/Users", 1)
             .depth("/Applications", 1)
@@ -196,12 +266,28 @@ impl Rules {
     }
 
     pub fn owner_of(&self, path: &Path) -> PathBuf {
-        let (prefix, depth) = self
+        let root: PathBuf;
+        let (prefix, depth) = match self
             .rules
             .iter()
             .filter(|(p, _)| path.starts_with(p))
             .max_by_key(|(p, _)| p.components().count())
-            .expect("the root rule matches every absolute path");
+        {
+            Some((p, d)) => (p, d),
+            // No rule covers it (another drive): one name below its root.
+            None => {
+                root = path
+                    .components()
+                    .take_while(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::Prefix(_) | std::path::Component::RootDir
+                        )
+                    })
+                    .collect();
+                (&root, &Depth::Fixed(1))
+            }
+        };
         let rest: Vec<&OsStr> = path
             .strip_prefix(prefix)
             .map(|r| r.iter().collect())
@@ -365,7 +451,12 @@ impl Tracker {
             }
             let dir: PathBuf = e.path.components().collect();
             if e.must_rescan() {
-                if dir.components().count() <= 2 {
+                // At the root or a name below it: too much to rescan, a gap.
+                let names = dir
+                    .components()
+                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                    .count();
+                if names <= 1 {
                     up.gaps += 1;
                 } else {
                     dirty.insert(dir, true);
@@ -669,21 +760,80 @@ fn is_gone(e: &io::Error) -> bool {
     )
 }
 
-// The tracker's rules are rooted at `/` and the home folder's macOS places;
-// Windows' come with the watcher there.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
     const MB: u64 = 1_000_000;
 
+    #[cfg(not(windows))]
     fn rules() -> Rules {
         Rules::for_home(Path::new("/Users/me"))
     }
 
+    #[cfg(not(windows))]
     fn owner(p: &str) -> String {
         rules().owner_of(Path::new(p)).display().to_string()
+    }
+
+    #[cfg(windows)]
+    fn owner(p: &str) -> String {
+        Rules::for_home(Path::new(r"C:\Users\me"))
+            .owner_of(Path::new(p))
+            .display()
+            .to_string()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owners_are_folders_a_person_recognises_on_windows() {
+        let same = |p: &str, o: &str| assert_eq!(owner(p), o, "{p}");
+        same(
+            r"C:\Users\me\AppData\Local\Spotify\Data\x",
+            r"C:\Users\me\AppData\Local\Spotify",
+        );
+        same(
+            r"C:\Users\me\AppData\Roaming\Slack\Cache\0a",
+            r"C:\Users\me\AppData\Roaming\Slack",
+        );
+        same(
+            r"C:\Users\me\AppData\Local\Packages\CanonicalGroup.Ubuntu\LocalState\ext4.vhdx",
+            r"C:\Users\me\AppData\Local\Packages\CanonicalGroup.Ubuntu",
+        );
+        same(r"C:\Users\me\Downloads\big.iso", r"C:\Users\me\Downloads");
+        same(r"C:\Users\me\.cargo\registry\cache", r"C:\Users\me\.cargo");
+        same(r"C:\Users\me", r"C:\Users\me");
+        same(r"C:\Users\other\x", r"C:\Users\other");
+        same(
+            r"C:\Program Files\Docker\Docker\bin",
+            r"C:\Program Files\Docker",
+        );
+        same(
+            r"C:\ProgramData\Package Cache\x",
+            r"C:\ProgramData\Package Cache",
+        );
+        same(r"C:\Windows\WinSxS\amd64_x", r"C:\Windows\WinSxS");
+        same(r"C:\$Recycle.Bin\S-1-5-21\$R123", r"C:\$Recycle.Bin");
+        same(r"C:\hiberfil.sys", r"C:\hiberfil.sys");
+        // Another drive has no rule of its own: one name below its root.
+        same(r"D:\Games\Big\x.pak", r"D:\Games");
+        // Projects, as on the Mac.
+        same(
+            r"C:\Users\me\devel\app\target\debug\deps",
+            r"C:\Users\me\devel\app\target",
+        );
+        same(
+            r"C:\Users\me\devel\app\src\main.rs",
+            r"C:\Users\me\devel\app",
+        );
+        assert!(
+            !Rules::for_windows(Path::new(r"C:\Users\me"))
+                .owner_of(Path::new(r"C:\Users\me\AppData\Local\x"))
+                .to_string_lossy()
+                .contains('/'),
+            "no mixed separators"
+        );
     }
 
     #[cfg(unix)]
@@ -707,6 +857,7 @@ mod tests {
         assert_eq!(tr.known_children(dir), [dir.join("b"), dir.join("c")]);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn owners_are_folders_a_person_recognises() {
         assert_eq!(
@@ -744,6 +895,7 @@ mod tests {
         assert_eq!(owner("/Volumes/USB/stuff"), "/Volumes");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn projects_split_out_build_output_and_worktrees() {
         assert_eq!(
