@@ -122,7 +122,7 @@ struct Record {
 /// The USN to read from next, and the records in a buffer a read filled. A
 /// record is read only after its whole length is known to lie inside the buffer,
 /// and by byte ranges of it, so nothing is ever read past what the call wrote.
-fn parse(buf: &[u8]) -> io::Result<(i64, Vec<Record>)> {
+fn parse(buf: &[u8]) -> io::Result<(i64, Vec<Record>, usize)> {
     let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
     let header = std::mem::offset_of!(USN_RECORD_V2, FileName);
     let le = |b: &[u8], at: usize| -> Option<[u8; 8]> { b.get(at..at + 8)?.try_into().ok() };
@@ -130,7 +130,7 @@ fn parse(buf: &[u8]) -> io::Result<(i64, Vec<Record>)> {
         .map(i64::from_le_bytes)
         .ok_or_else(|| bad("a journal read without its next position"))?;
     let mut at = 8;
-    let mut out = Vec::new();
+    let (mut out, mut skipped) = (Vec::new(), 0);
     while at < buf.len() {
         let rest = &buf[at..];
         let len = rest
@@ -151,11 +151,13 @@ fn parse(buf: &[u8]) -> io::Result<(i64, Vec<Record>)> {
                 parent: field(offset_of!(USN_RECORD_V2, ParentFileReferenceNumber)) as u64,
                 usn: field(offset_of!(USN_RECORD_V2, Usn)),
             });
+        } else {
+            skipped += 1;
         }
         // Records are 8-byte aligned.
         at += len.next_multiple_of(8);
     }
-    Ok((next, out))
+    Ok((next, out, skipped))
 }
 
 /// A handle on the volume's root folder, which is what the journal is asked
@@ -168,9 +170,17 @@ impl Volume {
     fn open(root: &Path) -> io::Result<Volume> {
         // The volume that holds `root`, where it is mounted: a drive letter or a
         // folder. No access at all is enough to ask the journal (Phase 0).
-        let mounted = fs::statfs(root)?.mount_point;
+        // By its own name when it has one: a volume mounted in a folder is
+        // reached through that folder's reparse point, which would open the
+        // containing volume's folder instead.
+        let stats = fs::statfs(root)?;
+        let at = if stats.device.starts_with(r"\\?\Volume{") {
+            &stats.device
+        } else {
+            &stats.mount_point
+        };
         Ok(Volume {
-            file: fs::open_with(Path::new(&mounted), 0)?,
+            file: fs::open_with(Path::new(at), 0)?,
         })
     }
 
@@ -216,7 +226,7 @@ impl Volume {
         journal: u64,
         start: i64,
         buf: &mut [u8],
-    ) -> io::Result<Option<(i64, Vec<Record>)>> {
+    ) -> io::Result<Option<(i64, Vec<Record>, usize)>> {
         let req = READ_USN_JOURNAL_DATA_V0 {
             StartUsn: start,
             ReasonMask: u32::MAX,
@@ -251,9 +261,11 @@ impl Volume {
         parse(&buf[..got as usize]).map(Some)
     }
 
-    /// The folder numbered `id` on this volume, as a plain path; `None` once it
-    /// isn't there any more (or isn't ours to open).
-    fn folder(&self, id: u64) -> Option<PathBuf> {
+    /// The folder numbered `id` on this volume, as a plain path; `Ok(None)` once
+    /// it isn't there any more (its removal is a change of the folder that held
+    /// it, which has its own record). Any other failure is an error: a change
+    /// that couldn't be placed.
+    fn folder(&self, id: u64) -> io::Result<Option<PathBuf>> {
         let desc = FILE_ID_DESCRIPTOR {
             dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
             Type: 0, // FileIdType: the 64-bit number
@@ -273,7 +285,13 @@ impl Volume {
             )
         };
         if h.is_null() || h as isize == -1 {
-            return None;
+            let err = io::Error::last_os_error();
+            // File not found, path not found, invalid parameter (a number
+            // that names nothing any more): gone.
+            return match err.raw_os_error() {
+                Some(2 | 3 | 87) => Ok(None),
+                _ => Err(err),
+            };
         }
         let mut buf = vec![0u16; 1024];
         let path = loop {
@@ -281,16 +299,16 @@ impl Volume {
             let n = unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, 0) }
                 as usize;
             if n == 0 {
-                break None;
+                break Err(io::Error::last_os_error());
             }
             if n < buf.len() {
-                break Some(std::ffi::OsString::from_wide(&buf[..n]));
+                break Ok(std::ffi::OsString::from_wide(&buf[..n]));
             }
             buf.resize(n + 1, 0);
         };
         // SAFETY: the handle is ours, and closed once.
         unsafe { CloseHandle(h) };
-        path.map(|p| plain(PathBuf::from(p)))
+        path.map(|p| Some(plain(PathBuf::from(p))))
     }
 }
 
@@ -373,14 +391,30 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
             complete = false;
             break;
         }
-        let Some((next, records)) = volume.read(id, at, &mut buf)? else {
+        let Some((next, records, skipped)) = volume.read(id, at, &mut buf)? else {
             return Ok(gap(end));
         };
+        // Records of a layout that wasn't read are changes that weren't seen.
+        if skipped > 0 {
+            complete = false;
+        }
         for r in &records {
-            let path = paths
-                .entry(r.parent)
-                .or_insert_with(|| volume.folder(r.parent).filter(|p| under(root, p)))
-                .clone();
+            let path = match paths.get(&r.parent) {
+                Some(p) => p.clone(),
+                None => {
+                    let found = match volume.folder(r.parent) {
+                        Ok(p) => p.filter(|p| under(root, p)),
+                        Err(_) => {
+                            // Not placed: not a change that can be said to be
+                            // outside the watched folder.
+                            complete = false;
+                            None
+                        }
+                    };
+                    paths.insert(r.parent, found.clone());
+                    found
+                }
+            };
             if let Some(path) = path {
                 // Each folder once, at its newest position.
                 let position = cursor(id, r.usn);
@@ -451,8 +485,8 @@ mod tests {
         buf.extend(record(100, 10, "a.txt"));
         buf.extend(record(200, 20, "a much longer name than before.log"));
         buf.extend(record(300, 30, "z"));
-        let (next, rs) = parse(&buf).unwrap();
-        assert_eq!(next, 4096);
+        let (next, rs, skipped) = parse(&buf).unwrap();
+        assert_eq!((next, skipped), (4096, 0));
         assert_eq!(
             rs,
             [
@@ -471,7 +505,10 @@ mod tests {
             ]
         );
         // Nothing but the position: no records.
-        assert_eq!(parse(&4096i64.to_le_bytes()).unwrap(), (4096, Vec::new()));
+        assert_eq!(
+            parse(&4096i64.to_le_bytes()).unwrap(),
+            (4096, Vec::new(), 0)
+        );
     }
 
     #[test]
@@ -500,8 +537,9 @@ mod tests {
         v3[4..6].copy_from_slice(&3u16.to_le_bytes());
         buf.extend(v3);
         buf.extend(record(9, 9, "y"));
-        let (_, rs) = parse(&buf).unwrap();
+        let (_, rs, skipped) = parse(&buf).unwrap();
         assert_eq!(rs, [Record { parent: 9, usn: 9 }]);
+        assert_eq!(skipped, 1);
     }
 
     #[test]
@@ -542,7 +580,10 @@ mod tests {
         // As the journal spells it: the runner's temp folder is given by its 8.3 name.
         let root = plain(std::fs::canonicalize(dir.path()).unwrap());
         let volume_root = fs::statfs(&root).unwrap().mount_point;
-        assert_ne!(now(&root), 0, "a journal can be read on {volume_root}");
+        if now(&root) == 0 {
+            eprintln!("no readable journal on {volume_root}: skipped");
+            return;
+        }
         let baseline = replay(Path::new(&volume_root), 0, Duration::from_secs(10)).unwrap();
         let Some(saved) = baseline.next else {
             eprintln!("no readable journal on {volume_root}: skipped");

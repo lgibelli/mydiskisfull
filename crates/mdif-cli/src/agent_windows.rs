@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use mdif_core::os::{proc, startup};
+use mdif_core::os::startup;
 use mdif_core::store::Store;
 use mdif_core::units::bytes;
 
@@ -29,34 +29,6 @@ fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
     let mut name = db.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
     db.with_file_name(name)
-}
-
-/// Where the running watcher says who it is: its process id and its program,
-/// one to a line. Read only while the lock is held, and checked against the
-/// process before anything is done to it.
-fn identity_path(db: &std::path::Path) -> PathBuf {
-    beside(db, ".pid")
-}
-
-/// Called by the watcher once it holds the lock.
-pub fn record_identity(db: &std::path::Path) {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::write(
-            identity_path(db),
-            format!("{}\n{}", std::process::id(), exe.display()),
-        );
-    }
-}
-
-/// The running watcher of `db`: its process id and program, if the lock is
-/// held and says who holds it.
-fn running_watcher(db: &std::path::Path) -> Option<(i32, PathBuf)> {
-    if !startup::is_claimed(&lock_path(db)) {
-        return None;
-    }
-    let text = std::fs::read_to_string(identity_path(db)).ok()?;
-    let (pid, exe) = text.split_once('\n')?;
-    Some((pid.trim().parse().ok()?, PathBuf::from(exe.trim())))
 }
 
 /// What Windows takes of a `Run` command line.
@@ -83,6 +55,19 @@ fn command_line(exe: &std::path::Path, interval: u64) -> String {
     format!("\"{}\" --interval {interval}", exe.display())
 }
 
+/// The file whose appearance asks the watcher of `db` to finish: it looks at
+/// it each second between samples, and goes when it is there. No process is
+/// ended from outside, so nothing but the watcher itself ever has to be
+/// identified.
+pub fn stop_path(db: &std::path::Path) -> PathBuf {
+    beside(db, ".stop")
+}
+
+/// Whether a stop has been asked for.
+pub fn stop_asked(db: &std::path::Path) -> bool {
+    stop_path(db).exists()
+}
+
 pub fn install(interval: u64) -> Result<()> {
     let exe = watcher_exe()?;
     let db = watch_cmd::default_db();
@@ -103,6 +88,7 @@ pub fn install(interval: u64) -> Result<()> {
              (`mdif agent uninstall` stops it now)."
         );
     } else {
+        let began = mdif_core::watch::unix_now() - 1;
         let mut child = Command::new(&exe)
             .args(["--interval", &interval.to_string()])
             .stdin(Stdio::null())
@@ -113,7 +99,6 @@ pub fn install(interval: u64) -> Result<()> {
             .with_context(|| format!("starting {}", exe.display()))?;
         // Started is when its first sample is in the history; one that gave up
         // before that has said why in its log.
-        let began = mdif_core::watch::unix_now() - 1;
         let key = mdif_core::os::fs::statfs(&mdif_core::map::boot_volume())
             .map(|s| s.history_key())
             .context("looking at the disk")?;
@@ -155,16 +140,22 @@ pub fn install(interval: u64) -> Result<()> {
 
 pub fn uninstall() -> Result<()> {
     let db = watch_cmd::default_db();
-    // Whoever holds the history's lock, as it says it is, and only if that
-    // process still runs the program it named: the one that was installed,
-    // wherever this copy of mdif is.
-    let held = running_watcher(&db);
+    let lock = lock_path(&db);
     let had = startup::remove_login_item(NAME).context("removing the Run entry")?;
-    let stopped = match &held {
-        Some((pid, exe)) => proc::terminate_program(*pid, exe)
-            .with_context(|| format!("stopping the watcher (process {pid})"))?,
-        None => false,
-    };
+    let mut stopped = false;
+    if startup::is_claimed(&lock) {
+        // Ask it to finish, and wait until it has let go of its history.
+        std::fs::write(stop_path(&db), b"stop").with_context(|| {
+            format!("asking the watcher to stop ({})", stop_path(&db).display())
+        })?;
+        let asked = std::time::Instant::now();
+        while startup::is_claimed(&lock) && asked.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        stopped = !startup::is_claimed(&lock);
+        // A request left behind would stop the next watcher at once.
+        let _ = std::fs::remove_file(stop_path(&db));
+    }
     println!(
         "{} {} The history stays in {}.",
         if had {
@@ -172,10 +163,10 @@ pub fn uninstall() -> Result<()> {
         } else {
             "It wasn't set to start at sign-in."
         },
-        match (stopped, startup::is_claimed(&lock_path(&db))) {
+        match (stopped, startup::is_claimed(&lock)) {
             (false, false) => "No watcher was running.",
-            (true, false) => "Watcher stopped.",
-            (_, true) => "A watcher is still running.",
+            (true, _) => "Watcher stopped.",
+            (false, true) => "A watcher is still running and didn't stop in 20 s.",
         },
         db.display()
     );

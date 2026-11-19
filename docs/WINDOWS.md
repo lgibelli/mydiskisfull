@@ -90,7 +90,9 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   version 3 records) isn't read. Windows owner tracking isn't switched on yet.
 - The watcher at sign-in is `mdif-watch.exe`, the CLI source linked for the GUI subsystem by
   `build.rs` (MSVC only: Windows GNU builds are not supported, and would show a console). One
-  watcher per history is a lock file beside it, held across sign-ins; the `Run` command line is
+  watcher per history is a lock file beside it, held across sign-ins, and `agent uninstall` asks
+  it to finish by making a `.stop` file it looks for each second (no process is ended from
+  outside); the `Run` command line is
   limited to 259 characters, so `agent install` refuses a longer path.
 - A mapped network drive has no volume GUID, so its history is keyed by its drive letter and a
   letter remapped to another share would continue the first one's. Watch local disks.

@@ -156,19 +156,20 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     // One watcher: two would sample the same history twice. (launchd sees to it
     // on a Mac; here a lock file beside the history is held while this process lives.)
     #[cfg(windows)]
-    let _only = if once {
-        None
-    } else {
+    let _only = {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        match mdif_core::os::startup::claim(&crate::agent_windows::lock_path(db))? {
-            Some(guard) => {
-                crate::agent_windows::record_identity(db);
-                Some(guard)
-            }
-            None => anyhow::bail!("the watcher is already running (`mdif agent status`)"),
-        }
+        let Some(guard) = mdif_core::os::startup::claim(&crate::agent_windows::lock_path(db))?
+        else {
+            anyhow::bail!(
+                "the watcher is already running on this history (`mdif agent status`); \
+                 `mdif status` shows what it has seen"
+            );
+        };
+        // A stop asked for before this watcher began was for another.
+        let _ = std::fs::remove_file(crate::agent_windows::stop_path(db));
+        guard
     };
     if attached {
         exit_when_stdin_closes();
@@ -208,7 +209,8 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     watch::run(
         &mut w,
         interval,
-        || false,
+        // `mdif agent uninstall` asks a Windows watcher to go by making a file.
+        stop_asked(db),
         |s| match s {
             Ok(s) => {
                 if !quiet {
@@ -238,6 +240,16 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         },
     );
     Ok(())
+}
+
+#[cfg(windows)]
+fn stop_asked(db: &Path) -> impl FnMut() -> bool + '_ {
+    move || crate::agent_windows::stop_asked(db)
+}
+
+#[cfg(not(windows))]
+fn stop_asked(_db: &Path) -> impl FnMut() -> bool {
+    || false
 }
 
 /// The App Store edition's app runs the watcher while it's open, with a pipe

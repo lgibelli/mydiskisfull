@@ -744,8 +744,15 @@ pub fn run(
             Err(e) => on_sample(Err(e)),
         }
         let next = (now / step + 1) * step;
-        let wait = (next - unix_now()).max(1) as u64;
-        std::thread::sleep(Duration::from_secs(wait));
+        let mut wait = (next - unix_now()).max(1) as u64;
+        // Windows has no signal to wake the sleep with, so `stop` is looked at
+        // every second; elsewhere the process is ended from outside.
+        let chunk = if cfg!(windows) { 1 } else { wait };
+        while wait > 0 && !stop() {
+            let nap = wait.min(chunk);
+            std::thread::sleep(Duration::from_secs(nap));
+            wait -= nap;
+        }
     }
 }
 
