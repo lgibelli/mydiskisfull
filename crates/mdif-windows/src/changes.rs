@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::mem::offset_of;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -78,25 +79,37 @@ pub struct Replay {
     pub next: Option<u64>,
 }
 
-/// The position of "now": where a first replay starts from. It can't be told
-/// without a volume, so 0, which the first replay turns into the journal's end.
-pub fn now() -> u64 {
-    0
+/// The position of "now" on the volume holding `root`: where a first replay
+/// starts from. 0 where the volume has no journal to read, which the first
+/// replay turns into the journal's end.
+pub fn now(root: &Path) -> u64 {
+    Volume::open(root)
+        .and_then(|v| v.query())
+        .ok()
+        .flatten()
+        .map_or(0, |j| cursor(j.UsnJournalID, j.NextUsn))
 }
 
-/// Bits of a saved position that are the USN; the rest tag the journal's id.
+/// Bits of a saved position that are the USN; the 19 above tag the journal's id
+/// and keep the top bit clear (a position is kept as a signed number). A USN is
+/// a record's offset in the journal, always a multiple of 8, so it's kept in
+/// eights: 44 bits reach 140 TB of journal.
 const USN_BITS: u32 = 44;
 const USN_MASK: u64 = (1 << USN_BITS) - 1;
 
 /// A short tag of a journal's id, so a position from another one is told apart
-/// (one in a million that a journal made again has the same).
+/// (one in half a million that a journal made again has the same).
 fn tag(journal: u64) -> u64 {
-    (journal ^ journal >> 20 ^ journal >> 40) & ((1 << (64 - USN_BITS)) - 1)
+    (journal ^ journal >> 19 ^ journal >> 38 ^ journal >> 57) & ((1 << (63 - USN_BITS)) - 1)
 }
 
 fn cursor(journal: u64, usn: i64) -> u64 {
-    // Maps beyond 17 TB of journal wrap, and read as a journal that moved on.
-    tag(journal) << USN_BITS | (usn.max(0) as u64 & USN_MASK)
+    tag(journal) << USN_BITS | ((usn.max(0) as u64 >> 3) & USN_MASK)
+}
+
+/// The USN a position holds.
+fn usn_of(position: u64) -> i64 {
+    ((position & USN_MASK) << 3) as i64
 }
 
 /// A changed file: the folder that holds it (by number), and what was done.
@@ -106,43 +119,41 @@ struct Record {
     usn: i64,
 }
 
-/// The USN to read from next, and the records in a buffer a read filled. Every
-/// field is read only after its record is known to lie inside the buffer.
+/// The USN to read from next, and the records in a buffer a read filled. A
+/// record is read only after its whole length is known to lie inside the buffer,
+/// and by byte ranges of it, so nothing is ever read past what the call wrote.
 fn parse(buf: &[u8]) -> io::Result<(i64, Vec<Record>)> {
     let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
     let header = std::mem::offset_of!(USN_RECORD_V2, FileName);
-    let next = buf
-        .first_chunk::<8>()
-        .map(|b| i64::from_le_bytes(*b))
+    let le = |b: &[u8], at: usize| -> Option<[u8; 8]> { b.get(at..at + 8)?.try_into().ok() };
+    let next = le(buf, 0)
+        .map(i64::from_le_bytes)
         .ok_or_else(|| bad("a journal read without its next position"))?;
     let mut at = 8;
     let mut out = Vec::new();
     while at < buf.len() {
-        if at + header > buf.len() {
-            return Err(bad("a journal record outside the read"));
-        }
-        // SAFETY: the header lies inside `buf` (just checked); the type has no
-        // invalid bit pattern, and a copy is made, so alignment doesn't matter.
-        let r = unsafe {
-            buf.as_ptr()
-                .add(at)
-                .cast::<USN_RECORD_V2>()
-                .read_unaligned()
-        };
-        let len = r.RecordLength as usize;
-        if len < header || at + len > buf.len() {
+        let rest = &buf[at..];
+        let len = rest
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| bad("a journal record outside the read"))? as usize;
+        if len < header || len > rest.len() {
             return Err(bad("a journal record of a length that doesn't fit"));
         }
+        let record = &rest[..len];
+        let major = u16::from_le_bytes([record[4], record[5]]);
         // Version 2 is what the request this makes is answered with. Another
         // layout is skipped by its own length, not read.
-        if r.MajorVersion == 2 {
+        if major == 2 {
+            let field = |at| i64::from_le_bytes(le(record, at).expect("inside the header"));
             out.push(Record {
-                parent: r.ParentFileReferenceNumber,
-                usn: r.Usn,
+                parent: field(offset_of!(USN_RECORD_V2, ParentFileReferenceNumber)) as u64,
+                usn: field(offset_of!(USN_RECORD_V2, Usn)),
             });
         }
-        // Records are 8-byte aligned, and never of no length.
-        at += len.max(8).next_multiple_of(8);
+        // Records are 8-byte aligned.
+        at += len.next_multiple_of(8);
     }
     Ok((next, out))
 }
@@ -155,9 +166,11 @@ struct Volume {
 
 impl Volume {
     fn open(root: &Path) -> io::Result<Volume> {
-        // No access at all is enough to ask the journal (measured, Phase 0).
+        // The volume that holds `root`, where it is mounted: a drive letter or a
+        // folder. No access at all is enough to ask the journal (Phase 0).
+        let mounted = fs::statfs(root)?.mount_point;
         Ok(Volume {
-            file: fs::open_with(root.ancestors().last().unwrap_or(root), 0)?,
+            file: fs::open_with(Path::new(&mounted), 0)?,
         })
     }
 
@@ -320,6 +333,8 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
             "the replay timeout is too long",
         )
     })?;
+    // The same spelling of the path the folders are given in (8.3 names, `\\?\`).
+    let root = &std::fs::canonicalize(root).map_or_else(|_| root.to_path_buf(), plain);
     let volume = Volume::open(root)?;
     let Some(journal) = volume.query()? else {
         return Ok(Replay::default());
@@ -342,7 +357,7 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
             ..Replay::default()
         });
     }
-    let start = (since & USN_MASK) as i64;
+    let start = usn_of(since);
     // Another journal, or one that has been cut short past or reset before
     // that position: what happened in between is lost.
     if since >> USN_BITS != tag(id) || start < journal.FirstUsn || start > journal.NextUsn {
@@ -351,6 +366,7 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
     let mut out = Replay::default();
     let (mut at, mut buf) = (start, vec![0u8; 256 * 1024]);
     let mut paths: HashMap<u64, Option<PathBuf>> = HashMap::new();
+    let mut slots: HashMap<PathBuf, usize> = HashMap::new();
     let mut complete = true;
     while at < journal.NextUsn {
         if Instant::now() >= deadline || paths.len() >= MAX_FOLDERS {
@@ -366,11 +382,19 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
                 .or_insert_with(|| volume.folder(r.parent).filter(|p| under(root, p)))
                 .clone();
             if let Some(path) = path {
-                out.events.push(Event {
-                    path,
-                    flags: 0,
-                    id: cursor(id, r.usn),
-                });
+                // Each folder once, at its newest position.
+                let position = cursor(id, r.usn);
+                match slots.get(&path) {
+                    Some(&i) => out.events[i].id = position,
+                    None => {
+                        slots.insert(path.clone(), out.events.len());
+                        out.events.push(Event {
+                            path,
+                            flags: 0,
+                            id: position,
+                        });
+                    }
+                }
             }
         }
         if next <= at {
@@ -381,19 +405,6 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
     }
     out.complete = complete;
     out.next = Some(cursor(id, at));
-    // One event for each folder is what the caller wants, newest position kept.
-    let mut seen: HashMap<PathBuf, usize> = HashMap::new();
-    let mut unique: Vec<Event> = Vec::new();
-    for e in out.events.drain(..) {
-        match seen.get(&e.path) {
-            Some(&i) => unique[i].id = e.id,
-            None => {
-                seen.insert(e.path.clone(), unique.len());
-                unique.push(e);
-            }
-        }
-    }
-    out.events = unique;
     Ok(out)
 }
 
@@ -420,13 +431,18 @@ mod tests {
 
     #[test]
     fn a_position_names_the_journal_it_came_from() {
-        let c = cursor(0xDEAD_BEEF_1234, 987_654_321);
-        assert_eq!(c & USN_MASK, 987_654_321);
+        let c = cursor(0xDEAD_BEEF_1234, 987_654_320);
+        assert_eq!(usn_of(c), 987_654_320);
+        assert_eq!(c >> 63, 0, "kept as a signed number");
+        // High values survive: a USN of 100 TB, a journal id with every bit set.
+        let big = 100 * (1i64 << 40);
+        assert_eq!(usn_of(cursor(u64::MAX, big)), big);
+        assert_eq!(cursor(u64::MAX, big) >> 63, 0);
         assert_eq!(c >> USN_BITS, tag(0xDEAD_BEEF_1234));
         assert_ne!(tag(0xDEAD_BEEF_1234), tag(0xDEAD_BEEF_1235));
         // A journal id that is only different in its high bits is told apart too.
         assert_ne!(tag(1), tag(1 << 41));
-        assert_eq!(cursor(5, -3) & USN_MASK, 0);
+        assert_eq!(usn_of(cursor(5, -3)), 0);
     }
 
     #[test]
@@ -523,8 +539,10 @@ mod tests {
     #[test]
     fn a_change_is_found_again_from_a_saved_position() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
+        // As the journal spells it: the runner's temp folder is given by its 8.3 name.
+        let root = plain(std::fs::canonicalize(dir.path()).unwrap());
         let volume_root = fs::statfs(&root).unwrap().mount_point;
+        assert_ne!(now(&root), 0, "a journal can be read on {volume_root}");
         let baseline = replay(Path::new(&volume_root), 0, Duration::from_secs(10)).unwrap();
         let Some(saved) = baseline.next else {
             eprintln!("no readable journal on {volume_root}: skipped");
@@ -590,7 +608,7 @@ mod tests {
 
     #[test]
     fn what_changes_a_closed_timeout_is_an_error() {
-        let e = replay(Path::new(r"C:\"), now(), Duration::MAX).unwrap_err();
+        let e = replay(Path::new(r"C:\"), 0, Duration::MAX).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }

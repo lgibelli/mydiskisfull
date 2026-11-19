@@ -159,8 +159,14 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     let _only = if once {
         None
     } else {
+        if let Some(dir) = db.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         match mdif_core::os::startup::claim(&crate::agent_windows::lock_path(db))? {
-            Some(guard) => Some(guard),
+            Some(guard) => {
+                crate::agent_windows::record_identity(db);
+                Some(guard)
+            }
             None => anyhow::bail!("the watcher is already running (`mdif agent status`)"),
         }
     };

@@ -298,16 +298,22 @@ impl Watcher {
                 .meta(&format!("owners.{}.{k}", self.key))?
                 .and_then(|v| v.parse().ok()))
         };
-        let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
-            (Some(id), Some(wall)) => (id as u64, wall),
-            _ => (changes::now(), unix_now()),
-        };
         // The boot volume's paths are reported through its firmlinks
-        // (`/Users`, `/private`, ...), so watch from the root.
-        let root = if cfg!(target_os = "macos") && self.key == DATA_ROOT {
+        // (`/Users`, `/private`, ...), so watch from the root. Elsewhere, from
+        // where the volume is mounted (not its history key, which can be its
+        // identity rather than a path).
+        let mount = fs::statfs(&self.volume)
+            .with_context(|| format!("statfs {}", self.volume.display()))?
+            .mount_point;
+        let root = if cfg!(target_os = "macos") && mount == DATA_ROOT {
             PathBuf::from("/")
         } else {
-            PathBuf::from(&self.key)
+            PathBuf::from(mount)
+        };
+        let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
+            (Some(id), Some(wall)) => (id as u64, wall),
+            // The journal's position now, taken now, not at the first replay.
+            _ => (changes::now(&root), unix_now()),
         };
         self.user = alerts::Settings::load(&self.store)?;
         let mut tracker = Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1));

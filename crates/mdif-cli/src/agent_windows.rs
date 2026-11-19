@@ -20,7 +20,43 @@ pub const NAME: &str = "MyDiskIsFull Watcher";
 /// What the running watcher holds ([`startup::claim`]): a file beside its
 /// history, so two watchers of one history can't run, in any session.
 pub fn lock_path(db: &std::path::Path) -> PathBuf {
-    db.with_extension("lock")
+    beside(db, ".lock")
+}
+
+/// `<db file name><suffix>` in the history's folder: the whole name, so
+/// `work.db` and `work.sqlite3` don't share one, and never the history itself.
+fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    db.with_file_name(name)
+}
+
+/// Where the running watcher says who it is: its process id and its program,
+/// one to a line. Read only while the lock is held, and checked against the
+/// process before anything is done to it.
+fn identity_path(db: &std::path::Path) -> PathBuf {
+    beside(db, ".pid")
+}
+
+/// Called by the watcher once it holds the lock.
+pub fn record_identity(db: &std::path::Path) {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::write(
+            identity_path(db),
+            format!("{}\n{}", std::process::id(), exe.display()),
+        );
+    }
+}
+
+/// The running watcher of `db`: its process id and program, if the lock is
+/// held and says who holds it.
+fn running_watcher(db: &std::path::Path) -> Option<(i32, PathBuf)> {
+    if !startup::is_claimed(&lock_path(db)) {
+        return None;
+    }
+    let text = std::fs::read_to_string(identity_path(db)).ok()?;
+    let (pid, exe) = text.split_once('\n')?;
+    Some((pid.trim().parse().ok()?, PathBuf::from(exe.trim())))
 }
 
 /// What Windows takes of a `Run` command line.
@@ -45,33 +81,6 @@ fn watcher_exe() -> Result<PathBuf> {
 /// with spaces is one program and not a program and arguments.
 fn command_line(exe: &std::path::Path, interval: u64) -> String {
     format!("\"{}\" --interval {interval}", exe.display())
-}
-
-/// The program a `Run` command line starts: the quoted path, or its first word.
-fn program_of(command: &str) -> Option<PathBuf> {
-    let command = command.trim_start();
-    let path = match command.strip_prefix('"') {
-        Some(rest) => rest.split('"').next()?,
-        None => command.split_whitespace().next()?,
-    };
-    (!path.is_empty()).then(|| PathBuf::from(path))
-}
-
-/// Ends the `mdif-watch` processes of this user that run `exe`: how many, and
-/// what went wrong with the others.
-fn stop(exe: &std::path::Path) -> (usize, Vec<String>) {
-    let (mut stopped, mut failed) = (0, Vec::new());
-    for p in proc::own_processes()
-        .into_iter()
-        .filter(|p| p.name.eq_ignore_ascii_case("mdif-watch"))
-    {
-        match proc::terminate_program(p.pid, exe) {
-            Ok(true) => stopped += 1,
-            Ok(false) => {}
-            Err(e) => failed.push(format!("process {}: {e}", p.pid)),
-        }
-    }
-    (stopped, failed)
 }
 
 pub fn install(interval: u64) -> Result<()> {
@@ -102,23 +111,34 @@ pub fn install(interval: u64) -> Result<()> {
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
             .with_context(|| format!("starting {}", exe.display()))?;
-        // Started is when it holds its lock; one that gave up before that has
-        // said why in its log.
+        // Started is when its first sample is in the history; one that gave up
+        // before that has said why in its log.
+        let began = mdif_core::watch::unix_now() - 1;
+        let key = mdif_core::os::fs::statfs(&mdif_core::map::boot_volume())
+            .map(|s| s.history_key())
+            .context("looking at the disk")?;
         let up = std::time::Instant::now();
-        while !startup::is_claimed(&lock) {
+        loop {
             if let Some(status) = child.try_wait()? {
                 bail!(
                     "the watcher stopped at once ({status}); see {}",
                     watch_cmd::log_path().display()
                 );
             }
-            if up.elapsed() > std::time::Duration::from_secs(15) {
+            let sampled = db.exists()
+                && Store::open(&db)
+                    .and_then(|s| s.space_since(&key, began))
+                    .is_ok_and(|pts| !pts.is_empty());
+            if sampled {
+                break;
+            }
+            if up.elapsed() > std::time::Duration::from_secs(30) {
                 bail!(
-                    "the watcher didn't come up in 15 s; see {}",
+                    "the watcher took no sample in 30 s; see {}",
                     watch_cmd::log_path().display()
                 );
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
         println!(
             "Watcher installed and started: every {interval} s, history in {}.",
@@ -134,15 +154,17 @@ pub fn install(interval: u64) -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
-    // The watcher that was installed, wherever this copy of mdif is.
-    let installed = startup::login_item(NAME)?.and_then(|i| program_of(&i.command));
-    let had = startup::remove_login_item(NAME).context("removing the Run entry")?;
-    let (stopped, failed) = match installed.map(Ok).unwrap_or_else(watcher_exe) {
-        // Only that program, found by where it lives, not by its name.
-        Ok(exe) => stop(&exe),
-        Err(_) => (0, Vec::new()),
-    };
     let db = watch_cmd::default_db();
+    // Whoever holds the history's lock, as it says it is, and only if that
+    // process still runs the program it named: the one that was installed,
+    // wherever this copy of mdif is.
+    let held = running_watcher(&db);
+    let had = startup::remove_login_item(NAME).context("removing the Run entry")?;
+    let stopped = match &held {
+        Some((pid, exe)) => proc::terminate_program(*pid, exe)
+            .with_context(|| format!("stopping the watcher (process {pid})"))?,
+        None => false,
+    };
     println!(
         "{} {} The history stays in {}.",
         if had {
@@ -151,15 +173,12 @@ pub fn uninstall() -> Result<()> {
             "It wasn't set to start at sign-in."
         },
         match (stopped, startup::is_claimed(&lock_path(&db))) {
-            (0, false) => "No watcher was running.",
-            (_, false) => "Watcher stopped.",
+            (false, false) => "No watcher was running.",
+            (true, false) => "Watcher stopped.",
             (_, true) => "A watcher is still running.",
         },
         db.display()
     );
-    if !failed.is_empty() {
-        bail!("couldn't stop the watcher ({})", failed.join("; "));
-    }
     Ok(())
 }
 
@@ -192,20 +211,6 @@ pub fn status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_program_is_what_the_command_line_starts() {
-        assert_eq!(
-            program_of(r#""C:\Program Files\x\mdif-watch.exe" --interval 300"#),
-            Some(PathBuf::from(r"C:\Program Files\x\mdif-watch.exe"))
-        );
-        assert_eq!(
-            program_of(r"C:\x\mdif-watch.exe --interval 300"),
-            Some(PathBuf::from(r"C:\x\mdif-watch.exe"))
-        );
-        assert_eq!(program_of(""), None);
-        assert_eq!(program_of("\"\""), None);
-    }
 
     #[test]
     fn the_command_line_quotes_the_program_whole() {

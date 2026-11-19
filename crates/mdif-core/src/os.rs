@@ -51,7 +51,7 @@ mod twins {
     #[allow(clippy::type_complexity)]
     const _: fn(&Path, u64) -> io::Result<Vec<(u64, u64)>> = extents::physical;
 
-    const _: fn() -> u64 = changes::now;
+    const _: fn(&Path) -> u64 = changes::now;
     const _: fn(&Path, u64, Duration) -> io::Result<changes::Replay> = changes::replay;
 
     const _: bool = proc::WRITES_ARE_DISK_WRITES;

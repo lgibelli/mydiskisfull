@@ -204,18 +204,27 @@ pub fn present(entry: &str, home: &Path) -> Option<usize> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
     };
+    #[cfg(windows)]
+    {
+        Some(
+            names
+                .iter()
+                .filter(|n| wild(&pattern, &n.to_string_lossy().to_lowercase()))
+                .count(),
+        )
+    }
     #[cfg(not(windows))]
-    let names: Vec<_> = match std::fs::read_dir(parent) {
-        Ok(rd) => rd.flatten().map(|e| e.file_name()).collect(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
-        Err(_) => return None,
-    };
-    Some(
-        names
-            .iter()
-            .filter(|n| wild(&pattern, &n.to_string_lossy().to_lowercase()))
-            .count(),
-    )
+    {
+        match std::fs::read_dir(parent) {
+            Ok(rd) => Some(
+                rd.flatten()
+                    .filter(|e| wild(&pattern, &e.file_name().to_string_lossy().to_lowercase()))
+                    .count(),
+            ),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+            Err(_) => None,
+        }
+    }
 }
 
 /// The path an entry names, `~/` expanded.

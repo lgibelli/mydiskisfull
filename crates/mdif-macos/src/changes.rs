@@ -30,7 +30,7 @@ pub struct Replay {
 }
 
 /// The position of "now": where a first replay starts from.
-pub fn now() -> u64 {
+pub fn now(_root: &Path) -> u64 {
     fsevents::current_event_id()
 }
 
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn an_unrepresentable_timeout_is_an_error_not_a_panic() {
-        let e = replay(Path::new("/"), now(), Duration::MAX).unwrap_err();
+        let e = replay(Path::new("/"), now(Path::new("/")), Duration::MAX).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }
