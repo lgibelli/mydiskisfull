@@ -80,7 +80,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked
-      - run: cargo test --locked
+      - run: cargo test --locked --no-fail-fast
       - run: cargo build --release --locked
       - name: Smoke test on the runner's own disk
         run: |

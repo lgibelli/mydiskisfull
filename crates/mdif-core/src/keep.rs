@@ -343,6 +343,28 @@ mod tests {
         assert!(!wild("?", ""));
     }
 
+    // The same in a home that is a real folder, as it is on any OS.
+    #[test]
+    fn add_and_remove_keep_the_rest_of_the_file_in_a_real_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("MyDiskIsFull/keep.txt");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let vm = home.join("Virtual Machines.localized");
+        assert!(add(&file, &home, vm.to_str().unwrap()).unwrap());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with("\n~/Virtual Machines.localized\n"), "{text}");
+        // The same path, however it's written, is added once.
+        assert!(!add(&file, &home, "~/virtual machines.localized").unwrap());
+        assert!(add(&file, &home, "~/Movies/Clip*").unwrap());
+        assert!(remove(&file, &home, "~/Virtual Machines.localized").unwrap());
+        assert!(!remove(&file, &home, "~/Virtual Machines.localized").unwrap());
+        let k = Keep::load(&file, &home).unwrap();
+        assert_eq!(k.entries().collect::<Vec<_>>(), ["~/Movies/Clip*"]);
+    }
+
+    // A Mac's home, and its firmlinked alias.
+    #[cfg(target_os = "macos")]
     #[test]
     fn add_and_remove_keep_the_rest_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
