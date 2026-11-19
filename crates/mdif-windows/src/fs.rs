@@ -135,9 +135,14 @@ pub fn is_remote(path: &Path) -> io::Result<bool> {
     let mount = volume_path(&std::path::absolute(path)?)?;
     // SAFETY: `mount` is NUL-ended.
     let kind = unsafe { GetDriveTypeW(mount.as_ptr()) };
-    // DRIVE_REMOTE is 4. A UNC root, ordinary or verbatim (`\\?\UNC\s\x`), is a
-    // share. 0 and 1 (unknown, no root) say nothing: not "local".
-    let root = text(&mount);
+    drive_is_remote(kind, &text(&mount))
+}
+
+/// [`is_remote`] from the drive type Windows gave and the volume's root path.
+/// DRIVE_REMOTE is 4. A UNC root, ordinary or verbatim (`\\?\UNC\s\x`), is a
+/// share whatever the type says. 0 and 1 (unknown, no root) say nothing about
+/// the rest: not "local".
+fn drive_is_remote(kind: u32, root: &str) -> io::Result<bool> {
     if kind == 4
         || root.starts_with(r"\\?\UNC\")
         || (root.starts_with(r"\\") && !root.starts_with(r"\\?\"))
@@ -564,13 +569,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_drive_is_remote_by_its_type_or_its_root() {
+        // DRIVE_FIXED (3) and DRIVE_REMOVABLE (2) are local.
+        assert!(!drive_is_remote(3, r"C:\").unwrap());
+        assert!(!drive_is_remote(2, r"E:\").unwrap());
+        assert!(!drive_is_remote(3, r"\\?\Volume{1}\").unwrap());
+        // DRIVE_REMOTE, and a share by its root even when the type isn't told.
+        assert!(drive_is_remote(4, r"Z:\").unwrap());
+        assert!(drive_is_remote(0, r"\\server\share\").unwrap());
+        assert!(drive_is_remote(1, r"\\?\UNC\server\share\").unwrap());
+        // Unclassified and not a share: unknown, not local.
+        assert!(drive_is_remote(0, r"Z:\").is_err());
+        assert!(drive_is_remote(1, r"Z:\").is_err());
+    }
+
+    #[test]
     fn the_file_system_is_named_and_the_quota_is_told() {
         let dir = tempfile::tempdir().unwrap();
         let kind = file_system(dir.path()).unwrap();
         assert!(!kind.is_empty());
         // Whatever the account's quota, the probes answer; a temp folder is local.
         quota_limited(dir.path()).unwrap();
-        // (Where it is depends on where the environment puts temp folders.)
+        // (Where a temp folder is depends on the environment; the classification is
+        // tested apart.)
         let _ = is_remote(dir.path());
     }
 
