@@ -152,32 +152,31 @@ impl Rules {
     /// drive Windows says it is on (the profile's if that can't be told). Names
     /// are as Windows spells them (the journal and the listing give them so).
     pub fn for_windows(home: &Path) -> Rules {
-        let drive: PathBuf = home
-            .components()
-            .take_while(|c| {
-                matches!(
-                    c,
-                    std::path::Component::Prefix(_) | std::path::Component::RootDir
-                )
-            })
-            .collect();
+        #[cfg(windows)]
+        let system = crate::os::sys::system_directory();
+        #[cfg(not(windows))]
+        let system = home.to_path_buf();
+        Rules::for_windows_on(home, &system)
+    }
+
+    /// [`Rules::for_windows`] with the system folder given: `C:\Windows` where
+    /// Windows is, which needn't be the drive the profile is on.
+    pub fn for_windows_on(home: &Path, system_dir: &Path) -> Rules {
+        let root_of = |p: &Path| -> PathBuf {
+            p.components()
+                .take_while(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir
+                    )
+                })
+                .collect()
+        };
+        let drive = root_of(home);
+        let system = root_of(system_dir);
         // `a/b` as its names, so the path has no mixed separators.
         let below =
             |base: &Path, p: &str| p.split('/').fold(base.to_path_buf(), |acc, n| acc.join(n));
-        // Windows and Program Files are on the system drive, which isn't
-        // necessarily the profile's.
-        #[cfg(windows)]
-        let system: PathBuf = crate::os::sys::system_directory()
-            .components()
-            .take_while(|c| {
-                matches!(
-                    c,
-                    std::path::Component::Prefix(_) | std::path::Component::RootDir
-                )
-            })
-            .collect();
-        #[cfg(not(windows))]
-        let system = drive.clone();
         let at = |p: &str| below(&system, p);
         let mut r = Rules { rules: Vec::new() }
             .depth(drive.clone(), 1)
@@ -193,6 +192,10 @@ impl Rules {
             .depth(at("$Recycle.Bin"), 0)
             .depth(home, 1)
             .depth(home.join(".cache"), 1);
+        // The other profiles of a profiles folder that isn't on the system drive.
+        if let Some(users) = home.parent().filter(|u| root_of(u) != *u) {
+            r = r.depth(users, 1);
+        }
         for sub in [
             "AppData",
             "AppData/Local",
@@ -794,10 +797,29 @@ mod tests {
 
     #[cfg(windows)]
     fn owner(p: &str) -> String {
-        Rules::for_home(Path::new(r"C:\Users\me"))
+        Rules::for_windows_on(Path::new(r"C:\Users\me"), Path::new(r"C:\Windows\System32"))
             .owner_of(Path::new(p))
             .display()
             .to_string()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_profile_on_another_drive_keeps_its_own_owners_and_the_systems() {
+        let r = Rules::for_windows_on(Path::new(r"D:\Users\me"), Path::new(r"C:\Windows\System32"));
+        let o = |p: &str| r.owner_of(Path::new(p)).display().to_string();
+        assert_eq!(
+            o(r"C:\Program Files\Docker\bin"),
+            r"C:\Program Files\Docker"
+        );
+        assert_eq!(o(r"C:\Windows\WinSxS\x"), r"C:\Windows\WinSxS");
+        assert_eq!(
+            o(r"D:\Users\me\AppData\Local\Slack\x"),
+            r"D:\Users\me\AppData\Local\Slack"
+        );
+        // Another profile there is one owner, not all of them together.
+        assert_eq!(o(r"D:\Users\other\AppData\x"), r"D:\Users\other");
+        assert_eq!(o(r"D:\Games\x.pak"), r"D:\Games");
     }
 
     #[cfg(windows)]

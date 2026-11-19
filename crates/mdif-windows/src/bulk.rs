@@ -179,7 +179,8 @@ pub fn read_dir_with(dir: &Path, detail: Detail) -> io::Result<Vec<Entry>> {
 /// log growing is listed as it was (measured, Phase 0: 0 bytes for 4 MiB
 /// written). The files changed most lately, by the times the folder lists, are
 /// asked of the file itself: what the product hunts. The times can be as
-/// stale as the sizes, so there's no window, only a bound per folder.
+/// stale as the sizes, so there's no window, only a bound per folder (past it,
+/// the newest first).
 fn refresh_recent(dir: &Path, entries: &mut [Entry]) {
     let mut recent: Vec<usize> = (0..entries.len())
         .filter(|&i| entries[i].kind == Kind::File && !entries[i].is_dataless())
@@ -196,15 +197,18 @@ fn refresh_recent(dir: &Path, entries: &mut [Entry]) {
             e.logical = info.logical;
             e.allocated = info.allocated;
             e.private = info.allocated;
-            // The count of this very file, so a file that grew past what is
-            // asked about is not taken to have one name.
-            e.nlink = info.links.max(1);
+            // The count of this very file once it is big enough to be asked
+            // about, as a listing of it would: otherwise a file would change
+            // its share between listings by being in or out of this set.
+            if e.allocated >= LINK_MIN {
+                e.nlink = info.links.max(1);
+            }
         }
     }
 }
 
 /// Files asked of themselves, at most, in one folder.
-const REFRESH_MAX: usize = 256;
+const REFRESH_MAX: usize = 1024;
 
 /// The names in `dir`, from the same checked open as [`read_dir`] and nothing
 /// else read of what's in it: no entry is sized and no file is opened.
