@@ -53,6 +53,7 @@ mod twins {
     const _: fn() -> u64 = changes::now;
     const _: fn(&Path, u64, Duration) -> io::Result<changes::Replay> = changes::replay;
 
+    const _: bool = proc::WRITES_ARE_DISK_WRITES;
     const _: fn() -> Vec<proc::ProcIo> = proc::own_processes;
     const _: fn() -> (Duration, u64) = proc::own_usage;
     const _: fn(i32) -> Vec<PathBuf> = proc::files_open_for_writing;

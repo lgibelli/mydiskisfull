@@ -75,6 +75,10 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   - The file number is the low 8 bytes of the 128-bit ID. NTFS only uses that much; on ReFS two
     siblings can share it, so ReFS volumes have to keep the whole ID before they are scanned.
   Until these are closed nothing that scans or sizes folders runs on Windows.
+- `own_processes` lists the user's processes (token's SID compared with ours) with their I/O
+  counters, but a Windows write counter counts pipes and sockets, so the watcher records no
+  writers (`WRITES_ARE_DISK_WRITES` is false) and `writers` stays refused, until churn has
+  evidence from the disk (changes under the process's folders, or the service's ETW disk I/O).
 - History is keyed by the volume's mount point. On Windows it must be the volume's identity (its
   GUID), so two removable disks that take turns as `E:\` don't share a forecast.
 - The owner tracker's rules are rooted at `/` and at macOS's places in the home folder, and the

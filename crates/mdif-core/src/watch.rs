@@ -346,7 +346,14 @@ impl Watcher {
             total: st.total,
             avail: st.avail,
         };
-        let writes = self.write_deltas(proc::own_processes());
+        // A counter that isn't the disk's would make network senders look like
+        // writers, and a false churn incident.
+        let procs = if proc::WRITES_ARE_DISK_WRITES {
+            proc::own_processes()
+        } else {
+            Vec::new()
+        };
+        let writes = self.write_deltas(procs);
         if let Some(o) = self.owners.as_mut() {
             // The first sample starts the first period.
             o.last_period.get_or_insert(now);
