@@ -23,7 +23,10 @@ pub fn print_map(m: &DiskMap, depth: usize) {
         .map(|v| format!("{} {}", v.label(), bytes(v.capacity_in_use)))
         .collect();
     println!("  volumes: {}", vols.join(" · "));
-    if m.snapshots.is_empty() {
+    if cfg!(not(target_os = "macos")) {
+        // Snapshots are a Mac thing here (System Restore points come with the
+        // backups page).
+    } else if m.snapshots.is_empty() {
         println!("  local Time Machine snapshots: none");
     } else {
         println!(
@@ -62,8 +65,13 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
     if whole_volume {
         println!(
-            "  not measured   {:>9}   root-only files, file-system metadata, snapshot-only blocks",
-            signed(m.unmeasured())
+            "  not measured   {:>9}   {}",
+            signed(m.unmeasured()),
+            if cfg!(target_os = "macos") {
+                "root-only files, file-system metadata, snapshot-only blocks"
+            } else {
+                "files only an administrator can read, file-system metadata, restore points"
+            }
         );
     }
     if t.dataless_logical > 0 {
@@ -81,8 +89,13 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
     if t.unreadable_dirs > 0 {
         println!(
-            "  unreadable     {:>9}   folders (permissions; Full Disk Access shows more), e.g. {}",
+            "  unreadable     {:>9}   folders ({}), e.g. {}",
             t.unreadable_dirs,
+            if cfg!(target_os = "macos") {
+                "permissions; Full Disk Access shows more"
+            } else {
+                "permissions"
+            },
             m.scan
                 .unreadable
                 .first()

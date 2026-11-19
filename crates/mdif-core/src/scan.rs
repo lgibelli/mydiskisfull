@@ -550,11 +550,13 @@ fn merge(into: &mut Links, mut from: Links) {
 }
 
 // What these tests assert is macOS: its folders, tools and file system.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "macos")]
     use std::process::Command;
 
     #[test]
@@ -583,6 +585,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn clones_are_counted_once() {
         let t = tempfile::tempdir().unwrap();
@@ -619,6 +622,7 @@ mod tests {
         assert_eq!(s.shared_uncertain, 0);
     }
 
+    #[cfg(target_os = "macos")]
     fn clone(from: &Path, to: &Path) {
         fs::create_dir_all(to.parent().unwrap()).unwrap();
         assert!(
@@ -634,6 +638,7 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_modified_clone_is_counted_once() {
         // Clone 8 MiB, then overwrite 1 MiB of the clone: it gets its own
@@ -692,6 +697,7 @@ mod tests {
         assert_eq!(s.real, 8 * MIB);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn small_sparse_files_count_what_apfs_reserves() {
         // APFS reserves the whole length of a small sparse file although its
@@ -726,6 +732,7 @@ mod tests {
         assert_eq!(s.root.totals.dirs, 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_dirs_are_reported_not_fatal() {
         let t = tempfile::tempdir().unwrap();
@@ -739,6 +746,7 @@ mod tests {
         assert_eq!(s.unreadable, [locked]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed() {
         let t = tempfile::tempdir().unwrap();
@@ -787,9 +795,8 @@ mod tests {
                 .unwrap()
                 .set_modified(now - std::time::Duration::from_secs(days * 86_400))
                 .unwrap();
-            fs::metadata(&p).unwrap().blocks() * 512
+            crate::portable::allocated(&p, &fs::metadata(&p).unwrap())
         };
-        use std::os::unix::fs::MetadataExt;
         let old = aged("old/a.bin", 3_000_000, 400);
         let older = aged("mixed/b.bin", 1_000_000, 900);
         aged("mixed/c.bin", 2_000_000, 300);
@@ -811,7 +818,6 @@ mod tests {
 
     #[test]
     fn big_files_are_listed_only_when_asked() {
-        use std::os::unix::fs::MetadataExt;
         let t = tempfile::tempdir().unwrap();
         let big = t.path().join("a/b/big.bin");
         write(&big, 3 * MIB as usize);
@@ -838,7 +844,7 @@ mod tests {
             ..opts(0)
         };
         let s = scan(t.path(), &o).unwrap();
-        let allocated = fs::metadata(&big).unwrap().blocks() * 512;
+        let allocated = crate::portable::allocated(&big, &fs::metadata(&big).unwrap());
         assert_eq!(
             s.big_files,
             [BigFile {
@@ -852,9 +858,13 @@ mod tests {
         // Listing them changes nothing else.
         assert_eq!(s.root.totals, none.root.totals);
         // And reads no file: its access time is as it was.
-        assert_eq!(fs::metadata(&big).unwrap().atime(), 1_600_000_000);
+        assert_eq!(
+            crate::portable::atime(&fs::metadata(&big).unwrap()),
+            1_600_000_000
+        );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn shared_bytes_of_clones_are_told_apart() {
         let t = tempfile::tempdir().unwrap();
@@ -867,6 +877,7 @@ mod tests {
         assert_eq!(tot.allocated - tot.private, tot.cloned);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_folder_of_copies_is_measured_by_what_it_really_takes() {
         // What Chrome leaves when it's killed: copies of the same files,

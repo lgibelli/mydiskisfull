@@ -109,7 +109,7 @@ jobs:
       - name: What waits for Windows is refused
         run: |
           mdif=./target/release/mdif.exe
-          for c in clean docker map space suggest tidy timemachine tweaks writers; do
+          for c in clean docker space suggest tidy timemachine tweaks writers; do
             if out=$($mdif $c 2>&1); then echo "mdif $c should be refused"; exit 1; fi
             echo "$out" | grep -q "isn't available on this operating system yet" \
               || { echo "mdif $c: $out"; exit 1; }
@@ -172,6 +172,19 @@ jobs:
           jq -e '[.growth[] | select(.owner | test("mdif-ci-grow")) | .bytes] | add > 30000000' "$RUNNER_TEMP/owners.json"
           jq -e '[.growth[] | select(.owner | test("mdif-ci-held")) | .bytes] | add > 20000000' "$RUNNER_TEMP/owners.json"
           rm -rf "$fresh" "$held"
+
+      # The disk map of the profile: a scan from open folder handles.
+      - name: The disk map scans a folder
+        run: |
+          mdif=./target/release/mdif.exe
+          dir="$USERPROFILE/mdif-ci-map"
+          rm -rf "$dir"; mkdir -p "$dir/a" "$dir/b"
+          head -c 5000000 /dev/urandom > "$dir/a/one.bin"
+          head -c 3000000 /dev/urandom > "$dir/b/two.bin"
+          $mdif map --root "$dir" --depth 2 --min-mb 1
+          $mdif map --root "$dir" --depth 2 --min-mb 1 --json > "$RUNNER_TEMP/map.json"
+          jq -e '.scan.real >= 8000000 and .scan.real < 9000000 and (.scan.root.children | length) == 2' "$RUNNER_TEMP/map.json"
+          rm -rf "$dir"
 
       # The watcher's own budget: under 1 s of CPU and 1 MB written an hour at the
       # defaults (a sample every 5 minutes, folders every 30), measured here with

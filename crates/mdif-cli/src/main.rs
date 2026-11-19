@@ -236,8 +236,7 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Where the disk space is now, reconciled with what APFS reports
-    #[command(hide = !cfg!(target_os = "macos"))]
+    /// Where the disk space is now, reconciled with what the file system reports
     Map {
         /// Directory to scan (default: the whole Data volume)
         #[arg(long, default_value_os_t = map::boot_volume())]
@@ -433,7 +432,6 @@ const NOT_HERE_YET: &[&str] = &[
     "docker",
     "timemachine",
     "tweaks",
-    "map",
     "space",
     "writers",
 ];

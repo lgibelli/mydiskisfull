@@ -7,7 +7,9 @@ use crate::os::fs::{self, FsStats};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::apfs::{self, Container, Volume};
+#[cfg(target_os = "macos")]
+use crate::apfs;
+use crate::apfs::{Container, Volume};
 use crate::scan::{self, Options, Scan};
 
 /// Where macOS mounts the boot Data volume; `/Users`, `/Applications`,
@@ -73,12 +75,34 @@ impl DiskMap {
 pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
     let st = fs::statfs(root).with_context(|| format!("statfs {}", root.display()))?;
-    let (mut container, mut volume) = apfs::find_volume(apfs::containers()?, &st.device)?;
-    if volume.capacity_in_use == 0 {
-        apfs::fill_missing_sizes(&mut container, &st);
-        volume = apfs::find_volume(vec![container.clone()], &st.device)?.1;
-    }
-    let snapshots = apfs::local_snapshots(Path::new(&st.mount_point)).unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let (container, volume, snapshots) = {
+        let (mut container, mut volume) = apfs::find_volume(apfs::containers()?, &st.device)?;
+        if volume.capacity_in_use == 0 {
+            apfs::fill_missing_sizes(&mut container, &st);
+            volume = apfs::find_volume(vec![container.clone()], &st.device)?.1;
+        }
+        let snapshots = apfs::local_snapshots(Path::new(&st.mount_point)).unwrap_or_default();
+        (container, volume, snapshots)
+    };
+    // A Windows volume stands alone: its own size and what's free, and no
+    // snapshots are listed yet (System Restore points come with the backups page).
+    #[cfg(windows)]
+    let (container, volume, snapshots) = {
+        let volume = Volume {
+            name: st.mount_point.clone(),
+            device_identifier: st.device.clone(),
+            roles: vec![format!("Windows {}", st.mount_point.trim_end_matches('\\'))],
+            capacity_in_use: st.total.saturating_sub(st.avail),
+        };
+        let container = Container {
+            container_reference: st.mount_point.clone(),
+            capacity_ceiling: st.total,
+            capacity_free: st.avail,
+            volumes: vec![volume.clone()],
+        };
+        (container, volume, Vec::new())
+    };
     let scan = scan::scan(root, opts).with_context(|| format!("scanning {}", root.display()))?;
     Ok(DiskMap {
         root: root.to_path_buf(),
