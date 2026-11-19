@@ -79,8 +79,8 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   counters, but a Windows write counter counts pipes and sockets, so the watcher records no
   writers (`WRITES_ARE_DISK_WRITES` is false) and `writers` stays refused, until churn has
   evidence from the disk (changes under the process's folders, or the service's ETW disk I/O).
-- History is keyed by the volume's mount point. On Windows it must be the volume's identity (its
-  GUID), so two removable disks that take turns as `E:\` don't share a forecast.
+- History is keyed by the volume's identity (`FsStats::history_key`: its GUID), and the watcher
+  re-checks it on every sample, so a disk swapped under a drive letter starts its own history.
 - The owner tracker's rules are rooted at `/` and at macOS's places in the home folder, and the
   space, keep and knowledge code strips `/System/Volumes/Data` and joins `/`: Windows paths need
   drive prefixes and their own categories.

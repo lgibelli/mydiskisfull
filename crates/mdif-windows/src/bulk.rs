@@ -123,10 +123,12 @@ fn open_listing(dir: &Path) -> io::Result<File> {
         )
     };
     let file = fs::open_with(dir, FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)?;
-    let attributes = fs::by_handle(&file)?.dwFileAttributes;
+    // From both queries: a recall flag may be in only one of them.
+    let (tagged, tag) = fs::attributes_and_tag(&file)?;
+    let attributes = fs::by_handle(&file)?.dwFileAttributes | tagged;
     // A reparse point is a link only if it names another place; a folder a
     // cloud provider has fully downloaded keeps its reparse tag and is a folder.
-    if attributes & REPARSE_POINT != 0 && fs::is_link_tag(fs::reparse_tag(&file)?) {
+    if attributes & REPARSE_POINT != 0 && fs::is_link_tag(tag) {
         return Err(refuse("is a link"));
     }
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {

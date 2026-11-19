@@ -346,7 +346,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     let store = Store::open(db)?;
     let key = mdif_core::os::fs::statfs(volume)
         .with_context(|| format!("statfs {}", volume.display()))?
-        .mount_point;
+        .history_key();
     let now = watch::unix_now();
     let pts = store.space_since(&key, now - 400 * DAY)?;
     let cleanups = store.cleanups_since(pts.first().map_or(now, |p| p.ts))?;

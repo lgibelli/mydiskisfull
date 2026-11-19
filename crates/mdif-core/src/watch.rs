@@ -245,7 +245,7 @@ impl Watcher {
         fs::forbid_dataless_materialization()?;
         let key = fs::statfs(volume)
             .with_context(|| format!("statfs {}", volume.display()))?
-            .mount_point;
+            .history_key();
         Ok(Watcher {
             store,
             volume: volume.to_path_buf(),
@@ -333,7 +333,7 @@ impl Watcher {
         &self.store
     }
 
-    /// The volume's mount point, the key its history is stored under.
+    /// What the volume's history is stored under (`FsStats::history_key`).
     pub fn volume_key(&self) -> &str {
         &self.key
     }
@@ -341,6 +341,11 @@ impl Watcher {
     pub fn sample(&mut self, now: i64) -> Result<Sample> {
         let (cpu0, written0) = proc::own_usage();
         let st = fs::statfs(&self.volume)?;
+        // A disk swapped under the same path (a drive letter) is another history.
+        let now_key = st.history_key();
+        if now_key != self.key {
+            self.key = now_key;
+        }
         let point = SpacePoint {
             ts: now,
             total: st.total,

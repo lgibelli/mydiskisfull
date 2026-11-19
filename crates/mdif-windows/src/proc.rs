@@ -286,8 +286,9 @@ mod tests {
 
     #[test]
     fn an_ended_process_is_not_alive() {
-        let mut child = std::process::Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
@@ -322,8 +323,9 @@ mod tests {
 
     #[test]
     fn the_users_processes_include_this_one_and_its_child() {
-        let mut child = std::process::Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let me = std::process::id() as i32;
@@ -334,7 +336,7 @@ mod tests {
         assert!(mine.bytes_written > 0 || mine.bytes_read > 0, "{mine:?}");
         assert!(
             all.iter()
-                .any(|p| p.pid == child.id() as i32 && p.name == "cmd")
+                .any(|p| p.pid == child.id() as i32 && p.name.eq_ignore_ascii_case("ping"))
         );
         // Windows's own processes aren't the user's.
         assert!(!all.iter().any(|p| p.pid == 4), "the System process");

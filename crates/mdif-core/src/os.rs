@@ -26,6 +26,7 @@ mod twins {
     use std::time::Duration;
 
     const _: fn(&Path) -> io::Result<fs::FsStats> = fs::statfs;
+    const _: fn(&fs::FsStats) -> String = fs::FsStats::history_key;
     const _: fn() -> io::Result<Vec<(String, String)>> = fs::mounts;
     const _: fn(&Path) -> io::Result<u64> = fs::space_used;
     const _: fn(&Path) -> io::Result<fs::FsId> = fs::fsid;

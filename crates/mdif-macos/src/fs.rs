@@ -49,6 +49,13 @@ pub struct FsStats {
     pub mount_point: String,
 }
 
+impl FsStats {
+    /// What the volume's history is kept under: its mount point.
+    pub fn history_key(&self) -> String {
+        self.mount_point.clone()
+    }
+}
+
 pub fn statfs(path: &Path) -> io::Result<FsStats> {
     let c = CString::new(path.as_os_str().as_bytes())?;
     let mut st = MaybeUninit::<libc::statfs>::uninit();

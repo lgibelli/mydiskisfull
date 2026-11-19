@@ -47,6 +47,19 @@ pub struct FsStats {
     pub mount_point: String,
 }
 
+impl FsStats {
+    /// What the volume's history is kept under: the volume's own name (its GUID),
+    /// which stays with the disk, so two removable disks that take turns as `E:\`
+    /// don't share a forecast, and a disk that changes letter keeps its own.
+    pub fn history_key(&self) -> String {
+        if self.device.starts_with(r"\\?\Volume{") {
+            self.device.clone()
+        } else {
+            self.mount_point.clone()
+        }
+    }
+}
+
 /// The mount point of the volume holding `path`: `C:\`.
 fn volume_path(path: &Path) -> io::Result<Vec<u16>> {
     let p = wide(path.as_os_str());
@@ -202,10 +215,12 @@ pub fn file_info(path: &Path) -> io::Result<FileInfo> {
     })
 }
 
-/// The reparse tag of what the handle is open on (0 if it has none): what
-/// kind of reparse point, which tells a link (a name surrogate) from a cloud
-/// file or a compressed one, which are still the file they look like.
-pub(crate) fn reparse_tag(file: &File) -> io::Result<u32> {
+/// The attributes and the reparse tag of what the handle is open on (tag 0 if
+/// it has none): what kind of reparse point, which tells a link (a name
+/// surrogate) from a cloud file or a compressed one, which are still the file
+/// they look like. The attributes here can name a recall flag that
+/// `BY_HANDLE_FILE_INFORMATION` leaves out.
+pub(crate) fn attributes_and_tag(file: &File) -> io::Result<(u32, u32)> {
     // SAFETY: zeroed is a valid value of this plain struct, and its size is
     // the one passed; the handle is the open file's.
     let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
@@ -220,7 +235,7 @@ pub(crate) fn reparse_tag(file: &File) -> io::Result<u32> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(info.ReparseTag)
+    Ok((info.FileAttributes, info.ReparseTag))
 }
 
 /// Whether a reparse tag names another place (a symbolic link, a junction, a
@@ -355,6 +370,13 @@ mod tests {
         );
         assert!(s.mount_point.ends_with('\\'), "{s:?}");
         assert!(s.device.starts_with(r"\\?\Volume{"), "{s:?}");
+        // History follows the disk, not its letter.
+        assert_eq!(s.history_key(), s.device);
+        let lettered = FsStats {
+            device: String::new(),
+            ..s.clone()
+        };
+        assert_eq!(lettered.history_key(), s.mount_point);
         let file = dir.path().join("f");
         std::fs::write(&file, "x").unwrap();
         // The folder and a file in it are on one volume.

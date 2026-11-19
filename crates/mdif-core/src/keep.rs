@@ -196,23 +196,22 @@ pub fn present(entry: &str, home: &Path) -> Option<usize> {
     }
     let pattern = name.to_string_lossy().to_lowercase();
     // Windows: a folder a cloud provider keeps online-only would be downloaded
-    // by an ordinary listing, so it goes through the scanner's, which refuses it.
+    // by an ordinary listing, so the scanner's checked open comes first, and
+    // refuses it (unknown, not none).
     #[cfg(windows)]
-    let names: Vec<_> = match crate::os::bulk::read_dir(parent) {
-        Ok(es) => es.into_iter().map(|e| e.name).collect(),
+    match crate::os::bulk::open_dir(parent) {
+        Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
-    };
-    #[cfg(not(windows))]
-    let names: Vec<_> = match std::fs::read_dir(parent) {
-        Ok(rd) => rd.flatten().map(|e| e.file_name()).collect(),
+    }
+    let rd = match std::fs::read_dir(parent) {
+        Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
     };
     Some(
-        names
-            .iter()
-            .filter(|n| wild(&pattern, &n.to_string_lossy().to_lowercase()))
+        rd.flatten()
+            .filter(|e| wild(&pattern, &e.file_name().to_string_lossy().to_lowercase()))
             .count(),
     )
 }
@@ -237,6 +236,11 @@ fn names(path: &Path) -> Vec<String> {
             Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
             Component::Prefix(p) => Some(match p.kind() {
                 Disk(d) | VerbatimDisk(d) => format!("{}:", (d as char).to_ascii_lowercase()),
+                UNC(server, share) | VerbatimUNC(server, share) => format!(
+                    r"\\{}\{}",
+                    server.to_string_lossy().to_lowercase(),
+                    share.to_string_lossy().to_lowercase()
+                ),
                 _ => p.as_os_str().to_string_lossy().to_lowercase(),
             }),
             _ => None,

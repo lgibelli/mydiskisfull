@@ -420,7 +420,7 @@ pub fn gather(
     let mut out = Vec::new();
 
     if let Some(store) = store {
-        let pts = store.space_since(&st.mount_point, now - 400 * DAY)?;
+        let pts = store.space_since(&st.history_key(), now - 400 * DAY)?;
         let f = forecast::forecast(&pts, &Params::default());
         tight |= f
             .as_ref()

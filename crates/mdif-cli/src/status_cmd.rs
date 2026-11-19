@@ -48,7 +48,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         None
     };
     let pts = match &store {
-        Some(s) => s.space_since(&st.mount_point, now - 400 * DAY)?,
+        Some(s) => s.space_since(&st.history_key(), now - 400 * DAY)?,
         None => Vec::new(),
     };
     let cleanups = match (&store, pts.first()) {
