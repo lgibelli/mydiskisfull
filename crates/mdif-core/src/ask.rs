@@ -7,9 +7,7 @@
 //! something of the folder.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -98,12 +96,25 @@ fn rounded(bytes: u64) -> u64 {
 }
 
 fn macos() -> Result<String> {
-    let mut sw = Command::new("/usr/bin/sw_vers");
-    sw.arg("-productVersion");
-    let out = crate::space::run_within(sw, Duration::from_secs(10))
-        .filter(|o| o.status.success())
-        .ok_or_else(|| anyhow!("couldn't read the macOS version"))?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    // Ask AI is for Macs so far: what's sent says the macOS version, and
+    // nothing else is ever put in its place.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(anyhow!(
+            "Ask AI isn't available on this operating system yet"
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        use std::time::Duration;
+        let mut sw = Command::new("/usr/bin/sw_vers");
+        sw.arg("-productVersion");
+        let out = crate::space::run_within(sw, Duration::from_secs(10))
+            .filter(|o| o.status.success())
+            .ok_or_else(|| anyhow!("couldn't read the macOS version"))?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
 }
 
 /// What would be sent to ask about `path`, or why nothing may be.
@@ -264,6 +275,8 @@ mod tests {
         assert_eq!(rounded(999), 1000);
     }
 
+    // Names, and the macOS version, as a Mac has them.
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_a_generic_name_is_asked_about() {
         let home = Path::new("/Users/someone");

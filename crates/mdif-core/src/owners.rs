@@ -663,7 +663,9 @@ fn is_gone(e: &io::Error) -> bool {
     )
 }
 
-#[cfg(test)]
+// The tracker's rules are rooted at `/` and the home folder's macOS places;
+// Windows' come with the watcher there.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::fs;
