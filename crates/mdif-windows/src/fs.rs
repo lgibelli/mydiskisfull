@@ -265,21 +265,33 @@ pub fn link_count_of(path: &Path, volume: u32, index: u64) -> io::Result<u32> {
 
 /// The ID of the volume holding `path`.
 pub fn fsid(path: &Path) -> io::Result<FsId> {
-    let serial = by_handle(&open_attributes(path)?)?.dwVolumeSerialNumber;
+    let (serial, root) = volume_serial(path)?;
     // Remembered, so a number on this volume can be turned back into a place.
-    if let Ok(stats) = statfs(path) {
-        let root = if stats.device.starts_with(r"\\?\Volume{") {
-            stats.device
-        } else {
-            stats.mount_point
-        };
-        let mut known = VOLUMES.lock().unwrap_or_else(|e| e.into_inner());
-        match known.iter_mut().find(|(s, _)| *s == serial) {
-            Some(entry) => entry.1 = PathBuf::from(root),
-            None => known.push((serial, PathBuf::from(root))),
-        }
+    let mut known = VOLUMES.lock().unwrap_or_else(|e| e.into_inner());
+    match known.iter_mut().find(|(s, _)| *s == serial) {
+        Some(entry) => entry.1 = root,
+        None => known.push((serial, root)),
     }
     Ok(FsId(serial))
+}
+
+/// The serial number of the volume holding `path`, and the path of its root: by
+/// its own name where it has one, so a volume mounted in a folder is the volume
+/// and not the folder it is mounted in.
+fn volume_serial(path: &Path) -> io::Result<(u32, PathBuf)> {
+    let stats = statfs(path)?;
+    let root = PathBuf::from(if stats.device.starts_with(r"\\?\Volume{") {
+        stats.device
+    } else {
+        stats.mount_point
+    });
+    let serial = by_handle(&open_with(&root, FILE_READ_ATTRIBUTES)?)?.dwVolumeSerialNumber;
+    Ok((serial, root))
+}
+
+/// Device id of the volume holding `path` (what `dev_of` of any file on it says).
+pub fn dev_of_volume(path: &Path) -> io::Result<i32> {
+    Ok(volume_serial(path)?.0 as i32)
 }
 
 /// Where the folder numbered `inode` on the volume is now, if it is: found by
@@ -420,22 +432,55 @@ pub(crate) fn folder_by_id(volume: HANDLE, id: u64) -> io::Result<Option<PathBuf
             _ => Err(err),
         };
     }
-    let mut buf = vec![0u16; 1024];
-    let path = loop {
-        // SAFETY: the handle is open; `buf` is as long as passed.
-        let n =
-            unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, 0) } as usize;
-        if n == 0 {
-            break Err(io::Error::last_os_error());
-        }
-        if n < buf.len() {
-            break Ok(std::ffi::OsString::from_wide(&buf[..n]));
-        }
-        buf.resize(n + 1, 0);
-    };
+    let path = final_path_of_handle(h);
     // SAFETY: the handle is ours, and closed once.
     unsafe { CloseHandle(h) };
-    path.map(|p| Some(plain(PathBuf::from(p))))
+    path.map(|p| Some(plain(p)))
+}
+
+/// The path an open handle names, as the file system spells it: with a drive
+/// letter when the volume has one, and otherwise by the volume's own name
+/// (`\\?\Volume{...}\x`), which is how a volume mounted in a folder is told.
+fn final_path_of_handle(h: HANDLE) -> io::Result<PathBuf> {
+    // VOLUME_NAME_DOS, then VOLUME_NAME_GUID where the volume has no letter.
+    for (flags, last) in [(0u32, false), (1u32, true)] {
+        let mut buf = vec![0u16; 1024];
+        loop {
+            // SAFETY: the handle is open; `buf` is as long as passed.
+            let n =
+                unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, flags) }
+                    as usize;
+            if n == 0 {
+                let err = io::Error::last_os_error();
+                // Path not found: no DOS name for this volume.
+                if !last && err.raw_os_error() == Some(3) {
+                    break;
+                }
+                return Err(err);
+            }
+            if n < buf.len() {
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])));
+            }
+            buf.resize(n + 1, 0);
+        }
+    }
+    unreachable!("the second spelling returns or fails")
+}
+
+/// `path` as the journal and [`folder_by_id`] spell paths (the same drive letter
+/// or volume name, the real case, a mounted volume reached through its folder):
+/// so a watched root and the folders found in it can be compared. As given if it
+/// can't be opened.
+pub fn normalized(path: &Path) -> PathBuf {
+    // Followed, unlike every other open here: a mount point in the path is the
+    // volume that is mounted.
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_NO_RECALL)
+        .open(path);
+    file.and_then(|f| final_path_of_handle(f.as_raw_handle() as HANDLE))
+        .map_or_else(|_| path.to_path_buf(), plain)
 }
 
 /// `\\?\C:\x` as `C:\x`, and `\\?\UNC\s\x` as `\\s\x`: the paths the rest of the

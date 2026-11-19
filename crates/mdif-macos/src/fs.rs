@@ -180,6 +180,12 @@ pub fn path_of(fsid: FsId, inode: u64) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(&buf[..end])))
 }
 
+/// Device id of the volume holding `path`. The same as [`dev_of`] here: a
+/// mount point is reported as the volume mounted on it.
+pub fn dev_of_volume(path: &Path) -> io::Result<i32> {
+    dev_of(path)
+}
+
 pub fn dev_of(path: &Path) -> io::Result<i32> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::symlink_metadata(path)?.dev() as i32)

@@ -304,7 +304,7 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
         )
     })?;
     // The same spelling of the path the folders are given in (8.3 names, `\\?\`).
-    let root = &std::fs::canonicalize(root).map_or_else(|_| root.to_path_buf(), fs::plain);
+    let root = &fs::normalized(root);
     let volume = Volume::open(root)?;
     let Some(journal) = volume.query()? else {
         return Ok(Replay::default());
@@ -551,7 +551,7 @@ mod tests {
     fn a_change_is_found_again_from_a_saved_position() {
         let dir = tempfile::tempdir().unwrap();
         // As the journal spells it: the runner's temp folder is given by its 8.3 name.
-        let root = fs::plain(std::fs::canonicalize(dir.path()).unwrap());
+        let root = fs::normalized(dir.path());
         let volume_root = fs::statfs(&root).unwrap().mount_point;
         if now(&root) == 0 {
             eprintln!("no readable journal on {volume_root}: skipped");

@@ -63,6 +63,7 @@ fn detect() -> Detect {
 struct Disk {
     file: PathBuf,
     mount: PathBuf,
+    attached: bool,
 }
 
 impl Disk {
@@ -70,7 +71,11 @@ impl Disk {
         let file = dir.join("e2e.vhdx");
         let mount = dir.join("mnt");
         fs::create_dir(&mount).unwrap();
-        let disk = Disk { file, mount };
+        let mut disk = Disk {
+            file,
+            mount,
+            attached: false,
+        };
         diskpart(&format!(
             "create vdisk file=\"{}\" maximum=1536 type=expandable\n\
              select vdisk file=\"{}\"\n\
@@ -82,17 +87,44 @@ impl Disk {
             disk.file.display(),
             disk.mount.display()
         ));
+        disk.attached = true;
+        // A new volume has no change journal until something makes one (Windows
+        // makes one on the system drive, and a program may on others).
+        let out = Command::new("fsutil")
+            .args(["usn", "createjournal", "m=33554432", "a=4194304"])
+            .arg(&disk.mount)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "fsutil: {} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         disk
+    }
+
+    /// Detaches it, and says so if that fails (a test that passed shouldn't leave
+    /// a disk attached).
+    fn detach(mut self) {
+        self.attached = false;
+        diskpart(&format!(
+            "select vdisk file=\"{}\"\ndetach vdisk\n",
+            self.file.display()
+        ));
     }
 }
 
 impl Drop for Disk {
     fn drop(&mut self) {
-        let script = format!(
-            "select vdisk file=\"{}\"\ndetach vdisk\n",
-            self.file.display()
-        );
-        let _ = std::panic::catch_unwind(|| diskpart(&script));
+        // Only while unwinding from a failure: best effort.
+        if self.attached {
+            let script = format!(
+                "select vdisk file=\"{}\"\ndetach vdisk\n",
+                self.file.display()
+            );
+            let _ = std::panic::catch_unwind(|| diskpart(&script));
+        }
     }
 }
 
@@ -273,4 +305,6 @@ fn detects_a_filler_and_a_cleanup_on_a_real_ntfs_volume() {
         [(Kind::Growth.as_str(), owner("fill"))],
         "{episodes:?}"
     );
+    drop(w);
+    disk.detach();
 }

@@ -318,7 +318,7 @@ impl Watcher {
             _ => (changes::now(&root), unix_now()),
         };
         self.user = alerts::Settings::load(&self.store)?;
-        let mut tracker = Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1));
+        let mut tracker = Tracker::new(rules, fs::dev_of_volume(&self.volume).ok(), every.max(1));
         if let Ok(id) = fs::fsid(&self.volume) {
             tracker.follow_moves(id);
         }

@@ -32,6 +32,7 @@ mod twins {
     const _: fn(&Path) -> io::Result<fs::FsId> = fs::fsid;
     const _: fn(fs::FsId, u64) -> io::Result<PathBuf> = fs::path_of;
     const _: fn(&Path) -> io::Result<i32> = fs::dev_of;
+    const _: fn(&Path) -> io::Result<i32> = fs::dev_of_volume;
     const _: fn(&Path) -> io::Result<PathBuf> = fs::trash;
     const _: fn(&Path) -> io::Result<u64> = fs::available_for_important_usage;
     const _: fn(&Path, bool) -> io::Result<()> = fs::set_excluded_from_backup;
