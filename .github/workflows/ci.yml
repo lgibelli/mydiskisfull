@@ -66,6 +66,65 @@ jobs:
           # Nothing left to revert: refused.
           if $mdif tweaks revert trash-auto-empty --db "$db"; then exit 1; fi
 
+  windows:
+    name: test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Smoke test on the runner's own disk
+        run: |
+          mdif=./target/release/mdif.exe
+          db="$RUNNER_TEMP/smoke.sqlite3"
+          $mdif --version
+          $mdif watch --once --db "$db"
+          $mdif forecast --db "$db"
+          $mdif status --db "$db"
+          $mdif alerts --db "$db"
+          # The sample was kept, under this disk, and reads back.
+          $mdif forecast --json --db "$db" | jq -e '.samples == 1 and .forecast.avail > 0'
+          $mdif status --json --db "$db" | jq -e '.avail > 0 and .total >= .avail'
+
+      # What waits for Windows says so, and fails, rather than printing numbers
+      # built on another system's picture of a disk.
+      - name: What waits for Windows is refused
+        run: |
+          mdif=./target/release/mdif.exe
+          for c in agent clean docker map owners incidents space suggest tidy timemachine tweaks writers; do
+            if out=$($mdif $c 2>&1); then echo "mdif $c should be refused"; exit 1; fi
+            echo "$out" | grep -q "isn't available on this operating system yet" \
+              || { echo "mdif $c: $out"; exit 1; }
+          done
+
+  windows-arm:
+    name: check (Windows on ARM)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Only type-checked here, which needs no ARM64 C compiler for SQLite.
+      LIBSQLITE3_SYS_USE_PKG_CONFIG: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked --target aarch64-pc-windows-msvc
+
   e2e:
     name: e2e (real filler, churner, cleanup)
     runs-on: macos-latest
@@ -175,3 +234,10 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --locked
+      # The same for Windows, type-checked from here (no C compiler needed).
+      - name: cargo check (Windows)
+        env:
+          LIBSQLITE3_SYS_USE_PKG_CONFIG: "1"
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo check --all-targets --locked --target x86_64-pc-windows-msvc
