@@ -114,14 +114,16 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
     let (notes, quota_limited) = {
         // ReFS keeps 128-bit file IDs and shares blocks between files: neither is
         // measured, so what it says about hard links and clones would be wrong.
-        let kind = fs::file_system(root).unwrap_or_default();
+        let kind = fs::file_system(root)
+            .with_context(|| format!("which file system {} is", st.mount_point))?;
         if kind.eq_ignore_ascii_case("ReFS") {
             anyhow::bail!(
                 "{} is ReFS (a Dev Drive), whose shared blocks and file numbers aren't read yet",
                 st.mount_point
             );
         }
-        let quota = fs::quota_limited(root).unwrap_or(false);
+        // When it can't be told, the disk figures are not trusted.
+        let quota = fs::quota_limited(root).unwrap_or(true);
         let mut notes = vec![
             "A file under 1 MiB is taken to have one name, so a small hard-linked file is counted \
              once per name here and its share can be off."
