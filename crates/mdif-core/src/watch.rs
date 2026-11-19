@@ -355,6 +355,8 @@ impl Watcher {
             // changes under this one's name.
             if self.owners.take().is_some() {
                 eprintln!("the volume at {} changed: folder tracking stops", self.key);
+                // No more periods: none are projected into the cost either.
+                self.cost.every = 0;
             }
             self.key = now_key;
         }
@@ -426,7 +428,13 @@ impl Watcher {
                     Err(e) => {
                         eprintln!("the folders weren't measured at {now}: {e:#}");
                         o.last_period = Some(now);
-                        (Vec::new(), None)
+                        // Recorded as a period with a gap, so a report says that
+                        // the folders weren't all checked.
+                        let missed = Period {
+                            gaps: 1,
+                            ..Period::default()
+                        };
+                        (Vec::new(), Some((missed, Duration::ZERO, false)))
                     }
                 }
             }
@@ -447,6 +455,9 @@ impl Watcher {
                 biggest: o.biggest.clone(),
             };
             meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
+            if p.gaps > 0 {
+                meta.push((GAP_KEY.to_string(), now.to_string()));
+            }
         }
         if let (Some(o), Some(_)) = (&self.owners, period) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
@@ -663,6 +674,7 @@ impl Owners {
 
 const ACCESS_KEY: &str = "watch.full_disk_access";
 const PERIOD_KEY: &str = "watch.last_period";
+const GAP_KEY: &str = "watch.last_gap";
 
 /// The last owners period, as recorded: what it listed and what it cost.
 /// Listing is nearly all of a period's cost, so this says where it went.
@@ -680,6 +692,12 @@ pub struct LastPeriod {
     pub cpu_us: u64,
     /// The directories with the most entries, most first.
     pub biggest: Vec<(String, usize)>,
+}
+
+/// When the folders last weren't all checked (a gap in the journal, or a period
+/// that couldn't run), if they ever weren't.
+pub fn recorded_gap(store: &Store) -> Result<Option<i64>> {
+    Ok(store.meta(GAP_KEY)?.and_then(|v| v.parse().ok()))
 }
 
 pub fn recorded_period(store: &Store) -> Result<Option<LastPeriod>> {

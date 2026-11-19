@@ -92,6 +92,10 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   standard (non-administrator) account, only as an administrator, and ReFS (128-bit file numbers,
   version 3 records) isn't read. Owner tracking is on: the watcher replays the journal every 30 minutes by default, and CI
   grows a folder under a running watcher and finds it with `mdif owners`.
+- If the disk under a running watcher is swapped, folder tracking stops (the free-space history
+  carries on under the new disk's own key), but an incident that was open stays open until the
+  watcher is restarted. The Windows advice for a growing folder is text only and doesn't check
+  the keep list for kept files inside a temp folder.
 - The watcher at sign-in is `mdif-watch.exe`, the CLI source linked for the GUI subsystem by
   `build.rs` (MSVC only: Windows GNU builds are not supported, and would show a console). One
   watcher per history is a lock file beside it, held across sign-ins, and `agent uninstall` asks

@@ -109,6 +109,10 @@ pub const MAX_STEADY: u32 = 2;
 /// Folders seen for the first time are listed regardless.
 pub const PERIOD_ENTRIES: usize = 20_000;
 
+/// Known folders asked where they are now, at most, when one that was tracked is
+/// gone from where it was.
+const MAX_LOOKUPS: usize = 8;
+
 /// Directories re-listed per period at most when FSEvents asks for a whole
 /// subtree to be rescanned (it does after dropping events).
 const MAX_RESCAN: usize = 20_000;
@@ -640,11 +644,12 @@ impl Tracker {
                     // Growing: listed again next period, whatever FSEvents says.
                     if delta > 0 && delta >= self.steady as i64 {
                         self.pending.insert(dir.clone());
-                    } else if cfg!(windows) && written {
+                    } else if cfg!(windows) && (written || before.is_none()) {
                         // NTFS writes a journal record for a file when it is first
                         // changed and again when it is closed, so a file kept open
                         // while it grows is silent in between: a folder with a file
-                        // written since the last period is looked at again.
+                        // written since the last period, or seen for the first time,
+                        // is looked at again.
                         self.pending.insert(dir.clone());
                     }
                 }
@@ -723,7 +728,9 @@ impl Tracker {
     /// guarded folder now).
     fn now_at(&self, root: &Path, below: &[PathBuf]) -> Option<PathBuf> {
         let fsid = self.fsid.filter(|_| !privacy::avoiding())?;
-        below.iter().find_map(|p| {
+        // A few tried, not all: after a big tree is deleted none resolves, and a
+        // lookup of each of thousands would cost more than the period.
+        below.iter().take(MAX_LOOKUPS).find_map(|p| {
             let d = self.dirs.get(p).filter(|d| d.inode != 0)?;
             let now = crate::os::fs::path_of(fsid, d.inode).ok()?;
             // Its place inside what moved is the same.
