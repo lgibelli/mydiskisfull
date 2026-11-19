@@ -158,9 +158,10 @@ pub fn account(dir: &Path) -> Account {
     }
 }
 
+/// `n` bytes from the operating system's secure random source.
 fn random(n: usize) -> Result<Vec<u8>> {
     let mut b = vec![0; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    getrandom::fill(&mut b).map_err(|e| anyhow!("no secure random numbers: {e}"))?;
     Ok(b)
 }
 
@@ -928,6 +929,18 @@ pub fn respond(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn secrets_and_host_ids_come_from_the_systems_random_source() {
+        assert_eq!(random(32).unwrap().len(), 32);
+        assert_ne!(random(32).unwrap(), random(32).unwrap());
+        assert_ne!(secret(32).unwrap(), secret(32).unwrap());
+        let id = host_id().unwrap();
+        assert_eq!(id.len(), "urn:uuid:".len() + 36, "{id}");
+        assert!(id.starts_with("urn:uuid:"), "{id}");
+        // Version 4, variant 1.
+        assert_eq!(&id["urn:uuid:".len() + 14..][..1], "4", "{id}");
+    }
 
     #[test]
     fn pkce_is_rfc_7636s() {
