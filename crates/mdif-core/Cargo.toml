@@ -24,5 +24,8 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 mdif-macos.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+mdif-windows.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

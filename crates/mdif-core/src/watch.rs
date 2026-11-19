@@ -733,6 +733,8 @@ pub fn run(
 mod tests {
     use super::*;
 
+    // Needs the list of processes, which Windows doesn't give yet.
+    #[cfg(target_os = "macos")]
     #[test]
     fn samples_space_and_measures_its_own_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -836,6 +838,8 @@ mod tests {
         assert_eq!(half.with_user(&s).churn.min_written, 1_000_000_000);
     }
 
+    // Probes are macOS's (TCC); Windows has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn full_disk_access_is_recorded_at_every_sample() {
         let dir = tempfile::tempdir().unwrap();

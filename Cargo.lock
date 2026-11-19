@@ -567,6 +567,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "mdif-macos",
+ "mdif-windows",
  "plist",
  "rayon",
  "rusqlite",
@@ -584,6 +585,15 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "tempfile",
+]
+
+[[package]]
+name = "mdif-windows"
+version = "0.1.5"
+dependencies = [
+ "chrono",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

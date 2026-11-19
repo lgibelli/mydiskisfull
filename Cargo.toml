@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mdif-macos", "crates/mdif-core", "crates/mdif-cli"]
+members = ["crates/mdif-macos", "crates/mdif-windows", "crates/mdif-core", "crates/mdif-cli"]
 
 [workspace.package]
 version = "0.1.5"
@@ -27,6 +27,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
+windows-sys = { version = "0.61.2", default-features = false }
 
 mdif-core = { path = "crates/mdif-core" }
 mdif-macos = { path = "crates/mdif-macos" }
+mdif-windows = { path = "crates/mdif-windows" }

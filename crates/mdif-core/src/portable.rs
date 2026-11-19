@@ -45,36 +45,59 @@ impl At for DirEntry {
 }
 
 /// Bytes the file takes on the disk (allocated, not its length).
-pub fn allocated(_at: &(impl At + ?Sized), m: &Metadata) -> u64 {
+pub fn allocated(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(unix)]
     {
+        let _ = at;
         m.blocks() * 512
+    }
+    #[cfg(windows)]
+    {
+        crate::os::fs::file_info(&at.path()).map_or(m.len(), |i| i.allocated)
     }
 }
 
 /// The volume the entry is on. Two entries of one volume give the same
 /// value; 0 when it can't be told.
-pub fn dev(_at: &(impl At + ?Sized), m: &Metadata) -> u64 {
+pub fn dev(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(unix)]
     {
+        let _ = at;
         m.dev()
+    }
+    #[cfg(windows)]
+    {
+        let _ = m;
+        crate::os::fs::file_info(&at.path()).map_or(0, |i| u64::from(i.volume))
     }
 }
 
 /// The file's identity on its volume: the same for every hard link to it.
 /// 0 when it can't be told.
-pub fn file_id(_at: &(impl At + ?Sized), m: &Metadata) -> u64 {
+pub fn file_id(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(unix)]
     {
+        let _ = at;
         m.ino()
+    }
+    #[cfg(windows)]
+    {
+        let _ = m;
+        crate::os::fs::file_info(&at.path()).map_or(0, |i| i.index)
     }
 }
 
 /// How many names the file has (1 when it can't be told).
-pub fn links(_at: &(impl At + ?Sized), m: &Metadata) -> u64 {
+pub fn links(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(unix)]
     {
+        let _ = at;
         m.nlink()
+    }
+    #[cfg(windows)]
+    {
+        let _ = m;
+        crate::os::fs::file_info(&at.path()).map_or(1, |i| u64::from(i.links))
     }
 }
 
@@ -84,6 +107,10 @@ pub fn mtime(m: &Metadata) -> i64 {
     {
         m.mtime()
     }
+    #[cfg(windows)]
+    {
+        unix_seconds(m.modified())
+    }
 }
 
 /// When the entry was last read, in Unix seconds. Where the system doesn't
@@ -92,6 +119,20 @@ pub fn atime(m: &Metadata) -> i64 {
     #[cfg(unix)]
     {
         m.atime()
+    }
+    #[cfg(windows)]
+    {
+        unix_seconds(m.accessed())
+    }
+}
+
+/// A time as Unix seconds, before 1970 negative; 0 when it can't be told.
+#[cfg(windows)]
+fn unix_seconds(t: io::Result<std::time::SystemTime>) -> i64 {
+    match t.map(|t| t.duration_since(std::time::UNIX_EPOCH)) {
+        Ok(Ok(after)) => after.as_secs() as i64,
+        Ok(Err(before)) => -(before.duration().as_secs() as i64),
+        Err(_) => 0,
     }
 }
 
@@ -108,6 +149,14 @@ pub fn is_dataless(m: &Metadata) -> bool {
         let _ = m;
         false
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const OFFLINE: u32 = 0x0000_1000;
+        const RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        m.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
+    }
 }
 
 /// The user who owns the entry, where the system has users by number.
@@ -116,6 +165,11 @@ pub fn uid(m: &Metadata) -> Option<u32> {
     {
         Some(m.uid())
     }
+    #[cfg(windows)]
+    {
+        let _ = m;
+        None
+    }
 }
 
 /// The user this process runs as, where the system has users by number.
@@ -123,6 +177,10 @@ pub fn current_uid() -> Option<u32> {
     #[cfg(unix)]
     {
         Some(unsafe { libc::getuid() })
+    }
+    #[cfg(windows)]
+    {
+        None
     }
 }
 
@@ -136,6 +194,11 @@ pub fn name_after_all() -> &'static OsStr {
         // No name holds 0xFF: UTF-8 never does.
         OsStr::from_bytes(b"\xff")
     }
+    #[cfg(windows)]
+    {
+        // The last code point: no name starts with it.
+        OsStr::new("\u{10FFFF}")
+    }
 }
 
 /// A path as a program prints it in bytes (git's `-z` output). Not UTF-8 on
@@ -145,6 +208,13 @@ pub fn os_str_from_bytes(bytes: &[u8]) -> Cow<'_, OsStr> {
     {
         Cow::Borrowed(OsStr::from_bytes(bytes))
     }
+    #[cfg(windows)]
+    {
+        match String::from_utf8_lossy(bytes) {
+            Cow::Borrowed(s) => Cow::Borrowed(OsStr::new(s)),
+            Cow::Owned(s) => Cow::Owned(s.into()),
+        }
+    }
 }
 
 /// The permission bits of the entry (`0o644`), as `with_mode` takes them.
@@ -153,6 +223,22 @@ pub fn mode_of(m: &Metadata) -> u32 {
     {
         m.permissions().mode() & 0o7777
     }
+    #[cfg(windows)]
+    {
+        // Only read-only is a thing: files are made as they are.
+        if m.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        }
+    }
+}
+
+/// Whether a file can be made readable by its owner alone. Where it can't
+/// (Windows: that takes an access-control list, which isn't written yet),
+/// nothing secret is stored.
+pub fn private_files() -> bool {
+    cfg!(unix)
 }
 
 /// Create the file with these permission bits, where there are any.
@@ -160,6 +246,11 @@ pub fn with_mode(o: &mut OpenOptions, mode: u32) -> &mut OpenOptions {
     #[cfg(unix)]
     {
         o.mode(mode)
+    }
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        o
     }
 }
 
@@ -169,6 +260,12 @@ pub fn set_mode(f: &File, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         f.set_permissions(std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(windows)]
+    {
+        // Files are private to the user's profile by where they are.
+        let _ = (f, mode);
+        Ok(())
     }
 }
 
@@ -193,6 +290,11 @@ pub fn denied() -> io::Error {
     #[cfg(unix)]
     {
         io::Error::from_raw_os_error(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED.
+        io::Error::from_raw_os_error(5)
     }
 }
 

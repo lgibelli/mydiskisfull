@@ -764,8 +764,9 @@ mod tests {
 
     fn write(p: &Path, len: usize) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(p, vec![3u8; len]).unwrap();
-        fs::File::open(p).unwrap().sync_all().unwrap();
+        let mut f = fs::File::create(p).unwrap();
+        std::io::Write::write_all(&mut f, &vec![3u8; len]).unwrap();
+        f.sync_all().unwrap();
     }
 
     fn event(p: &Path) -> Event {
@@ -923,6 +924,8 @@ mod tests {
         assert!(reported >= MIN_GROWTH, "1.5 MB in 300 KB steps: {reported}");
     }
 
+    // Counts links, which Windows listings don't give yet.
+    #[cfg(target_os = "macos")]
     #[test]
     fn rescans_walk_the_subtree_and_hard_links_count_once() {
         let t = tempfile::tempdir().unwrap();

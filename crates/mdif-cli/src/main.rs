@@ -80,6 +80,7 @@ enum Cmd {
         history: History,
     },
     /// Which folders grew or shrank, and what came back after cleanups
+    #[command(hide = !cfg!(target_os = "macos"))]
     Owners {
         /// Window, in hours
         #[arg(long, default_value_t = 24)]
@@ -94,6 +95,7 @@ enum Cmd {
         history: History,
     },
     /// Runaway disk fillers: folders that keep growing, processes that churn
+    #[command(hide = !cfg!(target_os = "macos"))]
     Incidents {
         /// How far back to look, in days
         #[arg(long, default_value_t = 7)]
@@ -265,6 +267,7 @@ enum Cmd {
         db: PathBuf,
     },
     /// Which of your processes are writing to disk, and how fast
+    #[command(hide = !cfg!(target_os = "macos"))]
     Writers {
         /// Sampling interval in seconds
         #[arg(long, default_value_t = 10)]
@@ -416,7 +419,9 @@ enum AgentAction {
 /// What can't run on this OS yet: what a Mac has that the first Windows
 /// release doesn't (Time Machine, tweaks of macOS settings, the launch agent)
 /// or that waits for Windows' own list of what fills a disk (the map and the
-/// categories, and with them suggestions and clean-ups).
+/// categories, and with them suggestions and clean-ups), or the list of the
+/// user's processes and what they write and the change journal (`writers`,
+/// `owners` and `incidents`, which would say "none" for what they can't see).
 const NOT_HERE_YET: &[&str] = &[
     "suggest",
     "clean",
@@ -427,6 +432,9 @@ const NOT_HERE_YET: &[&str] = &[
     "agent",
     "map",
     "space",
+    "writers",
+    "owners",
+    "incidents",
 ];
 
 /// The command the line names, before its arguments are parsed: the first
@@ -612,17 +620,7 @@ mod tests {
 
     #[test]
     fn what_waits_for_this_os_is_named_and_the_trends_are_not() {
-        for trends in [
-            "status",
-            "forecast",
-            "watch",
-            "owners",
-            "incidents",
-            "writers",
-            "alerts",
-            "keep",
-            "knowledge",
-        ] {
+        for trends in ["status", "forecast", "watch", "alerts", "keep", "knowledge"] {
             assert_eq!(not_here_yet(&[trends.to_string()]), None, "{trends}");
         }
         assert_eq!(not_here_yet(&[]), None);

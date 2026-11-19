@@ -115,6 +115,10 @@ pub struct Account {
 }
 
 fn load(dir: &Path) -> Saved {
+    // A file copied here from elsewhere isn't trusted to be private.
+    if !crate::portable::private_files() {
+        return Saved::default();
+    }
     std::fs::read(dir.join(FILE))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -124,6 +128,7 @@ fn load(dir: &Path) -> Saved {
 /// Atomically, readable by its owner only, and kept out of the backups
 /// (the mark is the file's, so each new one gets it).
 fn save(dir: &Path, s: &Saved) -> Result<()> {
+    ensure_private()?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{FILE}.new"));
     let _ = std::fs::remove_file(&tmp);
@@ -155,6 +160,16 @@ pub fn account(dir: &Path) -> Account {
         email: s.tokens.as_ref().and(s.email),
         plan: s.tokens.is_some_and(|t| t.scopes.iter().any(|x| x == PLAN)),
         usage: USAGE,
+    }
+}
+
+/// The tokens are kept in a file only their owner may read; where one can't be
+/// made so, there's no signing in.
+fn ensure_private() -> Result<()> {
+    if crate::portable::private_files() {
+        Ok(())
+    } else {
+        bail!("Signing in with ChatGPT isn't available on this operating system yet")
     }
 }
 
@@ -536,6 +551,8 @@ pub fn sign_in(
     open: &dyn Fn(&str) -> Result<()>,
     wait: Duration,
 ) -> Result<Account> {
+    // Before the browser opens: signing in would end in nowhere to keep it.
+    ensure_private()?;
     let mut saved = load(dir);
     if saved.host.is_empty() {
         saved.host = host_id()?;
@@ -631,6 +648,15 @@ pub fn sign_in(
 /// forgotten here (the registration and the host id stay, for the next
 /// sign-in). False when OpenAI didn't confirm the revocation.
 pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
+    // A token file that can't be trusted here is neither used nor reported as
+    // revoked: say what to do with it.
+    if !crate::portable::private_files() && dir.join(FILE).try_exists()? {
+        bail!(
+            "{} holds a ChatGPT sign-in that can't be used on this operating system yet. \
+             Delete the file, and revoke the sign-in in ChatGPT's settings.",
+            dir.join(FILE).display()
+        );
+    }
     locked(dir, || {
         let mut s = load(dir);
         let Some(t) = s.tokens.take() else {
@@ -926,9 +952,31 @@ pub fn respond(
 }
 
 #[cfg(test)]
+// The stand-in OpenAI is for the sign-in test, which waits for Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(windows)]
+    #[test]
+    fn signing_in_waits_for_files_only_their_owner_can_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let opened = std::cell::Cell::new(false);
+        let said = sign_in(
+            dir.path(),
+            &Endpoints::openai(),
+            &|_| {
+                opened.set(true);
+                Ok(())
+            },
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert!(said.to_string().contains("isn't available"), "{said}");
+        assert!(!opened.get(), "the browser opened");
+        assert!(!dir.path().join(FILE).exists());
+    }
 
     #[test]
     fn secrets_and_host_ids_come_from_the_systems_random_source() {
@@ -1267,6 +1315,8 @@ mod tests {
         save(dir, &s).unwrap();
     }
 
+    // Not where sign-in is refused: Windows, until its token file can be private.
+    #[cfg(unix)]
     #[test]
     fn signing_in_asking_renewing_and_signing_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -1380,6 +1430,8 @@ mod tests {
         assert_eq!(s.client.as_deref(), Some("oaiapp_1"));
     }
 
+    // Not where sign-in is refused.
+    #[cfg(unix)]
     #[test]
     fn a_sign_in_nobody_finishes_ends() {
         let dir = tempfile::tempdir().unwrap();

@@ -423,6 +423,11 @@ pub struct About {
 /// snapshots, purgeable caches, cloud files it can download again): Finder's
 /// "available" less `free`, the free space now.
 pub fn purgeable(path: &Path, free: u64) -> u64 {
+    // Only macOS frees space by itself. Elsewhere "available" less an earlier
+    // reading of "free" would only be what has been deleted since.
+    if !cfg!(target_os = "macos") {
+        return 0;
+    }
     crate::os::fs::available_for_important_usage(path)
         .unwrap_or(0)
         .saturating_sub(free)
