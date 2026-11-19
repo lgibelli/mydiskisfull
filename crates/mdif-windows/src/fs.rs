@@ -12,11 +12,12 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    FileStandardInfo, GetDiskFreeSpaceExW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetLogicalDriveStringsW, GetVolumeNameForVolumeMountPointW,
-    GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileStandardInfo,
+    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetLogicalDriveStringsW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::CreateEventW;
@@ -199,6 +200,46 @@ pub fn file_info(path: &Path) -> io::Result<FileInfo> {
         links: info.nNumberOfLinks,
         allocated: std_info.AllocationSize.max(0) as u64,
     })
+}
+
+/// The reparse tag of what the handle is open on (0 if it has none): what
+/// kind of reparse point, which tells a link (a name surrogate) from a cloud
+/// file or a compressed one, which are still the file they look like.
+pub(crate) fn reparse_tag(file: &File) -> io::Result<u32> {
+    // SAFETY: zeroed is a valid value of this plain struct, and its size is
+    // the one passed; the handle is the open file's.
+    let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.ReparseTag)
+}
+
+/// Whether a reparse tag names another place (a symbolic link, a junction, a
+/// mount point): the name-surrogate bit.
+pub(crate) fn is_link_tag(tag: u32) -> bool {
+    tag & 0x2000_0000 != 0
+}
+
+/// How many names the file at `path` has, if it is the file numbered `index`
+/// on the volume `volume` (what a listing saw: the path may have been
+/// replaced since): one open for attributes and one query, about 13 µs.
+/// Links aren't followed.
+pub fn link_count_of(path: &Path, volume: u32, index: u64) -> io::Result<u32> {
+    let info = by_handle(&open_attributes(path)?)?;
+    let found = u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow);
+    if info.dwVolumeSerialNumber != volume || found != index {
+        return Err(io::Error::other("it is not the file that was listed"));
+    }
+    Ok(info.nNumberOfLinks)
 }
 
 /// The ID of the volume holding `path`.

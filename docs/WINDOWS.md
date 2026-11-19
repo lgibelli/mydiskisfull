@@ -62,13 +62,19 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
 
 ## Known gaps, to carry into the next phases
 
-- A listing reports an entry's length as its allocated size, with no file number and one name.
-  A sparse or compressed file is counted too big and hard links twice, and the path is listed
-  after it was checked. The real listing from an open handle (`FileIdExtdDirectoryInfo`) gives
-  the allocated size and the file number, and fixes the last. It doesn't give the link count, so
-  whether another name for a file lies outside the scanned tree is a separate query per file that
-  has to be priced (Phase 0) and stays open until then. Until then nothing that scans or sizes
-  folders runs on Windows.
+- The listing is read from one open, checked folder handle (`FileIdExtdDirectoryInfo`): allocated
+  size, file number and reparse tag come with it, and every record is bounds-checked before it is
+  read. Still open:
+  - The link count isn't in the listing, so only files of 1 MiB or more are asked for it, by
+    opening them by path (`dir.join(name)`), which looks the name up again. Opening the child
+    relative to the checked folder handle (`NtCreateFile` with a root directory) closes that gap.
+  - A count that can't be had is taken as two names: never more freed than would be, but it can't
+    be told from a file that really has two.
+  - A file with several names shows the size of the name that was listed; another name's entry
+    can be stale until it's closed. A handle's own size would be current.
+  - The file number is the low 8 bytes of the 128-bit ID. NTFS only uses that much; on ReFS two
+    siblings can share it, so ReFS volumes have to keep the whole ID before they are scanned.
+  Until these are closed nothing that scans or sizes folders runs on Windows.
 - History is keyed by the volume's mount point. On Windows it must be the volume's identity (its
   GUID), so two removable disks that take turns as `E:\` don't share a forecast.
 - The owner tracker's rules are rooted at `/` and at macOS's places in the home folder, and the
