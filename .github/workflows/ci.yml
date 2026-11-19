@@ -180,11 +180,19 @@ jobs:
         run: |
           mdif=./target/release/mdif.exe
           db="$RUNNER_TEMP/budget.sqlite3"
+          busy="$USERPROFILE/mdif-ci-budget"
+          rm -rf "$busy"; mkdir -p "$busy"
+          # A folder that changes after the first period, so the cost includes a listing.
+          ( sleep 40; for i in $(seq 1 10); do head -c 3000000 /dev/urandom > "$busy/f$i.bin"; sleep 3; done ) &
           status=0
           timeout 120 $mdif watch --quiet --interval 5 --owners-every 30 --db "$db" || status=$?
           [ "$status" = 124 ] || { echo "the watcher ended with $status"; exit 1; }
+          wait
           $mdif forecast --db "$db"
-          $mdif owners --db "$db" --hours 1
+          $mdif owners --db "$db" --hours 1 --json > "$RUNNER_TEMP/budget-owners.json"
+          cat "$RUNNER_TEMP/budget-owners.json"
+          jq -e '[.growth[] | select(.owner | test("mdif-ci-budget")) | .bytes] | add > 10000000' "$RUNNER_TEMP/budget-owners.json"
+          rm -rf "$busy"
           $mdif incidents --db "$db"
           $mdif forecast --db "$db" --json | jq -e '.watcher_cost
             | .samples >= 20
