@@ -14,8 +14,9 @@
 //! - [`sys`]: when the Mac started, how much swap it holds, Full Disk Access,
 //!   and standard error into a log.
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("mdif-macos only builds on macOS");
+// This crate is empty on every other OS (it only stops being a build error
+// by itself). Whatever uses it picks the backend for its own target.
+#![cfg(target_os = "macos")]
 
 pub mod bulk;
 pub mod changes;
