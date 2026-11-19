@@ -349,8 +349,13 @@ impl Watcher {
         let st = fs::statfs(&self.volume)?;
         // A disk swapped under the same path (a drive letter) is another history.
         let now_key = st.history_key();
-        // (Owner tracking is bound to its volume: a key it holds doesn't change.)
-        if now_key != self.key && self.owners.is_none() {
+        if now_key != self.key {
+            // The folders being followed and the journal's position belong to the
+            // volume that was there: they stop, rather than count another disk's
+            // changes under this one's name.
+            if self.owners.take().is_some() {
+                eprintln!("the volume at {} changed: folder tracking stops", self.key);
+            }
             self.key = now_key;
         }
         let point = SpacePoint {
@@ -410,9 +415,20 @@ impl Watcher {
                     .collect();
                 let first = o.periods == 0;
                 let before = proc::own_usage().0;
-                let (g, p) = o.period(now, &heavy)?;
-                let spent = proc::own_usage().0.saturating_sub(before);
-                (g, Some((p, spent, first)))
+                match o.period(now, &heavy) {
+                    Ok((g, p)) => {
+                        let spent = proc::own_usage().0.saturating_sub(before);
+                        (g, Some((p, spent, first)))
+                    }
+                    // Free space is sampled all the same: a journal that can't be
+                    // read is a gap in the folders, not in the forecast. Tried
+                    // again a period later, not at every sample.
+                    Err(e) => {
+                        eprintln!("the folders weren't measured at {now}: {e:#}");
+                        o.last_period = Some(now);
+                        (Vec::new(), None)
+                    }
+                }
             }
             _ => (Vec::new(), None),
         };
@@ -422,6 +438,7 @@ impl Watcher {
         if let (Some(o), Some(p), Some((cpu, _))) = (&self.owners, period, spent) {
             let last = LastPeriod {
                 at: now,
+                gaps: p.gaps,
                 listed: p.listed,
                 entries: p.entries,
                 deferred: p.deferred,
@@ -652,6 +669,10 @@ const PERIOD_KEY: &str = "watch.last_period";
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LastPeriod {
     pub at: i64,
+    /// Parts of the journal that weren't seen (a volume without a readable one
+    /// is a gap every period): what was measured is less than what happened.
+    #[serde(default)]
+    pub gaps: usize,
     pub listed: usize,
     pub entries: usize,
     pub deferred: usize,

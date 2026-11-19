@@ -228,6 +228,24 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     if owner == Path::new("/private/var/vm") {
         return Fix::Steps(SWAP.into());
     }
+    // `mdif writers` isn't there on Windows (yet): what can be done is by hand.
+    if cfg!(windows) {
+        let temp = parts
+            .windows(3)
+            .any(|w| w[0] == "AppData" && w[1] == "Local" && w[2].eq_ignore_ascii_case("Temp"));
+        return Fix::Steps(if temp {
+            "Temporary files. Settings → System → Storage → Temporary files removes what \
+             isn't in use, and Storage Sense can do it on a schedule; a program that keeps \
+             filling it is the one to look at."
+                .to_string()
+        } else {
+            format!(
+                "Open {name} and see what is growing in it. The program that keeps it may have \
+                 a setting for how much it holds, or something it keeps writing because it is \
+                 failing."
+            )
+        });
+    }
     Fix::Steps(
         "`mdif writers` shows which processes write the most; the app behind it may have a \
          setting for how much it keeps."

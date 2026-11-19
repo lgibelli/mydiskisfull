@@ -6,18 +6,21 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
+use std::ptr::null;
+
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileStandardInfo,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_DESCRIPTOR, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileStandardInfo,
     GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetLogicalDriveStringsW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-    LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
+    GetFinalPathNameByHandleW, GetLogicalDriveStringsW, GetVolumeNameForVolumeMountPointW,
+    GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OpenFileById,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::CreateEventW;
@@ -262,16 +265,42 @@ pub fn link_count_of(path: &Path, volume: u32, index: u64) -> io::Result<u32> {
 
 /// The ID of the volume holding `path`.
 pub fn fsid(path: &Path) -> io::Result<FsId> {
-    Ok(FsId(
-        by_handle(&open_attributes(path)?)?.dwVolumeSerialNumber,
-    ))
+    let serial = by_handle(&open_attributes(path)?)?.dwVolumeSerialNumber;
+    // Remembered, so a number on this volume can be turned back into a place.
+    if let Ok(stats) = statfs(path) {
+        let root = if stats.device.starts_with(r"\\?\Volume{") {
+            stats.device
+        } else {
+            stats.mount_point
+        };
+        let mut known = VOLUMES.lock().unwrap_or_else(|e| e.into_inner());
+        match known.iter_mut().find(|(s, _)| *s == serial) {
+            Some(entry) => entry.1 = PathBuf::from(root),
+            None => known.push((serial, PathBuf::from(root))),
+        }
+    }
+    Ok(FsId(serial))
 }
 
-/// Where the file or folder numbered `inode` on the volume is now. Not
-/// written yet.
-pub fn path_of(_fsid: FsId, _inode: u64) -> io::Result<PathBuf> {
-    Err(unsupported("finding a moved folder by its number"))
+/// Where the folder numbered `inode` on the volume is now, if it is: found by
+/// its number through the volume's root, which is known from an earlier
+/// [`fsid`] of a path on it.
+pub fn path_of(fsid: FsId, inode: u64) -> io::Result<PathBuf> {
+    let root = VOLUMES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(serial, _)| *serial == fsid.0)
+        .map(|(_, root)| root.clone())
+        .ok_or_else(|| io::Error::other("no path on that volume was asked its identity"))?;
+    let volume = open_with(&root, 0)?;
+    folder_by_id(volume.as_raw_handle() as HANDLE, inode)?
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
 }
+
+/// The roots of the volumes whose identity was asked, by serial number: how a
+/// number is turned back into a place ([`path_of`]).
+static VOLUMES: std::sync::Mutex<Vec<(u32, PathBuf)>> = std::sync::Mutex::new(Vec::new());
 
 /// Device id of `path` itself (not following a final link): its volume's
 /// serial number, as the same bits a macOS device number would have.
@@ -359,9 +388,106 @@ fn lock_with(file: &File, overlapped: &mut OVERLAPPED) -> io::Result<()> {
     }
 }
 
+/// The folder numbered `id` on the volume `volume` is a handle on, as a plain path; `Ok(None)` once
+/// it isn't there any more (its removal is a change of the folder that held
+/// it, which has its own record). Any other failure is an error: a change
+/// that couldn't be placed.
+pub(crate) fn folder_by_id(volume: HANDLE, id: u64) -> io::Result<Option<PathBuf>> {
+    let desc = FILE_ID_DESCRIPTOR {
+        dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
+        Type: 0, // FileIdType: the 64-bit number
+        Anonymous: windows_sys::Win32::Storage::FileSystem::FILE_ID_DESCRIPTOR_0 {
+            FileId: id as i64,
+        },
+    };
+    // SAFETY: `desc` is the descriptor the call wants; the handle is checked.
+    let h = unsafe {
+        OpenFileById(
+            volume,
+            &desc,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_NO_RECALL,
+        )
+    };
+    if h.is_null() || h as isize == -1 {
+        let err = io::Error::last_os_error();
+        // File not found, path not found, invalid parameter (a number
+        // that names nothing any more): gone.
+        return match err.raw_os_error() {
+            Some(2 | 3 | 87) => Ok(None),
+            _ => Err(err),
+        };
+    }
+    let mut buf = vec![0u16; 1024];
+    let path = loop {
+        // SAFETY: the handle is open; `buf` is as long as passed.
+        let n =
+            unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, 0) } as usize;
+        if n == 0 {
+            break Err(io::Error::last_os_error());
+        }
+        if n < buf.len() {
+            break Ok(std::ffi::OsString::from_wide(&buf[..n]));
+        }
+        buf.resize(n + 1, 0);
+    };
+    // SAFETY: the handle is ours, and closed once.
+    unsafe { CloseHandle(h) };
+    path.map(|p| Some(plain(PathBuf::from(p))))
+}
+
+/// `\\?\C:\x` as `C:\x`, and `\\?\UNC\s\x` as `\\s\x`: the paths the rest of the
+/// program uses.
+pub(crate) fn plain(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moved_folder_is_found_again_by_its_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = plain(std::fs::canonicalize(dir.path()).unwrap());
+        std::fs::create_dir_all(root.join("a/inner")).unwrap();
+        let id = |parent: &Path, name: &str| {
+            crate::bulk::read_dir(parent)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .inode
+        };
+        let volume = fsid(&root).unwrap();
+        let number = id(&root, "a");
+        assert_eq!(path_of(volume, number).unwrap(), root.join("a"));
+        // Renamed and moved: it is where it went, with what's in it.
+        std::fs::create_dir(root.join("b")).unwrap();
+        std::fs::rename(root.join("a"), root.join("b/moved")).unwrap();
+        assert_eq!(path_of(volume, number).unwrap(), root.join("b/moved"));
+        assert_eq!(
+            path_of(volume, id(&root.join("b/moved"), "inner")).unwrap(),
+            root.join("b/moved/inner")
+        );
+        // Deleted: gone, as a not-found error.
+        std::fs::remove_dir_all(root.join("b/moved")).unwrap();
+        assert_eq!(
+            path_of(volume, number).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        // A volume nobody asked about can't be turned into a place.
+        assert!(path_of(FsId(1), number).is_err());
+    }
 
     #[test]
     fn a_folders_volume_is_told_by_its_space_and_its_number() {
@@ -459,7 +585,6 @@ mod tests {
     fn what_isnt_written_yet_says_so() {
         let p = Path::new(r"C:\");
         for e in [
-            path_of(fsid(p).unwrap(), 1).unwrap_err(),
             trash(p).unwrap_err(),
             set_excluded_from_backup(p, true).unwrap_err(),
             excluded_from_backup(p).unwrap_err(),

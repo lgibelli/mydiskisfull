@@ -149,6 +149,15 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
     }
     if episodes.is_empty() {
         println!("No runaway disk fillers in the last {days} days.");
+        // Said when the last look at the folders had parts it couldn't see.
+        if let Some(last) = mdif_core::watch::recorded_period(&store)?
+            && last.gaps > 0
+        {
+            println!(
+                "The watcher couldn't see every change on the disk, though (the file-system \
+                 journal wasn't fully readable), so some folders may not have been checked."
+            );
+        }
         return Ok(());
     }
     for e in &episodes {

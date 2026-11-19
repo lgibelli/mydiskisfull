@@ -15,17 +15,12 @@
 use std::collections::HashMap;
 use std::io;
 use std::mem::offset_of;
-use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL, FILE_ID_DESCRIPTOR, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OpenFileById,
-};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0,
@@ -261,67 +256,10 @@ impl Volume {
         parse(&buf[..got as usize]).map(Some)
     }
 
-    /// The folder numbered `id` on this volume, as a plain path; `Ok(None)` once
-    /// it isn't there any more (its removal is a change of the folder that held
-    /// it, which has its own record). Any other failure is an error: a change
-    /// that couldn't be placed.
+    /// The folder numbered `id` on this volume, as a plain path (`Ok(None)` once
+    /// it isn't there any more); see [`fs::folder_by_id`].
     fn folder(&self, id: u64) -> io::Result<Option<PathBuf>> {
-        let desc = FILE_ID_DESCRIPTOR {
-            dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
-            Type: 0, // FileIdType: the 64-bit number
-            Anonymous: windows_sys::Win32::Storage::FileSystem::FILE_ID_DESCRIPTOR_0 {
-                FileId: id as i64,
-            },
-        };
-        // SAFETY: `desc` is the descriptor the call wants; the handle is checked.
-        let h = unsafe {
-            OpenFileById(
-                self.handle(),
-                &desc,
-                FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                null(),
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_NO_RECALL,
-            )
-        };
-        if h.is_null() || h as isize == -1 {
-            let err = io::Error::last_os_error();
-            // File not found, path not found, invalid parameter (a number
-            // that names nothing any more): gone.
-            return match err.raw_os_error() {
-                Some(2 | 3 | 87) => Ok(None),
-                _ => Err(err),
-            };
-        }
-        let mut buf = vec![0u16; 1024];
-        let path = loop {
-            // SAFETY: the handle is open; `buf` is as long as passed.
-            let n = unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, 0) }
-                as usize;
-            if n == 0 {
-                break Err(io::Error::last_os_error());
-            }
-            if n < buf.len() {
-                break Ok(std::ffi::OsString::from_wide(&buf[..n]));
-            }
-            buf.resize(n + 1, 0);
-        };
-        // SAFETY: the handle is ours, and closed once.
-        unsafe { CloseHandle(h) };
-        path.map(|p| Some(plain(PathBuf::from(p))))
-    }
-}
-
-/// `\\?\C:\x` as `C:\x`, and `\\?\UNC\s\x` as `\\s\x`: the paths the rest of the
-/// program uses.
-fn plain(path: PathBuf) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        path
+        fs::folder_by_id(self.handle(), id)
     }
 }
 
@@ -366,7 +304,7 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
         )
     })?;
     // The same spelling of the path the folders are given in (8.3 names, `\\?\`).
-    let root = &std::fs::canonicalize(root).map_or_else(|_| root.to_path_buf(), plain);
+    let root = &std::fs::canonicalize(root).map_or_else(|_| root.to_path_buf(), fs::plain);
     let volume = Volume::open(root)?;
     let Some(journal) = volume.query()? else {
         return Ok(Replay::default());
@@ -573,14 +511,14 @@ mod tests {
     #[test]
     fn paths_are_plain_and_compared_without_case() {
         assert_eq!(
-            plain(PathBuf::from(r"\\?\C:\Users\x")),
+            fs::plain(PathBuf::from(r"\\?\C:\Users\x")),
             PathBuf::from(r"C:\Users\x")
         );
         assert_eq!(
-            plain(PathBuf::from(r"\\?\UNC\srv\share\d")),
+            fs::plain(PathBuf::from(r"\\?\UNC\srv\share\d")),
             PathBuf::from(r"\\srv\share\d")
         );
-        assert_eq!(plain(PathBuf::from(r"C:\a")), PathBuf::from(r"C:\a"));
+        assert_eq!(fs::plain(PathBuf::from(r"C:\a")), PathBuf::from(r"C:\a"));
         assert!(under(Path::new(r"C:\"), Path::new(r"c:\Users\X")));
         assert!(under(Path::new(r"C:\Users"), Path::new(r"c:\Users")));
         // Names are exact: `repo` and `Repo` can be two folders.
@@ -608,7 +546,7 @@ mod tests {
     fn a_change_is_found_again_from_a_saved_position() {
         let dir = tempfile::tempdir().unwrap();
         // As the journal spells it: the runner's temp folder is given by its 8.3 name.
-        let root = plain(std::fs::canonicalize(dir.path()).unwrap());
+        let root = fs::plain(std::fs::canonicalize(dir.path()).unwrap());
         let volume_root = fs::statfs(&root).unwrap().mount_point;
         if now(&root) == 0 {
             eprintln!("no readable journal on {volume_root}: skipped");

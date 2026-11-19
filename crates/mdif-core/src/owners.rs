@@ -598,6 +598,7 @@ impl Tracker {
                         }
                     }
                     let (mut own, mut created) = (0u64, 0u64);
+                    let mut written = false;
                     for e in &entries {
                         if e.kind == Kind::Dir {
                             if recursive && !e.is_dataless() && *budget > 0 {
@@ -611,6 +612,7 @@ impl Tracker {
                         if e.crtime > created_after {
                             created += size;
                         }
+                        written |= e.mtime > created_after;
                     }
                     let mut state = Dir {
                         own,
@@ -637,6 +639,12 @@ impl Tracker {
                     }
                     // Growing: listed again next period, whatever FSEvents says.
                     if delta > 0 && delta >= self.steady as i64 {
+                        self.pending.insert(dir.clone());
+                    } else if cfg!(windows) && written {
+                        // NTFS writes a journal record for a file when it is first
+                        // changed and again when it is closed, so a file kept open
+                        // while it grows is silent in between: a folder with a file
+                        // written since the last period is looked at again.
                         self.pending.insert(dir.clone());
                     }
                 }
