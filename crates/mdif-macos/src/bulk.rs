@@ -76,6 +76,10 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// `nlink` of a file whose count couldn't be had. The Mac's listing always has one, so
+/// this is never produced here; it is the Windows backend's, and the same name.
+pub const LINKS_UNKNOWN: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     File,

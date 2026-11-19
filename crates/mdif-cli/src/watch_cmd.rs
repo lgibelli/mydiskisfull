@@ -167,7 +167,9 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     let store = Store::open(db)?;
     let mut w =
         Watcher::new(store, volume)?.with_access_check(mdif_core::os::sys::access_probes(&home()));
-    if owners_every > 0 && !once {
+    // Owners need the change journal's events, which only macOS supplies so far:
+    // without them a period would record folders that weren't measured.
+    if owners_every > 0 && !once && cfg!(target_os = "macos") {
         w = w.with_owners(Rules::for_home(&home()), owners_every as i64)?;
     }
     if once {

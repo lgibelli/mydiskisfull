@@ -195,14 +195,24 @@ pub fn present(entry: &str, home: &Path) -> Option<usize> {
         return Some(std::fs::symlink_metadata(&path).is_ok() as usize);
     }
     let pattern = name.to_string_lossy().to_lowercase();
-    let rd = match std::fs::read_dir(parent) {
-        Ok(rd) => rd,
+    // Windows: a folder a cloud provider keeps online-only would be downloaded
+    // by an ordinary listing, so it goes through the scanner's, which refuses it.
+    #[cfg(windows)]
+    let names: Vec<_> = match crate::os::bulk::read_dir(parent) {
+        Ok(es) => es.into_iter().map(|e| e.name).collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
+        Err(_) => return None,
+    };
+    #[cfg(not(windows))]
+    let names: Vec<_> = match std::fs::read_dir(parent) {
+        Ok(rd) => rd.flatten().map(|e| e.file_name()).collect(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
     };
     Some(
-        rd.flatten()
-            .filter(|e| wild(&pattern, &e.file_name().to_string_lossy().to_lowercase()))
+        names
+            .iter()
+            .filter(|n| wild(&pattern, &n.to_string_lossy().to_lowercase()))
             .count(),
     )
 }
@@ -217,12 +227,18 @@ pub fn expand(entry: &str, home: &Path) -> PathBuf {
 }
 
 /// The names in `path`, lowercased, as seen from `/` (the Data volume's own
-/// mount point left out).
+/// mount point left out). On Windows the drive or share comes first, as a
+/// name: `D:\Archive` isn't `C:\Archive`.
 fn names(path: &Path) -> Vec<String> {
+    use std::path::Prefix::*;
     let path = path.strip_prefix(DATA_ROOT).unwrap_or(path);
     path.components()
         .filter_map(|c| match c {
             Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
+            Component::Prefix(p) => Some(match p.kind() {
+                Disk(d) | VerbatimDisk(d) => format!("{}:", (d as char).to_ascii_lowercase()),
+                _ => p.as_os_str().to_string_lossy().to_lowercase(),
+            }),
             _ => None,
         })
         .collect()
@@ -361,6 +377,28 @@ mod tests {
         assert!(!remove(&file, &home, "~/Virtual Machines.localized").unwrap());
         let k = Keep::load(&file, &home).unwrap();
         assert_eq!(k.entries().collect::<Vec<_>>(), ["~/Movies/Clip*"]);
+    }
+
+    // A drive is part of the name: the same folder on two drives is two folders.
+    #[cfg(windows)]
+    #[test]
+    fn the_same_folder_on_two_drives_is_two_folders() {
+        assert_ne!(
+            names(Path::new(r"C:\Archive")),
+            names(Path::new(r"D:\Archive"))
+        );
+        assert_eq!(
+            names(Path::new(r"c:\archive")),
+            names(Path::new(r"\\?\C:\Archive"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("MyDiskIsFull/keep.txt");
+        let home = dir.path().join("home");
+        assert!(add(&file, &home, r"C:\Archive").unwrap());
+        assert!(add(&file, &home, r"D:\Archive").unwrap());
+        assert!(remove(&file, &home, r"D:\Archive").unwrap());
+        let k = Keep::load(&file, &home).unwrap();
+        assert_eq!(k.entries().collect::<Vec<_>>(), [r"C:\Archive"]);
     }
 
     // A Mac's home, and its firmlinked alias.

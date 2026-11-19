@@ -40,6 +40,7 @@ mod twins {
     const _: fn(&File) -> io::Result<()> = fs::lock;
     const _: fn() -> io::Result<()> = fs::forbid_dataless_materialization;
 
+    const _: u32 = bulk::LINKS_UNKNOWN;
     const _: fn(&Path) -> io::Result<Vec<bulk::Entry>> = bulk::read_dir;
     const _: fn(&Path, bulk::Detail) -> io::Result<Vec<bulk::Entry>> = bulk::read_dir_with;
     const _: fn(&bulk::Entry) -> bool = bulk::Entry::is_dataless;

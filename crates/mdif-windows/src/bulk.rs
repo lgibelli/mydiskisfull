@@ -39,9 +39,13 @@ const REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Files this big, in allocated bytes, have their link count asked of the file
 /// system; smaller ones are taken to have one name. One whose count can't be
-/// had (it isn't ours to open, or it changed since the listing) is counted as
+/// had (it isn't ours to open, or it changed since the listing) is [`LINKS_UNKNOWN`]:
 /// possibly shared, which never says more is freed than would be.
 pub const LINK_MIN: u64 = 1 << 20;
+
+/// `nlink` of a file whose count couldn't be had: more names than any scan will
+/// find, so it's deduplicated but never taken to be wholly ours.
+pub const LINKS_UNKNOWN: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -184,7 +188,8 @@ pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
         }
         let base = buf.as_ptr().cast::<u8>();
         let len = buf.len() * 8;
-        let header = std::mem::offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
+        let header = std::mem::size_of::<FILE_ID_EXTD_DIR_INFO>();
+        let name_offset = std::mem::offset_of!(FILE_ID_EXTD_DIR_INFO, FileName);
         let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
         let mut at = 0usize;
         loop {
@@ -203,7 +208,7 @@ pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
                     .read_unaligned()
             };
             let units = e.FileNameLength as usize / 2;
-            let name_at = at + header;
+            let name_at = at + name_offset;
             if name_at + units * 2 > len {
                 return Err(bad("a name past the listing"));
             }
@@ -252,8 +257,8 @@ fn entry(dir: &Path, dev: i32, name: OsString, e: &FILE_ID_EXTD_DIR_INFO) -> Ent
         && allocated >= LINK_MIN
         && attributes & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) == 0
     {
-        // Possibly shared when it can't be told.
-        nlink = fs::link_count_of(&dir.join(&name), dev as u32, inode).map_or(2, |n| n.max(1));
+        nlink = fs::link_count_of(&dir.join(&name), dev as u32, inode)
+            .map_or(LINKS_UNKNOWN, |n| n.max(1));
     }
     Entry {
         name,

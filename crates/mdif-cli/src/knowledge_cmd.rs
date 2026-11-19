@@ -215,6 +215,10 @@ pub fn missing(min_mb: u64, json_out: bool) -> Result<()> {
             println!("Not measured yet. From the history alone:");
         }
     }
+    if found.is_empty() && measured.is_none() && !cfg!(target_os = "macos") {
+        println!("No folder has been measured on this PC yet, so nothing can be said about them.");
+        return Ok(());
+    }
     if found.is_empty() {
         println!("Something is said about every folder of {min_mb} MB or more on this Mac.");
         return Ok(());

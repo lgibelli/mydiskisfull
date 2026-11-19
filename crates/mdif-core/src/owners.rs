@@ -237,7 +237,13 @@ pub fn entry_size(e: &Entry) -> u64 {
     if e.kind == Kind::Dir || e.is_dataless() {
         return 0;
     }
-    let mut share = e.nlink.max(1) as u64;
+    // A count that couldn't be had (Windows) is taken as two names.
+    let names = if e.nlink == crate::os::bulk::LINKS_UNKNOWN {
+        2
+    } else {
+        e.nlink
+    };
+    let mut share = names.max(1) as u64;
     if e.may_share_blocks() {
         share *= e.clone_refcnt.max(1) as u64;
     }

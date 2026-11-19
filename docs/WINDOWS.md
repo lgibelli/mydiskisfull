@@ -68,8 +68,8 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   - The link count isn't in the listing, so only files of 1 MiB or more are asked for it, by
     opening them by path (`dir.join(name)`), which looks the name up again. Opening the child
     relative to the checked folder handle (`NtCreateFile` with a root directory) closes that gap.
-  - A count that can't be had is taken as two names: never more freed than would be, but it can't
-    be told from a file that really has two.
+  - A count that can't be had is `LINKS_UNKNOWN`: the scanner deduplicates the file but never
+    counts it as wholly ours, and the owner tracker splits it by two.
   - A file with several names shows the size of the name that was listed; another name's entry
     can be stale until it's closed. A handle's own size would be current.
   - The file number is the low 8 bytes of the 128-bit ID. NTFS only uses that much; on ReFS two
