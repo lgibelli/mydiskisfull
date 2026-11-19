@@ -374,7 +374,6 @@ struct Walked {
 /// Allocated bytes of `path`, a folder (every file in it once) or a file: 0
 /// when it doesn't exist, `None` when it can't be read.
 pub fn size_of(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
     // Measuring must never download a cloud placeholder.
     crate::os::fs::forbid_dataless_materialization().ok()?;
     match std::fs::symlink_metadata(path) {
@@ -386,7 +385,7 @@ pub fn size_of(path: &Path) -> Option<u64> {
             };
             scan(path, &opts).ok().map(|s| s.root.totals.allocated)
         }
-        Ok(m) => Some(m.blocks() * 512),
+        Ok(m) => Some(crate::portable::allocated(path, &m)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
         Err(_) => None,
     }
@@ -394,7 +393,7 @@ pub fn size_of(path: &Path) -> Option<u64> {
 
 pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
     if !crate::privacy::may_open(root) {
-        return Err(io::Error::from_raw_os_error(libc::EPERM));
+        return Err(crate::portable::denied());
     }
     let dev = crate::os::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
@@ -441,7 +440,7 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
     let listed = if crate::privacy::may_open(dir) {
         bulk::read_dir(dir)
     } else {
-        Err(io::Error::from_raw_os_error(libc::EPERM))
+        Err(crate::portable::denied())
     };
     let entries = match listed {
         Ok(e) => e,

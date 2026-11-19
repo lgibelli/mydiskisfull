@@ -27,7 +27,6 @@
 //! where there are some.
 
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -344,7 +343,8 @@ impl Git {
         // "XY path", NUL-ended; an ignored folder is listed, not what's in it.
         out.split(|&b| b == 0).filter(|e| !e.is_empty()).all(|e| {
             e.strip_prefix(b"!! ").is_some_and(|rel| {
-                let rel = Path::new(OsStr::from_bytes(rel.strip_suffix(b"/").unwrap_or(rel)));
+                let rel = crate::portable::os_str_from_bytes(rel.strip_suffix(b"/").unwrap_or(rel));
+                let rel = Path::new(&*rel);
                 remade(worktree, main, rel)
             })
         })
@@ -412,7 +412,7 @@ fn parse_list(out: &[u8]) -> Vec<Listed> {
             b"worktree" => {
                 list.extend(cur.take());
                 cur = Some(Listed {
-                    path: PathBuf::from(OsStr::from_bytes(value)),
+                    path: PathBuf::from(crate::portable::os_str_from_bytes(value).into_owned()),
                     head: String::new(),
                     locked: false,
                     prunable: false,
@@ -452,10 +452,13 @@ fn is_agents(path: &Path) -> bool {
 /// any `git status` rewrites it (a shell prompt, an editor looking), and
 /// work shows anyway, uncommitted (not finished) or committed (the log).
 fn last_touched(worktree: &Path) -> Option<i64> {
-    use std::os::unix::fs::MetadataExt;
     let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
     let admin = worktree.join(text.strip_prefix("gitdir:")?.trim());
-    let mtime = |p: PathBuf| std::fs::symlink_metadata(p).ok().map(|m| m.mtime());
+    let mtime = |p: PathBuf| {
+        std::fs::symlink_metadata(p)
+            .ok()
+            .map(|m| crate::portable::mtime(&m))
+    };
     [
         admin.join("HEAD"),
         admin.join("logs/HEAD"),

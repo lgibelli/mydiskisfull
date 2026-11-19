@@ -12,7 +12,6 @@
 
 use std::fmt;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -261,16 +260,14 @@ fn replace_file(path: &Path, text: &str) -> Result<()> {
     let tmp = dir.join(format!(".{name}.mdif-{}", std::process::id()));
     // Created with the old file's mode, so a private file is never readable
     // by others, even for a moment.
-    let mode = std::fs::metadata(&path).map_or(0o644, |m| m.permissions().mode() & 0o7777);
+    let mode = std::fs::metadata(&path).map_or(0o644, |m| crate::portable::mode_of(&m));
     let written = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        let mut f =
+            crate::portable::with_mode(options.write(true).create_new(true), mode).open(&tmp)?;
         f.write_all(text.as_bytes())?;
         // The umask may have narrowed it.
-        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        crate::portable::set_mode(&f, mode)?;
         std::fs::rename(&tmp, &path)
     })();
     if written.is_err() {
@@ -292,6 +289,7 @@ fn remove_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
 
     /// Write `to`, check it reads back, then put `before` back and check
     /// the setting is exactly as it was.

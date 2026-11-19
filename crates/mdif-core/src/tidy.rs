@@ -30,8 +30,6 @@
 //! crosses to another volume or into a cloud placeholder, and never opens
 //! what would show a privacy prompt ([`privacy::may_open`]).
 
-use std::os::macos::fs::MetadataExt as _;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -42,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::clean::{self, Step};
 use crate::keep::Keep;
 use crate::owners::{ARTIFACTS, CODE_ROOTS};
+use crate::portable;
 use crate::privacy;
 use crate::space::{run_within, runtime_name, simctl};
 use crate::store::Store;
@@ -921,7 +920,7 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
             let Ok(m) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            if m.dev() != dev || dataless(&m) {
+            if portable::dev(&path, &m) != dev || dataless(&m) {
                 continue;
             }
             if crate::timemachine::download_cache(&path, home) {
@@ -933,7 +932,7 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    let Ok(dev) = std::fs::symlink_metadata(home).map(|m| m.dev()) else {
+    let Ok(dev) = std::fs::symlink_metadata(home).map(|m| portable::dev(home, &m)) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -1204,7 +1203,7 @@ fn real_dir(p: &Path) -> bool {
 /// does: for a big cache, a few folders' worth of looking, not all of it.
 /// Not into a link, another volume or a cloud placeholder.
 fn holds_at_least(dir: &Path, min: u64) -> bool {
-    let Ok(dev) = std::fs::symlink_metadata(dir).map(|m| m.dev()) else {
+    let Ok(dev) = std::fs::symlink_metadata(dir).map(|m| portable::dev(dir, &m)) else {
         return false;
     };
     let mut total = 0;
@@ -1219,11 +1218,11 @@ fn holds_at_least(dir: &Path, min: u64) -> bool {
                 continue;
             };
             if m.is_dir() {
-                if m.dev() == dev && !dataless(&m) {
+                if portable::dev(&e, &m) == dev && !dataless(&m) {
                     todo.push(e.path());
                 }
             } else {
-                total += m.blocks() * 512;
+                total += portable::allocated(&e, &m);
                 if total >= min {
                     return true;
                 }
@@ -1236,7 +1235,7 @@ fn holds_at_least(dir: &Path, min: u64) -> bool {
 /// A folder whose contents aren't on this disk (a cloud placeholder):
 /// listing it would download them.
 fn dataless(m: &std::fs::Metadata) -> bool {
-    m.st_flags() & crate::os::bulk::SF_DATALESS != 0
+    portable::is_dataless(m)
 }
 
 /// The newest modification time of `dir` and what's in it, `depth` levels
@@ -1261,17 +1260,17 @@ fn newest(dir: &Path, depth: usize, may_open: &dyn Fn(&Path) -> bool) -> Option<
             let Ok(m) = e.metadata() else {
                 continue;
             };
-            if m.dev() != dev {
+            if portable::dev(&e, &m) != dev {
                 continue;
             }
-            *newest = (*newest).max(m.mtime());
+            *newest = (*newest).max(portable::mtime(&m));
             if m.is_dir() && !dataless(&m) {
                 down(&e.path(), depth - 1, dev, newest);
             }
         }
     }
-    let mut t = m.mtime();
-    down(dir, depth, m.dev(), &mut t);
+    let mut t = portable::mtime(&m);
+    down(dir, depth, portable::dev(dir, &m), &mut t);
     Some(t)
 }
 
@@ -1296,10 +1295,10 @@ fn usage(dir: &Path, may_open: &dyn Fn(&Path) -> bool) -> Option<Usage> {
     if !root.is_dir() {
         return None;
     }
-    let dev = root.dev();
+    let dev = portable::dev(dir, &root);
     let mut u = Usage {
-        bytes: root.blocks() * 512,
-        newest: root.mtime(),
+        bytes: portable::allocated(dir, &root),
+        newest: portable::mtime(&root),
     };
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
@@ -1310,17 +1309,17 @@ fn usage(dir: &Path, may_open: &dyn Fn(&Path) -> bool) -> Option<Usage> {
             let Ok(m) = e.metadata() else {
                 continue;
             };
-            if m.dev() != dev {
+            if portable::dev(&e, &m) != dev {
                 continue;
             }
-            u.bytes += m.blocks() * 512;
-            u.newest = u.newest.max(m.mtime());
+            u.bytes += portable::allocated(&e, &m);
+            u.newest = u.newest.max(portable::mtime(&m));
             if m.is_dir() {
                 if !dataless(&m) {
                     todo.push(e.path());
                 }
             } else if m.is_file() {
-                u.newest = u.newest.max(m.atime());
+                u.newest = u.newest.max(portable::atime(&m));
             }
         }
     }

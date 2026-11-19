@@ -19,7 +19,6 @@
 //! it isn't running and quitting it again after; the daily tidy-up does too,
 //! but only while Docker is running ([`answers_now`]): it never starts it.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -125,10 +124,10 @@ pub fn disk_size(home: &Path) -> Option<u64> {
     if !privacy::may_open(&disk) {
         return None;
     }
-    std::fs::symlink_metadata(disk)
+    std::fs::symlink_metadata(&disk)
         .ok()
         .filter(|m| m.is_file())
-        .map(|m| m.blocks() * 512)
+        .map(|m| crate::portable::allocated(&disk, &m))
 }
 
 /// Asks Docker now.

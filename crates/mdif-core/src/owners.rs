@@ -47,8 +47,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::ops::Bound;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::os::bulk::{self, Detail, Entry, Kind};
@@ -500,7 +498,8 @@ impl Tracker {
                         entries: entries.len().min(u32::MAX as usize) as u32,
                         seen: now,
                         steady: 0,
-                        inode: std::fs::symlink_metadata(&dir).map_or(0, |m| m.ino()),
+                        inode: std::fs::symlink_metadata(&dir)
+                            .map_or(0, |m| crate::portable::file_id(&dir, &m)),
                     };
                     let before = self.dirs.get(&dir).copied();
                     if let Some(b) = before {
@@ -532,15 +531,25 @@ impl Tracker {
     /// known by.
     fn known_children(&self, dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        let mut from = Bound::Excluded(dir.to_path_buf());
-        while let Some((p, _)) = self.dirs.range((from, Bound::Unbounded)).next() {
+        let mut next = self
+            .dirs
+            .range::<PathBuf, _>((Bound::Excluded(dir.to_path_buf()), Bound::Unbounded))
+            .next()
+            .map(|(p, _)| p);
+        while let Some(p) = next {
             let Some(name) = p.strip_prefix(dir).ok().and_then(|r| r.iter().next()) else {
                 break;
             };
             let child = dir.join(name);
             // Past all that's below it: paths compare by component, and no
-            // name sorts after 0xFF, which UTF-8 never holds.
-            from = Bound::Excluded(child.join(OsStr::from_bytes(b"\xff")));
+            // name sorts after 0xFF where names are UTF-8 (APFS)...
+            let past = child.join(crate::portable::name_after_all());
+            // ...and where they aren't, step over what still is below it.
+            next = self
+                .dirs
+                .range::<PathBuf, _>((Bound::Excluded(past), Bound::Unbounded))
+                .map(|(q, _)| q)
+                .find(|q| !q.starts_with(&child));
             out.push(child);
         }
         out
@@ -648,7 +657,10 @@ pub fn regrowth(series: &HashMap<String, Vec<(i64, i64)>>, min: u64) -> Vec<Regr
 }
 
 fn is_gone(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 #[cfg(test)]
@@ -664,6 +676,27 @@ mod tests {
 
     fn owner(p: &str) -> String {
         rules().owner_of(Path::new(p)).display().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_past_the_bound_is_still_below_its_folder() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut tr = Tracker::new(Rules::default(), None, 1);
+        let dir = Path::new("/a");
+        let dir_state = Dir {
+            own: 0,
+            entries: 0,
+            seen: 0,
+            steady: 0,
+            inode: 0,
+        };
+        // "\xffa" sorts after the "\xff" the skip jumps to.
+        let odd = dir.join("b").join(std::ffi::OsStr::from_bytes(b"\xffa"));
+        for p in [dir.join("b"), odd, dir.join("c")] {
+            tr.dirs.insert(p, dir_state);
+        }
+        assert_eq!(tr.known_children(dir), [dir.join("b"), dir.join("c")]);
     }
 
     #[test]

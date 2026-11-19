@@ -729,7 +729,7 @@ pub fn yours(path: &Path, home: &Path) -> bool {
 /// folder and on its volume, neither opened nor changed ([`last_used`]) in
 /// the [`UNUSED_FOR`] before `now`. Why not, when it isn't.
 pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
+    use crate::portable;
     let shown = display(file, home);
     if file
         .components()
@@ -756,18 +756,18 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
              folder or build output."
         ));
     }
-    if meta.nlink() > 1 {
+    if portable::links(file, &meta) > 1 {
         return Err(format!(
             "{shown} has other names (hard links): moving one to the Trash frees nothing."
         ));
     }
-    if meta.blocks() * 512 < min {
+    if portable::allocated(file, &meta) < min {
         return Err(format!(
             "{shown} is smaller than {}.",
             crate::units::bytes(min)
         ));
     }
-    if now - last_used(meta.atime(), meta.mtime()) < UNUSED_FOR {
+    if now - last_used(portable::atime(&meta), portable::mtime(&meta)) < UNUSED_FOR {
         return Err(format!(
             "{shown} was opened or changed in the last {} days.",
             UNUSED_FOR / 86_400
@@ -785,7 +785,7 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
 /// system owns. Each update moves aside the files it didn't recognise (old
 /// copies of system settings), and they stay there.
 pub fn relocated(dir: &Path, shared: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
+    use crate::portable;
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -800,13 +800,13 @@ pub fn relocated(dir: &Path, shared: &Path) -> bool {
             .is_some_and(numbered);
     // The system's own; in tests, the temp folder's owner's.
     let owner = if cfg!(test) {
-        unsafe { libc::getuid() }
+        portable::current_uid()
     } else {
-        0
+        Some(0)
     };
     named
         && dir.parent() == Some(shared)
-        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == owner)
+        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && portable::uid(&m) == owner)
 }
 
 /// Those folders in `shared`, oldest first.

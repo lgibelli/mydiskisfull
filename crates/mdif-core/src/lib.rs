@@ -45,6 +45,7 @@ pub mod map;
 pub mod os;
 pub mod os_update;
 pub mod owners;
+pub mod portable;
 pub mod privacy;
 pub mod profile;
 pub mod scan;

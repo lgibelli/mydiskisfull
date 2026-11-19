@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -128,11 +127,9 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{FILE}.new"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut options = OpenOptions::new();
+    let mut f =
+        crate::portable::with_mode(options.write(true).create_new(true), 0o600).open(&tmp)?;
     f.write_all(&serde_json::to_vec_pretty(s)?)?;
     f.sync_all()?;
     std::fs::rename(&tmp, dir.join(FILE))?;
@@ -144,11 +141,8 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
 /// and two at once would spend it twice, which ends the sign-in.
 fn locked<T>(dir: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
     std::fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    let lock = crate::portable::with_mode(options.write(true).create(true).truncate(false), 0o600)
         .open(dir.join(LOCK))?;
     crate::os::fs::lock(&lock)?;
     f()
