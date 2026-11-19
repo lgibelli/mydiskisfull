@@ -82,20 +82,26 @@ impl Disk {
         // no change journal until something makes one (Windows makes one on the
         // system drive, and a program may on others). Then only the folder is left,
         // which is what a volume with no letter looks like.
+        // A letter nothing else uses.
+        let letter = ('D'..='Z')
+            .rev()
+            .find(|l| !Path::new(&format!("{l}:\\")).exists())
+            .expect("a free drive letter");
         diskpart(&format!(
             "create vdisk file=\"{}\" maximum=1536 type=expandable\n\
              select vdisk file=\"{}\"\n\
              attach vdisk\n\
              create partition primary\n\
              format fs=ntfs quick label=mdife2e\n\
-             assign letter=Y\n\
+             assign letter={letter}\n\
              assign mount=\"{}\"\n",
             disk.file.display(),
             disk.file.display(),
             disk.mount.display()
         ));
         let out = Command::new("fsutil")
-            .args(["usn", "createjournal", "m=33554432", "a=4194304", "Y:"])
+            .args(["usn", "createjournal", "m=33554432", "a=4194304"])
+            .arg(format!("{letter}:"))
             .output()
             .unwrap();
         assert!(
@@ -104,7 +110,14 @@ impl Disk {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        diskpart("select volume Y\nremove letter=Y\n");
+        // `mountvol` and not a second DiskPart script, which wants a pause after
+        // the first.
+        let out = Command::new("mountvol")
+            .arg(format!("{letter}:"))
+            .arg("/D")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mountvol: {out:?}");
         disk
     }
 
@@ -189,10 +202,16 @@ fn detects_a_filler_and_a_cleanup_on_a_real_ntfs_volume() {
         "a volume with no letter is kept by its identity: {key}"
     );
     let mut w = w
-        .with_owners(Rules::default().depth(&key, 1), PERIOD)
+        .with_owners(
+            Rules::default().depth(mdif_core::os::fs::normalized(&vol), 1),
+            PERIOD,
+        )
         .unwrap()
         .with_detect(detect());
-    let owner = |d: &str| format!("{}{d}", key);
+    // The folders are spelled as the journal and the lookups spell them, which for
+    // a volume mounted in a folder is through that folder.
+    let root = mdif_core::os::fs::normalized(&vol);
+    let owner = |d: &str| root.join(d).display().to_string();
 
     // The filler: its own thread, appending at a fixed rate with a deadline
     // clock, so the rate holds whatever each tick costs.
@@ -302,7 +321,7 @@ fn detects_a_filler_and_a_cleanup_on_a_real_ntfs_volume() {
     let ours: Vec<(&str, String)> = episodes
         .iter()
         .map(|e| (e.incident.kind.as_str(), e.incident.subject.clone()))
-        .filter(|(_, s)| s.starts_with(&key))
+        .filter(|(_, s)| s.starts_with(&root.display().to_string()))
         .collect();
     assert_eq!(
         ours,
