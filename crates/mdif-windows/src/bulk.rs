@@ -200,9 +200,11 @@ fn refresh_recent(dir: &Path, entries: &mut [Entry]) {
             // The count of this very file once it is big enough to be asked
             // about, as a listing of it would: otherwise a file would change
             // its share between listings by being in or out of this set.
-            if e.allocated >= LINK_MIN {
-                e.nlink = info.links.max(1);
-            }
+            e.nlink = if e.allocated >= LINK_MIN {
+                info.links.max(1)
+            } else {
+                1
+            };
         }
     }
 }

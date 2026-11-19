@@ -192,8 +192,12 @@ impl Rules {
             .depth(at("$Recycle.Bin"), 0)
             .depth(home, 1)
             .depth(home.join(".cache"), 1);
-        // The other profiles of a profiles folder that isn't on the system drive.
-        if let Some(users) = home.parent().filter(|u| root_of(u) != *u) {
+        // The other profiles of a `Users` folder that isn't on the system drive.
+        if let Some(users) = home.parent().filter(|u| {
+            root_of(u) != *u
+                && u.file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("Users"))
+        }) {
             r = r.depth(users, 1);
         }
         for sub in [
