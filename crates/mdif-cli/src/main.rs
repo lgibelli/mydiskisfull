@@ -19,7 +19,7 @@ mod writers_cmd;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use mdif_core::map;
 use mdif_core::scan::Options;
@@ -105,6 +105,7 @@ enum Cmd {
         history: History,
     },
     /// What to do about what fills the disk, so it stays fixed
+    #[command(hide = !cfg!(target_os = "macos"))]
     Suggest {
         /// Print the result as JSON
         #[arg(long)]
@@ -116,6 +117,7 @@ enum Cmd {
     /// delete build output, move what an app left behind to the Trash,
     /// delete local Time Machine snapshots, remove what Docker can. Each is
     /// checked again first
+    #[command(hide = !cfg!(target_os = "macos"))]
     Clean {
         /// What a suggestion offers to clean (its action's paths; a local
         /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it;
@@ -144,6 +146,7 @@ enum Cmd {
     },
     /// Clean-ups the watcher does once a day, each once you turn it on: old
     /// simulators, old Rust build caches, caches apps stopped using
+    #[command(hide = !cfg!(target_os = "macos"))]
     Tidy {
         #[command(subcommand)]
         action: Option<TidyAction>,
@@ -166,6 +169,7 @@ enum Cmd {
     /// Docker: what `docker system prune` would remove, item by item, and
     /// the images no container uses (`-a`). `mdif clean <item>` removes one;
     /// `mdif clean docker:old` what Docker hasn't used in a week
+    #[command(hide = !cfg!(target_os = "macos"))]
     Docker {
         /// Print the list as JSON
         #[arg(long)]
@@ -179,6 +183,7 @@ enum Cmd {
     },
     /// Time Machine: what goes into the backups, what the local snapshots
     /// hold and why, and the build folders and caches still backed up
+    #[command(hide = !cfg!(target_os = "macos"))]
     Timemachine {
         #[command(subcommand)]
         action: Option<TimeMachineAction>,
@@ -208,6 +213,7 @@ enum Cmd {
         volume: PathBuf,
     },
     /// Settings that stop something from filling the disk again
+    #[command(hide = !cfg!(target_os = "macos"))]
     Tweaks {
         #[command(subcommand)]
         action: Option<TweakAction>,
@@ -219,11 +225,13 @@ enum Cmd {
         db: PathBuf,
     },
     /// Run the watcher in the background (a LaunchAgent)
+    #[command(hide = !cfg!(target_os = "macos"))]
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
     /// Where the disk space is now, reconciled with what APFS reports
+    #[command(hide = !cfg!(target_os = "macos"))]
     Map {
         /// Directory to scan (default: the whole Data volume)
         #[arg(long, default_value_os_t = map::boot_volume())]
@@ -240,6 +248,7 @@ enum Cmd {
     },
     /// Where the space goes: macOS, apps, build output, caches, your files...
     /// biggest first, and what of it is waste
+    #[command(hide = !cfg!(target_os = "macos"))]
     Space {
         /// Print the result as JSON (what the app reads)
         #[arg(long)]
@@ -404,10 +413,58 @@ enum AgentAction {
     Status,
 }
 
+/// What can't run on this OS yet: what a Mac has that the first Windows
+/// release doesn't (Time Machine, tweaks of macOS settings, the launch agent)
+/// or that waits for Windows' own list of what fills a disk (the map and the
+/// categories, and with them suggestions and clean-ups).
+const NOT_HERE_YET: &[&str] = &[
+    "suggest",
+    "clean",
+    "tidy",
+    "docker",
+    "timemachine",
+    "tweaks",
+    "agent",
+    "map",
+    "space",
+];
+
+/// The command the line names, before its arguments are parsed: the first
+/// argument, or what `help` is asked about. Names that aren't text are
+/// none (clap says what's wrong with them).
+fn command_named() -> Vec<String> {
+    named_in(std::env::args_os().skip(1))
+}
+
+fn named_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    let mut args = args.map(std::ffi::OsString::into_string);
+    match args.next() {
+        Some(Ok(first)) if first == "help" => {
+            args.next().and_then(Result::ok).into_iter().collect()
+        }
+        Some(Ok(first)) => vec![first],
+        _ => Vec::new(),
+    }
+}
+
+/// The command named, when it can't run on this OS yet. Looked at before the
+/// arguments are parsed, so a bare `mdif agent` or `mdif help agent` says so
+/// rather than asking for what it would need or describing it.
+fn not_here_yet(named: &[String]) -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let first = named.first()?;
+    NOT_HERE_YET.iter().copied().find(|n| n == first)
+}
+
 fn main() -> Result<()> {
     watch_cmd::mark_started();
     mdif_core::knowledge::init(&knowledge_cmd::dir());
     mdif_core::ask::init(&knowledge_cmd::dir());
+    if let Some(name) = not_here_yet(&command_named()) {
+        bail!("`mdif {name}` isn't available on this operating system yet");
+    }
     match Cli::parse().cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
         Cmd::Forecast {
@@ -546,4 +603,59 @@ fn main() -> Result<()> {
         Cmd::Writers { secs, top } => writers_cmd::writers(secs, top),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn what_waits_for_this_os_is_named_and_the_trends_are_not() {
+        for trends in [
+            "status",
+            "forecast",
+            "watch",
+            "owners",
+            "incidents",
+            "writers",
+            "alerts",
+            "keep",
+            "knowledge",
+        ] {
+            assert_eq!(not_here_yet(&[trends.to_string()]), None, "{trends}");
+        }
+        assert_eq!(not_here_yet(&[]), None);
+        for name in NOT_HERE_YET {
+            let expected = (!cfg!(target_os = "macos")).then_some(*name);
+            assert_eq!(not_here_yet(&[name.to_string()]), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_command_is_the_first_argument_or_what_help_is_asked_about() {
+        let named = |args: &[&str]| named_in(args.iter().map(std::ffi::OsString::from));
+        assert_eq!(named(&["agent", "--help"]), ["agent"]);
+        assert_eq!(named(&["help", "agent"]), ["agent"]);
+        assert_eq!(named(&["help"]), Vec::<String>::new());
+        assert!(named(&[]).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let bad = std::ffi::OsString::from_vec(vec![0xff, b'x']);
+            assert!(named_in([bad.clone()].into_iter()).is_empty());
+            assert!(named_in([std::ffi::OsString::from("help"), bad].into_iter()).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_list_names_real_commands_and_hides_them_where_they_wait() {
+        let cli = Cli::command();
+        for name in NOT_HERE_YET {
+            let sub = cli
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no command {name}"));
+            assert_eq!(sub.is_hide_set(), !cfg!(target_os = "macos"), "{name}");
+        }
+    }
 }

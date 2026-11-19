@@ -128,11 +128,21 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     println!("{} free of {}.", bytes(st.avail), bytes(st.total));
     match (&store, &f) {
         (None, _) => {
-            println!("No history yet: `mdif agent install` starts the watcher.");
+            println!(
+                "No history yet: `{}` starts the watcher.",
+                if cfg!(target_os = "macos") {
+                    "mdif agent install"
+                } else {
+                    "mdif watch"
+                }
+            );
             return Ok(());
         }
         (Some(_), None) => {
-            println!("No samples yet. Is the watcher running? (`mdif agent status`)")
+            println!(
+                "No samples yet. Is the watcher running?{}",
+                crate::watch_cmd::running_hint()
+            )
         }
         (Some(_), Some(f)) => println!("{}", trend_line(f, pts.len())),
     }
@@ -154,8 +164,9 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         let age = now - last.ts;
         if age > 3 * interval.max(60) {
             println!(
-                "Watcher: no sample for {}. Is it running? (`mdif agent status`)",
-                duration(age)
+                "Watcher: no sample for {}. Is it running?{}",
+                duration(age),
+                crate::watch_cmd::running_hint()
             );
         }
     }

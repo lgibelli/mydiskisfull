@@ -25,6 +25,11 @@ use crate::scan;
 use crate::settings::{self, Setting};
 use crate::store::{Store, TweakRecord};
 
+/// Whether MyDiskIsFull can change settings on this OS yet.
+pub const fn supported_here() -> bool {
+    cfg!(target_os = "macos")
+}
+
 pub struct Tweak {
     pub id: &'static str,
     pub title: &'static str,

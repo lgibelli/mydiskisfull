@@ -22,9 +22,7 @@ const CLEANUP: u64 = 1_000_000_000;
 
 fn open(db: &Path) -> Result<Option<Store>> {
     if !db.exists() {
-        println!(
-            "No history yet. Start the watcher with `mdif agent install` (or run `mdif watch`)."
-        );
+        println!("No history yet. {}", crate::watch_cmd::start_hint());
         return Ok(None);
     }
     Ok(Some(Store::open(db)?))

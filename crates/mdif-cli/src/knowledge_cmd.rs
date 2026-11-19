@@ -207,9 +207,13 @@ pub fn missing(min_mb: u64, json_out: bool) -> Result<()> {
         return Ok(());
     }
     if measured.is_none() {
-        println!(
-            "Not measured yet: `mdif space` measures the disk (about 30 s). From the history alone:"
-        );
+        if cfg!(target_os = "macos") {
+            println!(
+                "Not measured yet: `mdif space` measures the disk (about 30 s). From the history alone:"
+            );
+        } else {
+            println!("Not measured yet. From the history alone:");
+        }
     }
     if found.is_empty() {
         println!("Something is said about every folder of {min_mb} MB or more on this Mac.");

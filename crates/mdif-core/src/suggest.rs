@@ -349,9 +349,13 @@ fn kept(fix: &Fix, path: &Path, keep: &Keep) -> Option<Fix> {
     let quoted = |e: &str| crate::text::printable(e).into_owned();
     if let Some(entry) = keep.covering(path) {
         return Some(Fix::Leave(format!(
-            "You keep it ({}), so nothing here suggests deleting it. `mdif suggest` lists what \
-             else could go.",
-            quoted(entry)
+            "You keep it ({}), so nothing here suggests deleting it.{}",
+            quoted(entry),
+            if cfg!(target_os = "macos") {
+                " `mdif suggest` lists what else could go."
+            } else {
+                ""
+            }
         )));
     }
     match fix {
@@ -369,12 +373,24 @@ fn kept(fix: &Fix, path: &Path, keep: &Keep) -> Option<Fix> {
 /// `fix`, unless it is a tweak that is already applied or waiting for
 /// approval: then what to do about that instead.
 pub fn settled(fix: Fix, home: &Path) -> Fix {
+    settled_on(fix, home, tweaks::supported_here())
+}
+
+/// [`settled`], for an OS where tweaks are (`supported`) or aren't yet: then
+/// there is no command to offer, only what the tweak would change.
+fn settled_on(fix: Fix, home: &Path, supported: bool) -> Fix {
     let Fix::Tweak(id) = fix else {
         return fix;
     };
     let Some(t) = tweaks::find(id) else {
         return fix;
     };
+    if !supported {
+        return Fix::Steps(format!(
+            "\"{}\": MyDiskIsFull can't change that setting on this operating system yet.",
+            t.title
+        ));
+    }
     match t.status(home) {
         Ok(Status::Applied) => Fix::Steps(format!(
             "\"{}\" is already applied; `mdif tweaks` shows whether it is working.",
@@ -1381,16 +1397,30 @@ mod tests {
         let h = home.path();
         std::fs::create_dir(h.join(".claude")).unwrap();
         let tweak = Fix::Tweak("claude-transcripts");
-        assert_eq!(settled(tweak.clone(), h), tweak);
+        assert_eq!(settled_on(tweak.clone(), h, true), tweak);
         std::fs::write(
             h.join(".claude/settings.json"),
             "{\"cleanupPeriodDays\": 14}",
         )
         .unwrap();
-        let Fix::Steps(s) = settled(tweak, h) else {
+        let Fix::Steps(s) = settled_on(tweak, h, true) else {
             panic!()
         };
         assert!(s.contains("already applied"), "{s}");
+    }
+
+    #[test]
+    fn where_tweaks_arent_supported_the_fix_is_not_a_command() {
+        let home = tempfile::tempdir().unwrap();
+        let fix = settled_on(Fix::Tweak("gradle-caches"), home.path(), false);
+        let Fix::Steps(s) = &fix else {
+            panic!("{fix:?}")
+        };
+        assert!(s.contains("can't change that setting"), "{s}");
+        assert!(!fix.line().contains("mdif tweaks"), "{}", fix.line());
+        // Other fixes pass through.
+        let run = Fix::Leave("x".into());
+        assert_eq!(settled_on(run.clone(), home.path(), false), run);
     }
 
     #[test]

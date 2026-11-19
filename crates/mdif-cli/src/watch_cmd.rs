@@ -15,6 +15,26 @@ use mdif_core::units::bytes;
 use mdif_core::watch::{self, Cost, Watcher};
 use serde_json::{Value, json};
 
+/// How to start the watcher, for whoever has no history: the agent where
+/// the OS has one, or running it by hand.
+pub(crate) fn start_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Start the watcher with `mdif agent install` (or run `mdif watch`)."
+    } else {
+        "Start the watcher with `mdif watch`."
+    }
+}
+
+/// How to look up whether the watcher runs, where there is a way; with its
+/// leading space.
+pub(crate) fn running_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        " (`mdif agent status`)"
+    } else {
+        ""
+    }
+}
+
 /// The watcher's own budget, from the plan.
 const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
 const BUDGET_WRITES_PER_HOUR: u64 = 1_000_000;
@@ -166,9 +186,13 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     // Tidy-ups (`mdif tidy`) are looked at once an hour, after a sample, and
     // run when one that's on hasn't for a day; not in the first minutes,
     // while what starts at login settles.
-    let tidy_store = Store::open(db)
-        .inspect_err(|e| eprintln!("No tidy-ups: {e:#}"))
-        .ok();
+    let tidy_store = if cfg!(target_os = "macos") {
+        Store::open(db)
+            .inspect_err(|e| eprintln!("No tidy-ups: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
     let mut tidy_next = watch::unix_now() + TIDY_DELAY;
     watch::run(
         &mut w,
@@ -314,9 +338,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         return Ok(());
     }
     if !db.exists() {
-        println!(
-            "No history yet. Start the watcher with `mdif agent install` (or run `mdif watch`)."
-        );
+        println!("No history yet. {}", start_hint());
         return Ok(());
     }
     let store = Store::open(db)?;
@@ -378,7 +400,10 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     }
 
     let Some(f) = f else {
-        println!("No samples for {key} yet. Is the watcher running? (`mdif agent status`)");
+        println!(
+            "No samples for {key} yet. Is the watcher running?{}",
+            running_hint()
+        );
         return Ok(());
     };
     let keep = crate::keep_cmd::load_or_warn(db);
