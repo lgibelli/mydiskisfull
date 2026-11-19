@@ -26,23 +26,13 @@ yet" (`NOT_HERE_YET` in `crates/mdif-cli/src/main.rs`): `suggest`, `clean`, `tid
 that list, remove its `#[command(hide = !cfg!(target_os = "macos"))]` (the commands are hidden from
 `--help` on Windows until then), and remove it from the refusal loop in `ci.yml`.
 
-## Do first: the last commit's review findings (`mdif map` on Windows)
+## `mdif map` on Windows
 
-Codex reviewed the `mdif map` commit; only the test-fixture P1 was fixed. The rest are open, in order:
-
-1. **Estimates shown as exact.** A file under 1 MiB is taken to have one name (`LINK_MIN`), so the
-   map's `real`/`private` figures can be off for small hard-linked files. Say so in text and JSON.
-2. **ReFS.** Refuse a ReFS root for now: only the low 8 bytes of a file ID are kept and block clones
-   are not counted. Check the file system type in `map::build`.
-3. **Quota.** `statfs` on Windows is on the caller's quota basis, so `capacity_in_use` can be less than
-   what the scan finds (negative "not measured"). Use volume-wide figures for the reconciliation, or
-   drop the comparison when only quota figures exist.
-4. **Partly hydrated cloud files.** A `RECALL_ON_DATA_ACCESS` file can have resident bytes; `Totals`
-   counts the allocation but `Ctx::account` skips it. Count the resident allocation, from the entry only.
-5. **Files held open.** `read_dir` (`Detail::Full`) lists a growing open file behind; a whole-volume map
-   puts the difference under "not measured". Use the bounded refresh the tracker uses, or say so.
-6. **`whole_volume`** compares the root with the boot volume; compare with `m.fs.mount_point` so
-   `mdif map --root D:\` shows the reconciliation.
+Done, with the findings of its review: estimates are said in words (`notes` in the JSON, `note:` in
+the text: small hard links, files held open for writing, a disk quota), a ReFS root is refused, a quota
+account gets no reconciliation, a partly downloaded cloud file counts what is resident, and the
+reconciliation is shown for any drive's root. Still open: hard-link counts for files under 1 MiB and
+a fresh size for files held open (both are noted, not measured), and a snapshot/restore-point line.
 
 ## Phase 4: the Windows catalogue (parity with the Mac)
 

@@ -46,6 +46,13 @@ pub struct DiskMap {
     pub fs: FsStats,
     pub snapshots: Vec<String>,
     pub scan: Scan,
+    /// What the figures are not exact about, in words (Windows).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The disk figures are the user's quota, not the volume's, so scanned bytes
+    /// can't be reconciled with them.
+    #[serde(skip)]
+    pub quota_limited: bool,
 }
 
 impl DiskMap {
@@ -103,6 +110,37 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
         };
         (container, volume, Vec::new())
     };
+    #[cfg(windows)]
+    let (notes, quota_limited) = {
+        // ReFS keeps 128-bit file IDs and shares blocks between files: neither is
+        // measured, so what it says about hard links and clones would be wrong.
+        let kind = fs::file_system(root).unwrap_or_default();
+        if kind.eq_ignore_ascii_case("ReFS") {
+            anyhow::bail!(
+                "{} is ReFS (a Dev Drive), whose shared blocks and file numbers aren't read yet",
+                st.mount_point
+            );
+        }
+        let quota = fs::quota_limited(root).unwrap_or(false);
+        let mut notes = vec![
+            "A file under 1 MiB is taken to have one name, so a small hard-linked file is counted \
+             once per name here and its share can be off."
+                .to_string(),
+            "A file held open for writing can be listed behind what it really takes; the next scan \
+             after it closes shows it."
+                .to_string(),
+        ];
+        if quota {
+            notes.push(
+                "This account has a disk quota, so the disk's size and free space are its quota's, \
+                 and what the scan finds isn't compared with them."
+                    .to_string(),
+            );
+        }
+        (notes, quota)
+    };
+    #[cfg(not(windows))]
+    let (notes, quota_limited) = (Vec::new(), false);
     let scan = scan::scan(root, opts).with_context(|| format!("scanning {}", root.display()))?;
     Ok(DiskMap {
         root: root.to_path_buf(),
@@ -111,5 +149,7 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
         fs: st,
         snapshots,
         scan,
+        notes,
+        quota_limited,
     })
 }

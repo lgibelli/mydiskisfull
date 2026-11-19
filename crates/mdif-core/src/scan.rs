@@ -324,6 +324,9 @@ impl Ctx<'_> {
     /// blocks with clones comes back with its extents.
     fn account(&self, path: &Path, e: &Entry) -> Option<Shared> {
         if e.is_dataless() {
+            // Nothing on the disk on a Mac; a cloud file on Windows can be partly
+            // here, and what is here is counted (from the entry, not its contents).
+            self.plain.fetch_add(e.allocated, Ordering::Relaxed);
             return None;
         }
         if e.kind != Kind::File || !e.may_share_blocks() || e.shared() == 0 {

@@ -19,8 +19,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_DESCRIPTOR, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileStandardInfo,
     GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetLogicalDriveStringsW, GetVolumeNameForVolumeMountPointW,
-    GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OpenFileById,
+    GetFinalPathNameByHandleW, GetLogicalDriveStringsW, GetVolumeInformationW,
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
+    OpenFileById,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::CreateEventW;
@@ -114,6 +115,43 @@ pub fn statfs(path: &Path) -> io::Result<FsStats> {
         device: volume_name(&mount),
         mount_point: text(&mount),
     })
+}
+
+/// Whether the figures `statfs` gives are the caller's quota and not the
+/// volume's: Windows then gives this user less free space than the volume has.
+pub fn quota_limited(path: &Path) -> io::Result<bool> {
+    let mount = volume_path(&std::path::absolute(path)?)?;
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: `mount` is NUL-ended; the outputs are valid for writes.
+    if unsafe { GetDiskFreeSpaceExW(mount.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(avail != free)
+}
+
+/// The name of the file system of the volume holding `path`: `NTFS`, `ReFS`,
+/// `exFAT`, `FAT32`.
+pub fn file_system(path: &Path) -> io::Result<String> {
+    let mount = volume_path(&std::path::absolute(path)?)?;
+    let mut name = [0u16; 64];
+    // SAFETY: `mount` is NUL-ended; `name` is the length passed; the other
+    // outputs are left out.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            mount.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(text(&name))
 }
 
 /// Mounted file systems, as (volume name, mount point): `(r"\\?\Volume{...}\",
@@ -503,6 +541,18 @@ pub(crate) fn plain(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_file_system_is_named_and_the_quota_is_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = file_system(dir.path()).unwrap();
+        assert!(
+            ["NTFS", "ReFS", "exFAT", "FAT32"].contains(&kind.as_str()),
+            "{kind}"
+        );
+        // A runner's account has no disk quota.
+        assert!(!quota_limited(dir.path()).unwrap());
+    }
 
     #[test]
     fn a_moved_folder_is_found_again_by_its_number() {

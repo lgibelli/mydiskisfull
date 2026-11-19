@@ -36,7 +36,11 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
 
     let t = &m.scan.root.totals;
-    let whole_volume = m.root == map::boot_volume();
+    // The root is the volume's own root, whichever drive: not only the boot volume.
+    let trimmed = |p: &str| p.trim_end_matches(['\\', '/']).to_lowercase();
+    let whole_volume = !m.quota_limited
+        && (m.root == map::boot_volume()
+            || trimmed(&m.root.to_string_lossy()) == trimmed(&m.fs.mount_point));
     println!();
     println!(
         "{} volume: {} in use",
@@ -104,6 +108,9 @@ pub fn print_map(m: &DiskMap, depth: usize) {
         );
     }
 
+    for note in &m.notes {
+        println!("  note: {note}");
+    }
     println!();
     println!(
         "{:>10} {:>10} {:>10} {:>10}",
