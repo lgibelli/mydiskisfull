@@ -471,8 +471,16 @@ impl Watcher {
             };
             meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
             meta.push((GAP_KEY.to_string(), now.to_string()));
+        } else if period.is_some_and(|p| p.gaps == 0)
+            && let Some(at) = recorded_gap(&self.store)?
+        {
+            // Kept apart before a clean period replaces the one it was found in
+            // (a history from before the gap time had its own key).
+            meta.push((GAP_KEY.to_string(), at.to_string()));
         }
-        if let (Some(o), Some(_)) = (&self.owners, period) {
+        // The checkpoint is kept too when the attempt failed (it is where the next
+        // one starts), so a restart in between doesn't skip what happened since.
+        if let (Some(o), true) = (&self.owners, missed || period.is_some()) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
             meta.push((format!("owners.{}.wall", self.key), o.last_wall.to_string()));
         }
