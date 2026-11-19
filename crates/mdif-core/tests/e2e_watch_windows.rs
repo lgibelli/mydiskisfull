@@ -71,28 +71,31 @@ impl Disk {
         let file = dir.join("e2e.vhdx");
         let mount = dir.join("mnt");
         fs::create_dir(&mount).unwrap();
-        let mut disk = Disk {
+        // Armed before anything runs: a disk that is attached and then fails to
+        // format is still detached.
+        let disk = Disk {
             file,
             mount,
-            attached: false,
+            attached: true,
         };
+        // It has a letter for a moment: `fsutil` takes one, and a new volume has
+        // no change journal until something makes one (Windows makes one on the
+        // system drive, and a program may on others). Then only the folder is left,
+        // which is what a volume with no letter looks like.
         diskpart(&format!(
             "create vdisk file=\"{}\" maximum=1536 type=expandable\n\
              select vdisk file=\"{}\"\n\
              attach vdisk\n\
              create partition primary\n\
              format fs=ntfs quick label=mdife2e\n\
+             assign letter=Y\n\
              assign mount=\"{}\"\n",
             disk.file.display(),
             disk.file.display(),
             disk.mount.display()
         ));
-        disk.attached = true;
-        // A new volume has no change journal until something makes one (Windows
-        // makes one on the system drive, and a program may on others).
         let out = Command::new("fsutil")
-            .args(["usn", "createjournal", "m=33554432", "a=4194304"])
-            .arg(&disk.mount)
+            .args(["usn", "createjournal", "m=33554432", "a=4194304", "Y:"])
             .output()
             .unwrap();
         assert!(
@@ -101,6 +104,7 @@ impl Disk {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        diskpart("select volume Y\nremove letter=Y\n");
         disk
     }
 
