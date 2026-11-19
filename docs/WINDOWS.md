@@ -38,7 +38,7 @@ disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `map`, `spa
 | 0 | Spikes on the runner: the NTFS journal without admin, listing speed, whether network I/O counts as writes (placeholders and toasts still to measure) | measured, below |
 | 1 | The seam: builds and tests on Windows, no change on the Mac | done |
 | 2 | The backend for real: listing from a handle (allocated size, file number, links), process list and writes, Recycle Bin, moved folders by number | listing and process list done; Recycle Bin, moved folders open |
-| 3 | The watcher and trends: the change journal (replay from a saved position: done and tested on the runner), per-process writes, the agent (a `Run` key: done), owner rules for Windows, the e2e test on an NTFS disk image | journal and agent done |
+| 3 | The watcher and trends: the change journal, the agent (a `Run` key), owner rules for Windows, growth per folder and incidents, the e2e test on an NTFS volume (a VHDX mounted in a folder), the budget job | done, on a real runner; per-process writes wait for evidence from the disk |
 | 4 | Windows' own catalogue: what fills a disk there, handlers, clean-ups, tidy-ups, tweaks (registry), the backups page | |
 | 5 | An optional elevated service for the journal at full precision and the file table | |
 | 6 | The app (Tauri) | |
