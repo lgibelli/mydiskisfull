@@ -125,15 +125,17 @@ impl Disk {
     /// a disk attached).
     fn detach(mut self) {
         self.attached = false;
-        // DiskPart wants a pause after its last script, and a volume that was just
-        // in use may take a moment to let go.
+        // A volume that was just in use may take a moment to let go.
         let script = format!(
             "select vdisk file=\"{}\"\ndetach vdisk\n",
             self.file.display()
         );
         let mut last = None;
-        for _ in 0..4 {
-            std::thread::sleep(Duration::from_secs(5));
+        for attempt in 0..3 {
+            // The test took long enough before the first; 15 s between scripts after.
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_secs(15));
+            }
             match std::panic::catch_unwind(|| diskpart(&script)) {
                 Ok(()) => return,
                 Err(e) => last = Some(e),
@@ -165,6 +167,8 @@ fn logical_drives() -> Vec<char> {
     }
     // SAFETY: a plain call with no arguments.
     let mask = unsafe { GetLogicalDrives() };
+    // Zero is the call failing (a PC always has a system drive), not no drives.
+    assert_ne!(mask, 0, "{}", std::io::Error::last_os_error());
     ('A'..='Z')
         .filter(|l| mask & (1 << (*l as u8 - b'A')) != 0)
         .collect()
@@ -181,6 +185,10 @@ fn diskpart(script: &str) {
     let _ = fs::remove_file(&file);
     let text = String::from_utf8_lossy(&out.stdout);
     eprintln!("{text}");
+    // Detaching what is already detached is what was wanted.
+    if text.contains("is already detached") {
+        return;
+    }
     assert!(
         out.status.success() && !text.contains("DiskPart has encountered an error"),
         "diskpart failed ({}): {text} {}",
