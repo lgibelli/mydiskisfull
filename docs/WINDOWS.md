@@ -82,6 +82,12 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   evidence from the disk (changes under the process's folders, or the service's ETW disk I/O).
 - History is keyed by the volume's identity (`FsStats::history_key`: its GUID), and the watcher
   re-checks it on every sample, so a disk swapped under a drive letter starts its own history.
+- The watcher at sign-in is `mdif-watch.exe`, the CLI source linked for the GUI subsystem by
+  `build.rs` (MSVC only: Windows GNU builds are not supported, and would show a console). One
+  watcher per history is a lock file beside it, held across sign-ins; the `Run` command line is
+  limited to 259 characters, so `agent install` refuses a longer path.
+- A mapped network drive has no volume GUID, so its history is keyed by its drive letter and a
+  letter remapped to another share would continue the first one's. Watch local disks.
 - The owner tracker's rules are rooted at `/` and at macOS's places in the home folder, and the
   space, keep and knowledge code strips `/System/Volumes/Data` and joins `/`: Windows paths need
   drive prefixes and their own categories.

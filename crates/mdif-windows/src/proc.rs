@@ -249,10 +249,8 @@ pub fn alive(pid: i32) -> bool {
     }
 }
 
-/// The program `pid` runs, while it runs: an ended process whose object is
-/// still held open by someone can still be asked, and has none.
-pub fn path(pid: i32) -> Option<PathBuf> {
-    let p = Process::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).ok()?;
+/// The program an open, live process runs.
+fn image(p: &Process) -> Option<PathBuf> {
     // SAFETY: the handle is open with the right to wait.
     if unsafe { WaitForSingleObject(p.0, 0) } != WAIT_TIMEOUT {
         return None;
@@ -266,6 +264,36 @@ pub fn path(pid: i32) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_wide(
         &buf[..len as usize],
     )))
+}
+
+/// The program `pid` runs, while it runs: an ended process whose object is
+/// still held open by someone can still be asked, and has none.
+pub fn path(pid: i32) -> Option<PathBuf> {
+    image(&Process::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE).ok()?)
+}
+
+/// Ends `pid` if it runs `exe`: the program is looked at, and the process ended,
+/// through one handle, so a process id that was reused since is never touched.
+/// `Ok(false)` if it isn't running that program (or has ended already).
+pub fn terminate_program(pid: i32, exe: &std::path::Path) -> io::Result<bool> {
+    let p = Process::open(
+        pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE,
+    )?;
+    let Some(ran) = image(&p) else {
+        return Ok(false);
+    };
+    if !ran
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&exe.to_string_lossy())
+    {
+        return Ok(false);
+    }
+    // SAFETY: the handle is open, with the right to terminate.
+    if unsafe { TerminateProcess(p.0, 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -282,6 +310,27 @@ mod tests {
             ran.file_name().map(|n| n.to_ascii_lowercase()),
             exe.file_name().map(|n| n.to_ascii_lowercase())
         );
+    }
+
+    #[test]
+    fn a_process_is_ended_only_if_it_runs_the_program_asked_for() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let ping = path(pid).unwrap();
+        // Another program's name: left alone.
+        let other = std::env::current_exe().unwrap();
+        assert!(!terminate_program(pid, &other).unwrap());
+        assert!(alive(pid));
+        // Its own, in any case: ended.
+        let shouted = std::path::PathBuf::from(ping.to_string_lossy().to_uppercase());
+        assert!(terminate_program(pid, &shouted).unwrap());
+        child.wait().unwrap();
+        // Ended already: nothing to do, not an error.
+        assert!(!terminate_program(pid, &ping).unwrap_or(false));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 [package]
+default-run = "mdif"
 name = "mdif-cli"
 description = "Command-line front end for MyDiskIsFull"
 version.workspace = true

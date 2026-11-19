@@ -154,12 +154,12 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         open_log()?;
     }
     // One watcher: two would sample the same history twice. (launchd sees to it
-    // on a Mac; here the name is held for as long as this process lives.)
+    // on a Mac; here a lock file beside the history is held while this process lives.)
     #[cfg(windows)]
     let _only = if once {
         None
     } else {
-        match mdif_core::os::startup::claim(crate::agent_windows::INSTANCE)? {
+        match mdif_core::os::startup::claim(&crate::agent_windows::lock_path(db))? {
             Some(guard) => Some(guard),
             None => anyhow::bail!("the watcher is already running (`mdif agent status`)"),
         }

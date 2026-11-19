@@ -6,18 +6,12 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE,
-};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_EXPAND_SZ,
     REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
     RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
-use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW};
-
-/// The right to wait on an object (`SYNCHRONIZE`), enough to see a mutex exists.
-const SYNCHRONIZE: u32 = 0x0010_0000;
 
 /// The programs that start when this user logs in.
 pub const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -172,8 +166,10 @@ pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
         return Ok(None);
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .take_while(|&u| u != 0)
         .collect();
     Ok(Some(String::from_utf16_lossy(&units)))
@@ -282,50 +278,36 @@ fn remove_login_item_in(run: &str, approved_key: &str, name: &str) -> io::Result
 }
 
 /// Being the one process of its kind: held for as long as it lives.
-pub struct Instance(HANDLE);
+pub struct Instance(#[allow(dead_code)] std::fs::File);
 
-// SAFETY: a mutex handle may be closed from any thread.
-unsafe impl Send for Instance {}
+/// `ERROR_SHARING_VIOLATION`: another process has the file open to itself.
+const SHARING_VIOLATION: i32 = 32;
 
-impl Drop for Instance {
-    fn drop(&mut self) {
-        // SAFETY: the handle is ours, and closed once.
-        unsafe { CloseHandle(self.0) };
+/// Takes `lock` for this process: a file nobody else may open while it's held.
+/// `None` if another process has it. Windows lets go of it when the process
+/// ends, however it ends, so a crash leaves nothing stale; and being a file,
+/// it holds across every sign-in of the same user, not just one session.
+pub fn claim(lock: &std::path::Path) -> io::Result<Option<Instance>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(lock)
+    {
+        Ok(file) => Ok(Some(Instance(file))),
+        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-/// Takes the name `name` (in this logon session) for this process: `None` if
-/// another process has it. Windows frees it when the process ends, however it
-/// ends, so a crash leaves nothing stale.
-pub fn claim(name: &str) -> io::Result<Option<Instance>> {
-    let wide = wide(&format!("Local\\{name}"));
-    // SAFETY: `wide` is NUL-ended; the last error is read at once.
-    let (h, err) = unsafe {
-        let h = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
-        (h, io::Error::last_os_error())
-    };
-    if h.is_null() {
-        return Err(err);
+/// Whether some process holds `lock` ([`claim`]).
+pub fn is_claimed(lock: &std::path::Path) -> bool {
+    match std::fs::File::open(lock) {
+        Ok(_) => false,
+        Err(e) => e.raw_os_error() == Some(SHARING_VIOLATION),
     }
-    let mine = Instance(h);
-    if err.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
-        // Another has it: this handle is only a second one on the same mutex.
-        return Ok(None);
-    }
-    Ok(Some(mine))
-}
-
-/// Whether some process holds `name` ([`claim`]).
-pub fn is_claimed(name: &str) -> bool {
-    let wide = wide(&format!("Local\\{name}"));
-    // SAFETY: `wide` is NUL-ended; the handle, if any, is closed at once.
-    let h = unsafe { OpenMutexW(SYNCHRONIZE, 0, wide.as_ptr()) };
-    if h.is_null() {
-        return false;
-    }
-    // SAFETY: the handle is ours.
-    unsafe { CloseHandle(h) };
-    true
 }
 
 #[cfg(test)]
@@ -388,17 +370,18 @@ mod tests {
     }
 
     #[test]
-    fn a_name_is_held_by_one_process_until_it_lets_go() {
-        let name = format!("MyDiskIsFullTest-{}", std::process::id());
-        assert!(!is_claimed(&name));
-        let first = claim(&name).unwrap().expect("the first takes it");
-        assert!(is_claimed(&name));
-        assert!(claim(&name).unwrap().is_none(), "the second doesn't");
-        // Still the first's after the second let go of its handle.
-        assert!(is_claimed(&name));
+    fn a_lock_is_held_by_one_process_until_it_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("watcher.lock");
+        assert!(!is_claimed(&lock));
+        let first = claim(&lock).unwrap().expect("the first takes it");
+        assert!(is_claimed(&lock));
+        assert!(claim(&lock).unwrap().is_none(), "the second doesn't");
+        // Still the first's after the second gave up.
+        assert!(is_claimed(&lock));
         drop(first);
-        assert!(!is_claimed(&name));
-        assert!(claim(&name).unwrap().is_some());
+        assert!(!is_claimed(&lock));
+        assert!(claim(&lock).unwrap().is_some());
     }
 
     #[test]

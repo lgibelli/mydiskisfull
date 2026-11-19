@@ -163,9 +163,28 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
 
 pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
     let file = open_listing(dir)?;
-    let handle = file.as_raw_handle() as HANDLE;
     let dev = fs::by_handle(&file)?.dwVolumeSerialNumber as i32;
     let mut out = Vec::new();
+    each_record(&file, |e, name| out.push(entry(dir, dev, name, e)))?;
+    Ok(out)
+}
+
+/// The names in `dir`, from the same checked open as [`read_dir`] and nothing
+/// else read of what's in it: no entry is sized and no file is opened.
+pub fn names(dir: &Path) -> io::Result<Vec<OsString>> {
+    let file = open_listing(dir)?;
+    let mut out = Vec::new();
+    each_record(&file, |_, name| out.push(name))?;
+    Ok(out)
+}
+
+/// Calls `visit` with every record of the open folder `file` and its name
+/// (`.` and `..` left out).
+fn each_record(
+    file: &File,
+    mut visit: impl FnMut(&FILE_ID_EXTD_DIR_INFO, OsString),
+) -> io::Result<()> {
+    let handle = file.as_raw_handle() as HANDLE;
     // 8-byte aligned, as the records are.
     let mut buf = vec![0u64; 32 * 1024];
     let mut class = FileIdExtdDirectoryRestartInfo;
@@ -220,7 +239,7 @@ pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
                 std::slice::from_raw_parts(base.add(name_at).cast::<u16>(), units)
             });
             if name != "." && name != ".." {
-                out.push(entry(dir, dev, name, &e));
+                visit(&e, name);
             }
             let next = e.NextEntryOffset as usize;
             if next == 0 {
@@ -233,7 +252,7 @@ pub fn read_dir_with(dir: &Path, _detail: Detail) -> io::Result<Vec<Entry>> {
             at += next;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn entry(dir: &Path, dev: i32, name: OsString, e: &FILE_ID_EXTD_DIR_INFO) -> Entry {
@@ -352,6 +371,27 @@ mod tests {
             by_name(&entries, "small").inode,
             by_name(&entries, "small2").inode
         );
+    }
+
+    #[test]
+    fn names_alone_are_listed_through_the_same_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("Sub")).unwrap();
+        let mut names: Vec<_> = names(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Sub", "a.txt"]);
+        // What read_dir refuses, names refuses too: a file isn't a folder.
+        assert!(names_of_file(&dir.path().join("a.txt")));
+        assert!(super::names(&dir.path().join("missing")).is_err());
+    }
+
+    fn names_of_file(p: &Path) -> bool {
+        super::names(p).is_err()
     }
 
     #[test]

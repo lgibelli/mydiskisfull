@@ -196,22 +196,24 @@ pub fn present(entry: &str, home: &Path) -> Option<usize> {
     }
     let pattern = name.to_string_lossy().to_lowercase();
     // Windows: a folder a cloud provider keeps online-only would be downloaded
-    // by an ordinary listing, so the scanner's checked open comes first, and
-    // refuses it (unknown, not none).
+    // by an ordinary listing, so the names come through the scanner's checked
+    // open, which refuses it (unknown, not none).
     #[cfg(windows)]
-    match crate::os::bulk::open_dir(parent) {
-        Ok(_) => {}
+    let names = match crate::os::bulk::names(parent) {
+        Ok(names) => names,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
-    }
-    let rd = match std::fs::read_dir(parent) {
-        Ok(rd) => rd,
+    };
+    #[cfg(not(windows))]
+    let names: Vec<_> = match std::fs::read_dir(parent) {
+        Ok(rd) => rd.flatten().map(|e| e.file_name()).collect(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(0),
         Err(_) => return None,
     };
     Some(
-        rd.flatten()
-            .filter(|e| wild(&pattern, &e.file_name().to_string_lossy().to_lowercase()))
+        names
+            .iter()
+            .filter(|n| wild(&pattern, &n.to_string_lossy().to_lowercase()))
             .count(),
     )
 }

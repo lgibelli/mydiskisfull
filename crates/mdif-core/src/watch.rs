@@ -343,7 +343,8 @@ impl Watcher {
         let st = fs::statfs(&self.volume)?;
         // A disk swapped under the same path (a drive letter) is another history.
         let now_key = st.history_key();
-        if now_key != self.key {
+        // (Owner tracking is bound to its volume: a key it holds doesn't change.)
+        if now_key != self.key && self.owners.is_none() {
             self.key = now_key;
         }
         let point = SpacePoint {

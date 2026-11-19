@@ -129,20 +129,21 @@ jobs:
           assert subsystem('target/release/mdif-watch.exe') == 2, 'mdif-watch must be a GUI program'
           assert subsystem('target/release/mdif.exe') == 3, 'mdif must be a console program'
           PY
-          $mdif agent status | tee /dev/stderr | grep -q "Starts at sign-in: no"
+          out=$($mdif agent status); echo "$out"
+          echo "$out" | grep -q "Starts at sign-in: no"
           $mdif agent install --interval 60
-          sleep 8
-          $mdif agent status | tee /dev/stderr | grep -q "Watcher: running"
-          $mdif agent status | grep -q "Starts at sign-in: yes"
+          out=$($mdif agent status); echo "$out"
+          echo "$out" | grep -q "Watcher: running"
+          echo "$out" | grep -q "Starts at sign-in: yes"
           # The first sample is taken at once, in the default history.
           $mdif forecast --json | jq -e '.samples >= 1'
           # A second watcher refuses to run beside it.
           if out=$(timeout 30 $mdif watch --interval 60 2>&1); then echo "a second watcher ran"; exit 1; fi
           echo "$out" | grep -q "already running" || { echo "$out"; exit 1; }
           $mdif agent uninstall
-          sleep 3
-          $mdif agent status | tee /dev/stderr | grep -q "Watcher: not running"
-          $mdif agent status | grep -q "Starts at sign-in: no"
+          out=$($mdif agent status); echo "$out"
+          echo "$out" | grep -q "Watcher: not running"
+          echo "$out" | grep -q "Starts at sign-in: no"
 
   windows-arm:
     name: check (Windows on ARM)
