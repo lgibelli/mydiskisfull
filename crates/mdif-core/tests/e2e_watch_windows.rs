@@ -85,7 +85,7 @@ impl Disk {
         // A letter nothing else uses.
         let letter = ('D'..='Z')
             .rev()
-            .find(|l| !Path::new(&format!("{l}:\\")).exists())
+            .find(|l| !logical_drives().contains(l))
             .expect("a free drive letter");
         diskpart(&format!(
             "create vdisk file=\"{}\" maximum=1536 type=expandable\n\
@@ -125,10 +125,21 @@ impl Disk {
     /// a disk attached).
     fn detach(mut self) {
         self.attached = false;
-        diskpart(&format!(
+        // DiskPart wants a pause after its last script, and a volume that was just
+        // in use may take a moment to let go.
+        let script = format!(
             "select vdisk file=\"{}\"\ndetach vdisk\n",
             self.file.display()
-        ));
+        );
+        let mut last = None;
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_secs(5));
+            match std::panic::catch_unwind(|| diskpart(&script)) {
+                Ok(()) => return,
+                Err(e) => last = Some(e),
+            }
+        }
+        std::panic::resume_unwind(last.unwrap());
     }
 }
 
@@ -145,6 +156,20 @@ impl Drop for Disk {
     }
 }
 
+/// The letters in use, from Windows's list of logical drives (which doesn't depend
+/// on whether a drive has media in it).
+fn logical_drives() -> Vec<char> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetLogicalDrives() -> u32;
+    }
+    // SAFETY: a plain call with no arguments.
+    let mask = unsafe { GetLogicalDrives() };
+    ('A'..='Z')
+        .filter(|l| mask & (1 << (*l as u8 - b'A')) != 0)
+        .collect()
+}
+
 fn diskpart(script: &str) {
     let file = std::env::temp_dir().join(format!("mdif-e2e-{}.diskpart", std::process::id()));
     fs::write(&file, script).unwrap();
@@ -158,7 +183,8 @@ fn diskpart(script: &str) {
     eprintln!("{text}");
     assert!(
         out.status.success() && !text.contains("DiskPart has encountered an error"),
-        "diskpart failed: {text} {}",
+        "diskpart failed ({}): {text} {}",
+        out.status,
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -318,10 +344,11 @@ fn detects_a_filler_and_a_cleanup_on_a_real_ntfs_volume() {
     for e in &episodes {
         eprintln!("episode: {}", e.incident.sentence(None));
     }
+    // The store is this test's alone and watches this volume alone: every episode
+    // in it is about the filler, and there is one.
     let ours: Vec<(&str, String)> = episodes
         .iter()
         .map(|e| (e.incident.kind.as_str(), e.incident.subject.clone()))
-        .filter(|(_, s)| s.starts_with(&root.display().to_string()))
         .collect();
     assert_eq!(
         ours,
