@@ -38,7 +38,7 @@ disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `map`, `spa
 | 0 | Spikes on the runner: the NTFS journal without admin, listing speed, whether network I/O counts as writes (placeholders and toasts still to measure) | measured, below |
 | 1 | The seam: builds and tests on Windows, no change on the Mac | done |
 | 2 | The backend for real: listing from a handle (allocated size, file number, links), process list and writes, Recycle Bin, moved folders by number | listing and process list done; Recycle Bin, moved folders open |
-| 3 | The watcher and trends: the change journal, per-process writes, the agent (a `Run` key: done), the e2e test on an NTFS disk image | |
+| 3 | The watcher and trends: the change journal (replay from a saved position: done and tested on the runner), per-process writes, the agent (a `Run` key: done), owner rules for Windows, the e2e test on an NTFS disk image | journal and agent done |
 | 4 | Windows' own catalogue: what fills a disk there, handlers, clean-ups, tidy-ups, tweaks (registry), the backups page | |
 | 5 | An optional elevated service for the journal at full precision and the file table | |
 | 6 | The app (Tauri) | |
@@ -82,6 +82,12 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   evidence from the disk (changes under the process's folders, or the service's ETW disk I/O).
 - History is keyed by the volume's identity (`FsStats::history_key`: its GUID), and the watcher
   re-checks it on every sample, so a disk swapped under a drive letter starts its own history.
+- The journal's position is a `u64`: the USN in eights (44 bits, 140 TB) under a 19-bit tag of the
+  journal's id, so a journal made again is a gap (one in half a million is mistaken for the same).
+  It is read with the unprivileged call on the root of the volume the watched folder is mounted
+  on; a volume with no journal, or none this user may read, is a gap. It hasn't been checked as a
+  standard (non-administrator) account, only as an administrator, and ReFS (128-bit file numbers,
+  version 3 records) isn't read. Windows owner tracking isn't switched on yet.
 - The watcher at sign-in is `mdif-watch.exe`, the CLI source linked for the GUI subsystem by
   `build.rs` (MSVC only: Windows GNU builds are not supported, and would show a console). One
   watcher per history is a lock file beside it, held across sign-ins; the `Run` command line is
