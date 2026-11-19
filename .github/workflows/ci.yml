@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A measurement run doesn't supersede the checks, nor they it.
+  group: ci-${{ github.ref }}-${{ inputs.spikes }}
   cancel-in-progress: true
 
 env:
