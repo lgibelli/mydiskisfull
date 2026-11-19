@@ -204,7 +204,7 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
         /// Volume (the automatic free-space floor depends on its size)
-        #[arg(long, default_value = map::DATA_ROOT, global = true)]
+        #[arg(long, default_value_os_t = map::boot_volume(), global = true)]
         volume: PathBuf,
     },
     /// Settings that stop something from filling the disk again
@@ -226,7 +226,7 @@ enum Cmd {
     /// Where the disk space is now, reconciled with what APFS reports
     Map {
         /// Directory to scan (default: the whole Data volume)
-        #[arg(long, default_value = map::DATA_ROOT)]
+        #[arg(long, default_value_os_t = map::boot_volume())]
         root: PathBuf,
         /// Levels of the tree to print
         #[arg(long, default_value_t = 3)]
@@ -272,7 +272,7 @@ struct History {
     #[arg(long, default_value_os_t = watch_cmd::default_db())]
     db: PathBuf,
     /// Volume to watch
-    #[arg(long, default_value = map::DATA_ROOT)]
+    #[arg(long, default_value_os_t = map::boot_volume())]
     volume: PathBuf,
 }
 

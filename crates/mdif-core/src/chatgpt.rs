@@ -281,7 +281,7 @@ fn http(url: &str, bearer: Option<&str>, body: Option<(&str, &str)>, secs: u64) 
         set("header", &format!("Content-Type: {kind}"));
         set("data-binary", data);
     }
-    let mut curl = Command::new("/usr/bin/curl");
+    let mut curl = Command::new(crate::tools::curl());
     curl.args(["--config", "-"]);
     let out = crate::space::run_fed(curl, Some(cfg.into_bytes()), Duration::from_secs(secs + 10))
         .ok_or_else(|| anyhow!("OpenAI didn't answer in time"))?;

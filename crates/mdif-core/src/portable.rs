@@ -172,6 +172,22 @@ pub fn set_mode(f: &File, mode: u32) -> io::Result<()> {
     }
 }
 
+/// The user's home folder, from the environment (`$HOME`; the profile
+/// folder on Windows). In the App Sandbox that is the app's container.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(crate::os::sys::account_home)
+    }
+}
+
 /// "Not permitted", as the system says it, for what we refuse to open.
 pub fn denied() -> io::Error {
     #[cfg(unix)]

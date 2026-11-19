@@ -10,9 +10,29 @@ use serde::Serialize;
 use crate::apfs::{self, Container, Volume};
 use crate::scan::{self, Options, Scan};
 
-/// Where the boot Data volume is mounted; `/Users`, `/Applications`,
-/// `/Library`, `/private`, `/opt` ... are firmlinks into it.
+/// Where macOS mounts the boot Data volume; `/Users`, `/Applications`,
+/// `/Library`, `/private`, `/opt` ... are firmlinks into it. Paths are shown
+/// without it. No path of another OS starts with it, so stripping it from
+/// one there changes nothing.
 pub const DATA_ROOT: &str = "/System/Volumes/Data";
+
+/// The boot volume, where the user's files are: the Data volume on macOS, the
+/// system drive on Windows.
+pub fn boot_volume() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from(DATA_ROOT)
+    }
+    #[cfg(windows)]
+    {
+        // The drive Windows is installed on, whichever letter it has.
+        let system = crate::os::sys::system_directory();
+        system
+            .ancestors()
+            .last()
+            .map_or(system.clone(), Path::to_path_buf)
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskMap {

@@ -304,7 +304,7 @@ impl Watcher {
         };
         // The boot volume's paths are reported through its firmlinks
         // (`/Users`, `/private`, ...), so watch from the root.
-        let root = if self.key == DATA_ROOT {
+        let root = if cfg!(target_os = "macos") && self.key == DATA_ROOT {
             PathBuf::from("/")
         } else {
             PathBuf::from(&self.key)

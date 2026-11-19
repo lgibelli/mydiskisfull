@@ -32,7 +32,6 @@ use serde::Serialize;
 
 use crate::clean::{self, Action};
 use crate::keep::Keep;
-use crate::map::DATA_ROOT;
 use crate::owners::{ARTIFACTS, CODE_ROOTS};
 use crate::store::Store;
 use crate::{privacy, scan, space, worktrees};
@@ -572,14 +571,15 @@ pub fn glance(home: &Path, now: i64) -> Report {
     let all = tries(&finished, &attempts);
     let running = running();
 
-    let names = crate::apfs::local_snapshots(Path::new(DATA_ROOT)).unwrap_or_default();
+    let volume = crate::map::boot_volume();
+    let names = crate::apfs::local_snapshots(&volume).unwrap_or_default();
     let reference = prefs.destinations.iter().filter_map(|d| d.reference).max();
     let snaps = snapshots(&names, reference);
-    let free = crate::os::fs::statfs(Path::new(DATA_ROOT)).map_or(0, |s| s.avail);
+    let free = crate::os::fs::statfs(&volume).map_or(0, |s| s.avail);
     let held = if snaps.is_empty() {
         0
     } else {
-        space::purgeable(Path::new(DATA_ROOT), free)
+        space::purgeable(&volume, free)
     };
     let backlog = if set_up && prefs.auto {
         backlog(&all, prefs.interval, running.is_some(), held, now)

@@ -16,7 +16,7 @@ pub const LABEL: &str = "io.github.lgibelli.mydiskisfull.watch";
 pub const APP_LABEL: &str = "io.github.lgibelli.mydiskisfull.watcher";
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
+    mdif_core::portable::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 fn plist_path() -> PathBuf {

@@ -46,6 +46,10 @@ pub fn may_open(path: &Path) -> bool {
 /// network volumes prompt; an internal one under /Volumes can't be told
 /// apart by its path).
 pub fn prompts(path: &Path) -> bool {
+    // Only macOS asks (TCC); nothing else shows a prompt for opening a folder.
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
     let path = path.strip_prefix(DATA_ROOT).map_or(path, |rest| rest);
     if path.starts_with("/Volumes") && path.components().count() > 2 {
         return true;
@@ -89,6 +93,7 @@ pub fn prompts(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_folders_that_prompt() {
         for p in [
@@ -119,6 +124,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn avoided_only_when_asked() {
         let _off_after = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
@@ -128,5 +134,17 @@ mod tests {
         assert!(may_open(Path::new("/Users/me/devel")));
         avoid_prompts(false);
         assert!(may_open(docs));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nothing_prompts_off_macos() {
+        let _off_after = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+        avoid_prompts(true);
+        for p in ["/Users/me/Documents/x", r"C:\Users\me\Documents\x"] {
+            assert!(!prompts(Path::new(p)), "{p}");
+            assert!(may_open(Path::new(p)), "{p}");
+        }
+        avoid_prompts(false);
     }
 }

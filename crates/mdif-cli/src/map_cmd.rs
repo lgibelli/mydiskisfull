@@ -33,7 +33,7 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
 
     let t = &m.scan.root.totals;
-    let whole_volume = m.root == std::path::Path::new(map::DATA_ROOT);
+    let whole_volume = m.root == map::boot_volume();
     println!();
     println!(
         "{} volume: {} in use",

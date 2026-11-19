@@ -49,6 +49,7 @@ const DEFAULTS: &[&str] = &[
 
 /// Real git binaries. `/usr/bin/git` is left out: without the developer
 /// tools it offers to install them, in a dialog.
+#[cfg(target_os = "macos")]
 const GITS: &[&str] = &[
     "/Library/Developer/CommandLineTools/usr/bin/git",
     "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
@@ -176,11 +177,20 @@ struct Listed {
 
 impl Git {
     fn find() -> Option<Git> {
-        let developer =
-            std::env::var_os("DEVELOPER_DIR").map(|d| Path::new(&d).join("usr/bin/git"));
-        developer
+        #[cfg(target_os = "macos")]
+        let candidates = std::env::var_os("DEVELOPER_DIR")
+            .map(|d| Path::new(&d).join("usr/bin/git"))
             .into_iter()
-            .chain(GITS.iter().map(PathBuf::from))
+            .chain(GITS.iter().map(PathBuf::from));
+        // Git for Windows puts itself on PATH; where it doesn't, it's where
+        // its installer puts it, for everyone or for the user alone.
+        #[cfg(windows)]
+        let candidates = crate::tools::on_path("git.exe")
+            .into_iter()
+            .chain(crate::tools::program_files(r"Git\cmd\git.exe"))
+            .chain(crate::os::sys::local_app_data().map(|d| d.join(r"Programs\Git\cmd\git.exe")));
+        candidates
+            .into_iter()
             .find(|p| p.is_file())
             .map(|bin| Git { bin })
     }

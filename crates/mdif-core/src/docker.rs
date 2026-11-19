@@ -107,14 +107,21 @@ pub enum Removal {
 /// Where the `docker` command is: where Docker Desktop links it, Homebrew's,
 /// Docker Desktop's own, or the one it installs for you alone.
 pub fn command(home: &Path) -> Option<PathBuf> {
-    [
+    #[cfg(target_os = "macos")]
+    let candidates = vec![
         PathBuf::from("/usr/local/bin/docker"),
         PathBuf::from("/opt/homebrew/bin/docker"),
         PathBuf::from("/Applications/Docker.app/Contents/Resources/bin/docker"),
         home.join(".docker/bin/docker"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
+    ];
+    // Docker isn't supported on Windows yet: its data folder, for the keep
+    // rule, and its liveness check come with the Windows catalogue.
+    #[cfg(windows)]
+    let candidates: Vec<PathBuf> = {
+        let _ = home;
+        Vec::new()
+    };
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// What Docker Desktop's disk image takes on this disk (allocated: the file
@@ -426,15 +433,52 @@ pub fn not_running(said: &str) -> bool {
 }
 
 /// Whether Docker would answer now, by connecting to its socket: a few
-/// microseconds, so the watcher may ask every few minutes. Docker Desktop's
-/// socket, then the usual one.
+/// microseconds, so the watcher may ask every few
+/// minutes. Docker Desktop's socket, then the usual one.
 pub fn answers_now(home: &Path) -> bool {
-    [
-        home.join(".docker/run/docker.sock"),
-        PathBuf::from("/var/run/docker.sock"),
-    ]
-    .iter()
-    .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+    #[cfg(unix)]
+    {
+        [
+            home.join(".docker/run/docker.sock"),
+            PathBuf::from("/var/run/docker.sock"),
+        ]
+        .iter()
+        .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+    }
+    // No Docker on Windows yet ([`command`]).
+    #[cfg(windows)]
+    {
+        let _ = home;
+        false
+    }
+}
+
+/// Opens Docker Desktop hidden, for before its own `desktop start` command.
+#[cfg(target_os = "macos")]
+fn open_desktop() -> Result<(), String> {
+    let app = Path::new("/Applications/Docker.app");
+    if !app.is_dir() {
+        return Err(format!(
+            "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
+        ));
+    }
+    let opened = Command::new("/usr/bin/open")
+        .args(["-g", "-j", "-a"])
+        .arg(app)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !opened {
+        return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
+    }
+    Ok(())
+}
+
+/// Docker Desktop for Windows has had `desktop start` from the start.
+#[cfg(not(target_os = "macos"))]
+fn open_desktop() -> Result<(), String> {
+    Err(format!(
+        "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
+    ))
 }
 
 /// Starts Docker Desktop in the background when Docker isn't running, and
@@ -448,20 +492,7 @@ pub fn start(home: &Path) -> Result<bool, String> {
     // Docker Desktop's own command waits until it's up. Without it (before
     // Docker Desktop 4.37), the app, opened hidden.
     if run(&docker, &["desktop", "start", "--timeout", "180"], 200).is_err() {
-        let app = Path::new("/Applications/Docker.app");
-        if !app.is_dir() {
-            return Err(format!(
-                "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
-            ));
-        }
-        let opened = Command::new("/usr/bin/open")
-            .args(["-g", "-j", "-a"])
-            .arg(app)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !opened {
-            return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
-        }
+        open_desktop()?;
     }
     let begun = Instant::now();
     while begun.elapsed() < Duration::from_secs(180) {

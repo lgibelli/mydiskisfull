@@ -56,6 +56,7 @@ pub mod suggest;
 pub mod text;
 pub mod tidy;
 pub mod timemachine;
+pub mod tools;
 pub mod tweaks;
 pub mod units;
 pub mod watch;

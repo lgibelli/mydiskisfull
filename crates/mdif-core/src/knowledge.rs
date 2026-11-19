@@ -448,7 +448,7 @@ pub fn update(dir: &Path) -> Result<Updated> {
 }
 
 fn fetch(url: &str, max: usize) -> Result<Vec<u8>> {
-    let mut curl = Command::new("/usr/bin/curl");
+    let mut curl = Command::new(crate::tools::curl());
     curl.args(["--fail", "--silent", "--show-error", "--location"])
         .args(["--proto", "=https", "--proto-redir", "=https"])
         .args(["--max-time", "30", "--max-filesize", &max.to_string(), url]);

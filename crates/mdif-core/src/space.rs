@@ -435,11 +435,12 @@ pub fn measure(home: &Path) -> Result<Measured> {
     let started = Instant::now();
     let measured = crate::watch::unix_now();
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
-    let root = Path::new(DATA_ROOT);
-    let s = scan::scan(root, &TREE).with_context(|| format!("scanning {DATA_ROOT}"))?;
+    let volume = crate::map::boot_volume();
+    let root = volume.as_path();
+    let s = scan::scan(root, &TREE).with_context(|| format!("scanning {}", root.display()))?;
 
     // The volumes as they are now that the scan is done.
-    let st = fs::statfs(root).with_context(|| format!("statfs {DATA_ROOT}"))?;
+    let st = fs::statfs(root).with_context(|| format!("statfs {}", root.display()))?;
     let (mut container, mut data) =
         crate::apfs::find_volume(crate::apfs::containers()?, &st.device)?;
     if data.capacity_in_use == 0 {
@@ -577,14 +578,15 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             .sort_by(|a, b| b.allocated.cmp(&a.allocated).then(a.path.cmp(&b.path)));
         m.files.truncate(FILES);
     }
-    let st = crate::os::fs::statfs(Path::new(DATA_ROOT))
-        .with_context(|| format!("statfs {DATA_ROOT}"))?;
+    let volume = crate::map::boot_volume();
+    let st =
+        crate::os::fs::statfs(&volume).with_context(|| format!("statfs {}", volume.display()))?;
     let used = st.total.saturating_sub(st.avail);
     m.data_in_use = (m.data_in_use as i128 + used as i128 - m.volume.used as i128).max(0) as u64;
     m.volume.total = st.total;
     m.volume.free = st.avail;
     m.volume.used = used;
-    m.volume.purgeable = purgeable(Path::new(DATA_ROOT), st.avail);
+    m.volume.purgeable = purgeable(&volume, st.avail);
     // Snapshots deleted: what they held isn't purgeable any more.
     if paths.iter().any(|p| clean::snapshot_date(p).is_some())
         && let Ok(s) = crate::apfs::local_snapshots(Path::new(&st.mount_point))

@@ -307,9 +307,7 @@ pub fn sign_in(json_out: bool) -> Result<()> {
         if !json_out {
             eprintln!("Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{url}");
         }
-        let opened = std::process::Command::new("/usr/bin/open")
-            .arg(url)
-            .status();
+        let opened = mdif_core::tools::opener().arg(url).status();
         if !opened.is_ok_and(|s| s.success()) {
             eprintln!("(The browser didn't open.)");
         }

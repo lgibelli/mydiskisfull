@@ -20,12 +20,39 @@ const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
 const BUDGET_WRITES_PER_HOUR: u64 = 1_000_000;
 
 pub fn default_db() -> PathBuf {
-    data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    #[cfg(target_os = "macos")]
+    {
+        data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    }
+    #[cfg(windows)]
+    {
+        data_dir().join("history.sqlite3")
+    }
 }
 
 /// Where the agent's errors go.
 pub fn log_path() -> PathBuf {
-    data_home().join("Library/Logs/MyDiskIsFull/watch.log")
+    #[cfg(target_os = "macos")]
+    {
+        data_home().join("Library/Logs/MyDiskIsFull/watch.log")
+    }
+    #[cfg(windows)]
+    {
+        data_dir().join("Logs").join("watch.log")
+    }
+}
+
+/// `%LOCALAPPDATA%\MyDiskIsFull`: per user, and not roamed to other PCs.
+#[cfg(windows)]
+fn data_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(mdif_core::os::sys::local_app_data)
+        .or_else(|| mdif_core::portable::home_dir().map(|home| home.join("AppData").join("Local")))
+        // Not the drive's root: whatever the user's temporary folder is.
+        .unwrap_or_else(std::env::temp_dir)
+        .join("MyDiskIsFull")
 }
 
 /// How long after it starts the watcher first looks at the tidy-ups.
@@ -249,7 +276,7 @@ pub(crate) fn home() -> PathBuf {
 /// Where the history and the log are kept: `$HOME`, which in the App Sandbox
 /// is the app's container.
 fn data_home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+    mdif_core::portable::home_dir().unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR))
 }
 
 /// Running in the App Sandbox (the App Store edition), which names the

@@ -49,7 +49,7 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
     // The snapshots as they are now, not as they were at the scan: Time
     // Machine takes and deletes them by the hour.
     let snapshots =
-        mdif_core::apfs::local_snapshots(Path::new(mdif_core::map::DATA_ROOT)).unwrap_or_default();
+        mdif_core::apfs::local_snapshots(&mdif_core::map::boot_volume()).unwrap_or_default();
     let r =
         space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
     // Again for the same measurement replaces it: nothing piles up.
