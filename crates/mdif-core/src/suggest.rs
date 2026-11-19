@@ -398,8 +398,8 @@ pub fn gather(
     keep: &Keep,
     now: i64,
 ) -> Result<Vec<Suggestion>> {
-    mdif_macos::fs::forbid_dataless_materialization()?;
-    let st = mdif_macos::fs::statfs(volume)?;
+    crate::os::fs::forbid_dataless_materialization()?;
+    let st = crate::os::fs::statfs(volume)?;
     let mut tight = st.avail * 100 < st.total * 15;
     let mut out = Vec::new();
 
@@ -912,7 +912,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
             key: "snapshots".into(),
         });
     }
-    if let Ok(swap) = mdif_macos::sys::swap_used()
+    if let Ok(swap) = crate::os::sys::swap_used()
         && swap >= 2 * GB
     {
         out.push(Suggestion {

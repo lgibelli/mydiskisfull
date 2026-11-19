@@ -51,9 +51,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use mdif_macos::bulk::{self, Detail, Entry, Kind};
-use mdif_macos::changes::{Event, flag};
-use mdif_macos::fs::FsId;
+use crate::os::bulk::{self, Detail, Entry, Kind};
+use crate::os::changes::{Event, flag};
+use crate::os::fs::FsId;
 
 use crate::privacy;
 
@@ -589,7 +589,7 @@ impl Tracker {
         let fsid = self.fsid.filter(|_| !privacy::avoiding())?;
         below.iter().find_map(|p| {
             let d = self.dirs.get(p).filter(|d| d.inode != 0)?;
-            let now = mdif_macos::fs::path_of(fsid, d.inode).ok()?;
+            let now = crate::os::fs::path_of(fsid, d.inode).ok()?;
             // Its place inside what moved is the same.
             let rel = p.strip_prefix(root).ok()?;
             let depth = rel.components().count();
@@ -831,7 +831,7 @@ mod tests {
             .depth(&root, 1)
             .depth(root.join("Desktop"), 1);
         let mut tr = Tracker::new(rules.clone(), None, 1);
-        tr.follow_moves(mdif_macos::fs::fsid(&root).unwrap());
+        tr.follow_moves(crate::os::fs::fsid(&root).unwrap());
         let up = tr.apply(&[event(&film.join("sub"))], 0, 100);
         assert!(growth(&up, &storage) >= 20 * MB as i64, "{up:?}");
 

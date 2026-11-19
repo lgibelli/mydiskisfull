@@ -423,7 +423,7 @@ pub struct About {
 /// snapshots, purgeable caches, cloud files it can download again): Finder's
 /// "available" less `free`, the free space now.
 pub fn purgeable(path: &Path, free: u64) -> u64 {
-    mdif_macos::fs::available_for_important_usage(path)
+    crate::os::fs::available_for_important_usage(path)
         .unwrap_or(0)
         .saturating_sub(free)
 }
@@ -431,7 +431,7 @@ pub fn purgeable(path: &Path, free: u64) -> u64 {
 /// Scans the Data volume and reads what else the report needs. As long as
 /// the disk map takes (`mdif map`); never downloads a cloud file.
 pub fn measure(home: &Path) -> Result<Measured> {
-    use mdif_macos::fs;
+    use crate::os::fs;
     let started = Instant::now();
     let measured = crate::watch::unix_now();
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
@@ -508,7 +508,7 @@ pub fn measure(home: &Path) -> Result<Measured> {
 /// folder deleted or moved away is measured as its parent). The volume's
 /// free space is read again.
 pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
-    mdif_macos::fs::forbid_dataless_materialization()
+    crate::os::fs::forbid_dataless_materialization()
         .context("disabling cloud downloads for this process")?;
     for p in paths {
         let names: Vec<String> = match p.strip_prefix("/") {
@@ -577,7 +577,7 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             .sort_by(|a, b| b.allocated.cmp(&a.allocated).then(a.path.cmp(&b.path)));
         m.files.truncate(FILES);
     }
-    let st = mdif_macos::fs::statfs(Path::new(DATA_ROOT))
+    let st = crate::os::fs::statfs(Path::new(DATA_ROOT))
         .with_context(|| format!("statfs {DATA_ROOT}"))?;
     let used = st.total.saturating_sub(st.avail);
     m.data_in_use = (m.data_in_use as i128 + used as i128 - m.volume.used as i128).max(0) as u64;

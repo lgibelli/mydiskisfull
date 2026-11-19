@@ -554,7 +554,6 @@ dependencies = [
  "chrono",
  "clap",
  "mdif-core",
- "mdif-macos",
  "serde_json",
 ]
 

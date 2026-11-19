@@ -82,7 +82,7 @@ fn parse(key: &str) -> Result<Key> {
 
 /// The volume's size, which the automatic floor depends on.
 fn total(volume: &Path) -> Result<u64> {
-    Ok(mdif_macos::fs::statfs(volume)
+    Ok(mdif_core::os::fs::statfs(volume)
         .with_context(|| format!("statfs {}", volume.display()))?
         .total)
 }

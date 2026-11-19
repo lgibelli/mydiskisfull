@@ -47,7 +47,7 @@ fn open_log() -> Result<()> {
         .append(true)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    mdif_macos::sys::redirect_stderr(&file).context("redirecting errors to the log")?;
+    mdif_core::os::sys::redirect_stderr(&file).context("redirecting errors to the log")?;
     Ok(())
 }
 
@@ -119,7 +119,7 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     }
     let store = Store::open(db)?;
     let mut w =
-        Watcher::new(store, volume)?.with_access_check(mdif_macos::sys::access_probes(&home()));
+        Watcher::new(store, volume)?.with_access_check(mdif_core::os::sys::access_probes(&home()));
     if owners_every > 0 && !once {
         w = w.with_owners(Rules::for_home(&home()), owners_every as i64)?;
     }
@@ -239,7 +239,7 @@ fn print_sample(s: &watch::Sample) {
 /// account's own.
 pub(crate) fn home() -> PathBuf {
     if sandboxed()
-        && let Some(home) = mdif_macos::sys::account_home()
+        && let Some(home) = mdif_core::os::sys::account_home()
     {
         return home;
     }
@@ -293,7 +293,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         return Ok(());
     }
     let store = Store::open(db)?;
-    let key = mdif_macos::fs::statfs(volume)
+    let key = mdif_core::os::fs::statfs(volume)
         .with_context(|| format!("statfs {}", volume.display()))?
         .mount_point;
     let now = watch::unix_now();
@@ -325,7 +325,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
             // [unix seconds, bytes free], at the resolution the store keeps.
             out["series"] = pts.iter().map(|p| json!([p.ts, p.avail])).collect();
             out["writes_daily"] = store
-                .writes_daily(now - 400 * DAY, &mdif_macos::sys::utc_offset, 8)?
+                .writes_daily(now - 400 * DAY, &mdif_core::os::sys::utc_offset, 8)?
                 .iter()
                 .map(|d| {
                     json!({

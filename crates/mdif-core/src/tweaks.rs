@@ -387,7 +387,7 @@ impl Tweak {
         if steps.is_empty() {
             return Ok(steps);
         }
-        mdif_macos::fs::forbid_dataless_materialization()?;
+        crate::os::fs::forbid_dataless_materialization()?;
         let sizes: Vec<(PathBuf, Option<u64>)> = self
             .targets(home)
             .into_iter()
@@ -459,7 +459,7 @@ impl Tweak {
         let (Some(first), Some(latest)) = (records.last(), records.first()) else {
             return Ok(None);
         };
-        mdif_macos::fs::forbid_dataless_materialization()?;
+        crate::os::fs::forbid_dataless_materialization()?;
         let then: Vec<(PathBuf, Option<u64>)> =
             serde_json::from_str(&first.sizes).unwrap_or_default();
         let sizes = then
@@ -470,7 +470,7 @@ impl Tweak {
             })
             .collect::<Vec<_>>();
         let restart_pending = self.after == After::Restart
-            && mdif_macos::sys::boot_time().is_ok_and(|b| b < latest.applied);
+            && crate::os::sys::boot_time().is_ok_and(|b| b < latest.applied);
         Ok(Some(Check {
             applied: first.applied,
             status: self.status(home)?,

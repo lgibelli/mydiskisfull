@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mdif_macos::bulk::{self, Entry, Kind};
-use mdif_macos::extents;
+use crate::os::bulk::{self, Entry, Kind};
+use crate::os::extents;
 use rayon::prelude::*;
 use serde::Serialize;
 
@@ -376,7 +376,7 @@ struct Walked {
 pub fn size_of(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     // Measuring must never download a cloud placeholder.
-    mdif_macos::fs::forbid_dataless_materialization().ok()?;
+    crate::os::fs::forbid_dataless_materialization().ok()?;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => {
             let opts = Options {
@@ -396,7 +396,7 @@ pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
     if !crate::privacy::may_open(root) {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
-    let dev = mdif_macos::fs::dev_of(root)?;
+    let dev = crate::os::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
     bulk::open_dir(root)?;
     let started = std::time::SystemTime::now()

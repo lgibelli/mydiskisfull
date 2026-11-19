@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::os::changes;
+use crate::os::{fs, proc};
 use anyhow::{Context, Result};
-use mdif_macos::changes;
-use mdif_macos::{fs, proc};
 
 use crate::alerts;
 use crate::forecast::{DAY, HOUR};
@@ -365,7 +365,7 @@ impl Watcher {
         let access = match self.access_probes.as_slice() {
             [] => None,
             probes => {
-                let fda = mdif_macos::sys::full_disk_access(probes);
+                let fda = crate::os::sys::full_disk_access(probes);
                 privacy::avoid_prompts(fda != Some(true));
                 Some(match fda {
                     Some(true) => "1",
@@ -746,7 +746,7 @@ mod tests {
         std::fs::write(&f, vec![1u8; 8 << 20]).unwrap();
         std::fs::File::open(&f).unwrap().sync_all().unwrap();
         let second = w.sample(1_300).unwrap();
-        let me = mdif_macos::proc::own_processes()
+        let me = crate::os::proc::own_processes()
             .into_iter()
             .find(|p| p.pid == std::process::id() as i32)
             .unwrap()

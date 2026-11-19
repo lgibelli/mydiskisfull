@@ -120,7 +120,7 @@ pub fn clean(
         return Ok(());
     }
 
-    let before = mdif_macos::fs::statfs(volume)?.avail;
+    let before = mdif_core::os::fs::statfs(volume)?.avail;
     let docker_disk = docker_now.as_ref().and_then(|r| r.disk);
     let mut done: Vec<(Done, Option<u64>)> = Vec::new();
     // What goes through Finder goes at once: one password, not one each.
@@ -169,7 +169,9 @@ pub fn clean(
     let freed = if done.is_empty() {
         0
     } else {
-        mdif_macos::fs::statfs(volume)?.avail.saturating_sub(before)
+        mdif_core::os::fs::statfs(volume)?
+            .avail
+            .saturating_sub(before)
     };
     if !done.is_empty() {
         crate::watch_cmd::record_clean(db, freed);

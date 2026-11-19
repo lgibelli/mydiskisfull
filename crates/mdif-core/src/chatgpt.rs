@@ -136,7 +136,7 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
     f.write_all(&serde_json::to_vec_pretty(s)?)?;
     f.sync_all()?;
     std::fs::rename(&tmp, dir.join(FILE))?;
-    let _ = mdif_macos::fs::set_excluded_from_backup(&dir.join(FILE), true);
+    let _ = crate::os::fs::set_excluded_from_backup(&dir.join(FILE), true);
     Ok(())
 }
 
@@ -150,7 +150,7 @@ fn locked<T>(dir: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
         .truncate(false)
         .mode(0o600)
         .open(dir.join(LOCK))?;
-    mdif_macos::fs::lock(&lock)?;
+    crate::os::fs::lock(&lock)?;
     f()
 }
 

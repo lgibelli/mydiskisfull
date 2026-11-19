@@ -32,7 +32,7 @@ fn find(id: &str) -> Result<&'static Tweak> {
 }
 
 pub fn list(db: &Path, json_out: bool) -> Result<()> {
-    mdif_macos::fs::forbid_dataless_materialization()?;
+    mdif_core::os::fs::forbid_dataless_materialization()?;
     let home = home();
     let store = store(db)?;
     let now = unix_now();
@@ -397,7 +397,7 @@ pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
     }
-    let st = mdif_macos::fs::statfs(volume)?;
+    let st = mdif_core::os::fs::statfs(volume)?;
     println!(
         "Free now: {} of {} on {}.",
         bytes(st.avail),

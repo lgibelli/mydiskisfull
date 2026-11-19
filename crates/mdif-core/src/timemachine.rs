@@ -325,7 +325,7 @@ pub fn snapshots(names: &[String], reference: Option<i64>) -> Vec<Snapshot> {
                 d.get(15..17)?
             );
             let wall = space::parse_time(&text)?;
-            let taken = wall - mdif_macos::sys::utc_offset(wall);
+            let taken = wall - crate::os::sys::utc_offset(wall);
             Some(Snapshot {
                 name: n.clone(),
                 taken,
@@ -575,7 +575,7 @@ pub fn glance(home: &Path, now: i64) -> Report {
     let names = crate::apfs::local_snapshots(Path::new(DATA_ROOT)).unwrap_or_default();
     let reference = prefs.destinations.iter().filter_map(|d| d.reference).max();
     let snaps = snapshots(&names, reference);
-    let free = mdif_macos::fs::statfs(Path::new(DATA_ROOT)).map_or(0, |s| s.avail);
+    let free = crate::os::fs::statfs(Path::new(DATA_ROOT)).map_or(0, |s| s.avail);
     let held = if snaps.is_empty() {
         0
     } else {
@@ -707,7 +707,7 @@ pub fn report(
             let backed_up = state
                 .get(&p)
                 .copied()
-                .unwrap_or_else(|| !mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false));
+                .unwrap_or_else(|| !crate::os::fs::excluded_from_backup(&p).unwrap_or(false));
             let (checkout, project) = match what {
                 "cache" => {
                     let tool = tool_folder(&p, home).unwrap_or_else(|| p.clone());
@@ -772,8 +772,8 @@ pub fn set_excluded(
                     "{shown} isn't a folder a build, an install or its tool makes again."
                 ))
             } else {
-                mdif_macos::fs::set_excluded_from_backup(p, exclude)
-                    .and_then(|()| mdif_macos::fs::set_mark(p, LET_IN, !exclude))
+                crate::os::fs::set_excluded_from_backup(p, exclude)
+                    .and_then(|()| crate::os::fs::set_mark(p, LET_IN, !exclude))
                     .map_err(|e| format!("{shown}: {e}"))
             };
             (p.clone(), done)
@@ -1199,13 +1199,13 @@ mod tests {
         let keep = Keep::default();
         let r = set_excluded(&[repo.join("docs/build")], true, &keep, &home);
         assert!(r[0].1.is_err());
-        assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("docs/build")).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&repo.join("docs/build")).unwrap());
         let r = set_excluded(&[repo.join("ios/build")], true, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
         let r = set_excluded(&[repo.join("ios/build")], false, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
         // A project stands for its folders a build makes again; a folder
         // with none in it stays itself, to be refused.
         assert_eq!(
@@ -1270,7 +1270,7 @@ mod tests {
         ]);
         std::fs::create_dir_all(sdk.join(".git/lfs/cache")).unwrap();
         // Kept out already: so is what's in it.
-        mdif_macos::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
+        crate::os::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
 
         // Tagged, named one by its tool, or in an XDG cache home; the
         // outermost only. Not in .git, macOS's or your folders, or projects.
@@ -1302,7 +1302,7 @@ mod tests {
         let cache = home.join(".bun/install/cache");
         let r = set_excluded(std::slice::from_ref(&cache), true, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(mdif_macos::fs::excluded_from_backup(&cache).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&cache).unwrap());
 
         // The tidy-up keeps out the big ones, but not one you let back in.
         let pubs = home.join(".pub-cache");
@@ -1317,7 +1317,7 @@ mod tests {
         let o = crate::tidy::run(crate::tidy::Id::Backups, &home, &keep, 0, false);
         let done: Vec<&Path> = o.done.iter().map(|d| d.path.as_path()).collect();
         assert_eq!(done, [pubs.as_path()]);
-        assert!(!mdif_macos::fs::excluded_from_backup(&cache).unwrap());
-        assert!(mdif_macos::fs::excluded_from_backup(&pubs).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&cache).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&pubs).unwrap());
     }
 }

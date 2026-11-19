@@ -287,7 +287,7 @@ impl Store {
 
     /// What was written each local day since `since`, oldest first, with the
     /// `top` writers of each. `offset` is the local time zone's offset from
-    /// UTC at a time ([`mdif_macos::sys::utc_offset`]). A row goes to the
+    /// UTC at a time ([`crate::os::sys::utc_offset`]). A row goes to the
     /// day its time falls on: a 5-minute row is stamped with when it ended,
     /// a folded one with when its hour or day began.
     pub fn writes_daily(

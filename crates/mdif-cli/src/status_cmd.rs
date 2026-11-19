@@ -34,14 +34,14 @@ impl Applied {
 }
 
 pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
-    let st =
-        mdif_macos::fs::statfs(volume).with_context(|| format!("statfs {}", volume.display()))?;
+    let st = mdif_core::os::fs::statfs(volume)
+        .with_context(|| format!("statfs {}", volume.display()))?;
     let now = unix_now();
     let home = home();
     // The app runs this every few minutes, unattended: a privacy prompt
     // would wait for an answer (see mdif_core::privacy).
-    let probes = mdif_macos::sys::access_probes(&home);
-    privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+    let probes = mdif_core::os::sys::access_probes(&home);
+    privacy::avoid_prompts(mdif_core::os::sys::full_disk_access(&probes) != Some(true));
     let store = if db.exists() {
         Some(Store::open(db)?)
     } else {

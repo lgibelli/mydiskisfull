@@ -106,8 +106,8 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
     let home = home();
     // The app runs this too: a privacy prompt would wait for an answer
     // (see mdif_core::privacy).
-    let probes = mdif_macos::sys::access_probes(&home);
-    privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+    let probes = mdif_core::os::sys::access_probes(&home);
+    privacy::avoid_prompts(mdif_core::os::sys::full_disk_access(&probes) != Some(true));
     // Nothing is deleted without knowing what you keep.
     let keep = crate::keep_cmd::load(db)?;
     let now = unix_now();
@@ -252,7 +252,7 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
             return;
         }
     };
-    let _background = mdif_macos::sys::background()
+    let _background = mdif_core::os::sys::background()
         .inspect_err(|e| eprintln!("{} tidy-ups at normal priority: {e}", stamp()));
     let home = home();
     for id in due {

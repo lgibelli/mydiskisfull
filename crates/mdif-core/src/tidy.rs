@@ -365,7 +365,7 @@ impl Outcome {
 /// Runs a tidy-up now (`dry_run`: says what it would do, and does nothing).
 pub fn run(id: Id, home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome {
     // Measuring must never download a cloud placeholder.
-    if let Err(e) = mdif_macos::fs::forbid_dataless_materialization() {
+    if let Err(e) = crate::os::fs::forbid_dataless_materialization() {
         let mut o = Outcome::default();
         o.fail(
             id,
@@ -466,8 +466,8 @@ fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     let mut o = Outcome::default();
     // The marks first: they're reads, git only for what isn't marked yet.
     fn unmarked(d: &Path) -> bool {
-        !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true)
-            && !mdif_macos::fs::has_mark(d, crate::timemachine::LET_IN).unwrap_or(true)
+        !crate::os::fs::excluded_from_backup(d).unwrap_or(true)
+            && !crate::os::fs::has_mark(d, crate::timemachine::LET_IN).unwrap_or(true)
     }
     let mut found = artifact_dirs(home, |d| {
         unmarked(d) && crate::timemachine::rebuildable(d).is_some()
@@ -927,7 +927,7 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
             if crate::timemachine::download_cache(&path, home) {
                 out.push(path);
             } else if depth < TOOL_DEPTH
-                && !mdif_macos::fs::excluded_from_backup(&path).unwrap_or(true)
+                && !crate::os::fs::excluded_from_backup(&path).unwrap_or(true)
             {
                 walk(&path, depth + 1, home, dev, out);
             }
@@ -944,7 +944,7 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
         if crate::timemachine::download_cache(&tool, home) {
             out.push(tool);
         } else if privacy::may_open(&tool)
-            && !mdif_macos::fs::excluded_from_backup(&tool).unwrap_or(true)
+            && !crate::os::fs::excluded_from_backup(&tool).unwrap_or(true)
         {
             walk(&tool, 2, home, dev, &mut out);
         }
@@ -1236,7 +1236,7 @@ fn holds_at_least(dir: &Path, min: u64) -> bool {
 /// A folder whose contents aren't on this disk (a cloud placeholder):
 /// listing it would download them.
 fn dataless(m: &std::fs::Metadata) -> bool {
-    m.st_flags() & mdif_macos::bulk::SF_DATALESS != 0
+    m.st_flags() & crate::os::bulk::SF_DATALESS != 0
 }
 
 /// The newest modification time of `dir` and what's in it, `depth` levels

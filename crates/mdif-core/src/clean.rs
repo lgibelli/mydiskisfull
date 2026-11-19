@@ -309,7 +309,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 Some(_) => {}
                 None => still_trashable(path, home)?,
             }
-            mdif_macos::fs::trash(path)
+            crate::os::fs::trash(path)
                 .map(|to| Done {
                     path: path.clone(),
                     how: "trashed",
@@ -319,7 +319,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 .map_err(|e| format!("{}: {e}", display(path, home)))
         }
         Step::Restart { app, helper, pids } => {
-            use mdif_macos::proc::{alive, force_quit, terminate};
+            use crate::os::proc::{alive, force_quit, terminate};
             // Only what is still that app's helper: a pid can be reused.
             let now = helpers_of(helper, app);
             let pids: Vec<i32> = pids.iter().copied().filter(|p| now.contains(p)).collect();
@@ -773,7 +773,7 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
             UNUSED_FOR / 86_400
         ));
     }
-    let same_volume = mdif_macos::fs::dev_of(file).ok() == mdif_macos::fs::dev_of(home).ok();
+    let same_volume = crate::os::fs::dev_of(file).ok() == crate::os::fs::dev_of(home).ok();
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
@@ -939,9 +939,9 @@ fn open_app(owner: &str) -> Option<String> {
 /// A process of yours whose program is in `dir` (a tool's runtime kept in
 /// its cache).
 fn running_from(dir: &Path) -> Option<String> {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .into_iter()
-        .find(|p| mdif_macos::proc::path(p.pid).is_some_and(|x| x.starts_with(dir)))
+        .find(|p| crate::os::proc::path(p.pid).is_some_and(|x| x.starts_with(dir)))
         .map(|p| p.name)
 }
 
@@ -1138,7 +1138,7 @@ pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
             display(link, home)
         ));
     }
-    let same_volume = mdif_macos::fs::dev_of(dir).ok() == mdif_macos::fs::dev_of(home).ok();
+    let same_volume = crate::os::fs::dev_of(dir).ok() == crate::os::fs::dev_of(home).ok();
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
@@ -1159,19 +1159,19 @@ fn link_on_the_way<'p>(path: &'p Path, home: &Path) -> Option<&'p Path> {
 
 /// The app a process named `name` works for when it is an app's helper,
 /// not the app: of those running, the one that wrote the most.
-pub fn helper(name: &str) -> Option<mdif_macos::proc::App> {
-    let top = mdif_macos::proc::own_processes()
+pub fn helper(name: &str) -> Option<crate::os::proc::App> {
+    let top = crate::os::proc::own_processes()
         .into_iter()
         .filter(|p| p.name == name)
         .max_by_key(|p| p.bytes_written)?;
-    mdif_macos::proc::responsible_app(top.pid).filter(|a| a.pid != top.pid && a.name != name)
+    crate::os::proc::responsible_app(top.pid).filter(|a| a.pid != top.pid && a.name != name)
 }
 
 /// Whether all of `pids` ended within `wait`.
 fn ended(pids: &[i32], wait: std::time::Duration) -> bool {
     let until = std::time::Instant::now() + wait;
     loop {
-        if !pids.iter().any(|&p| mdif_macos::proc::alive(p)) {
+        if !pids.iter().any(|&p| crate::os::proc::alive(p)) {
             return true;
         }
         if std::time::Instant::now() >= until {
@@ -1183,11 +1183,11 @@ fn ended(pids: &[i32], wait: std::time::Duration) -> bool {
 
 /// The processes named `name` that work for the app at `app`.
 fn helpers_of(name: &str, app: &Path) -> Vec<i32> {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .into_iter()
         .filter(|p| p.name == name)
         .filter(|p| {
-            mdif_macos::proc::responsible_app(p.pid)
+            crate::os::proc::responsible_app(p.pid)
                 .is_some_and(|a| a.pid != p.pid && a.bundle == app)
         })
         .map(|p| p.pid)
@@ -1196,7 +1196,7 @@ fn helpers_of(name: &str, app: &Path) -> Vec<i32> {
 
 /// The button for a helper that keeps rewriting the disk: "Restart
 /// Safari's Networking" (the last part of a dotted name).
-pub fn restart_action(helper: &str, app: &mdif_macos::proc::App) -> Action {
+pub fn restart_action(helper: &str, app: &crate::os::proc::App) -> Action {
     let part = helper.rsplit('.').next().unwrap_or(helper);
     Action {
         kind: "restart",
@@ -1214,7 +1214,7 @@ pub fn restart_action(helper: &str, app: &mdif_macos::proc::App) -> Action {
 }
 
 fn running(name: &str) -> bool {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .iter()
         .any(|p| p.name == name)
 }

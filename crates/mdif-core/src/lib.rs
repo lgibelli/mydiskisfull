@@ -42,6 +42,7 @@ pub mod incidents;
 pub mod keep;
 pub mod knowledge;
 pub mod map;
+pub mod os;
 pub mod os_update;
 pub mod owners;
 pub mod privacy;

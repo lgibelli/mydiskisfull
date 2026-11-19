@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::os::fs::{self, FsStats};
 use anyhow::{Context, Result};
-use mdif_macos::fs::{self, FsStats};
 use serde::Serialize;
 
 use crate::apfs::{self, Container, Volume};

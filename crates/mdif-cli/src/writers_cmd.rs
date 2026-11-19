@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use mdif_core::os::proc;
 use mdif_core::text::printable;
 use mdif_core::units::bytes;
-use mdif_macos::proc;
 
 pub fn writers(secs: u64, top: usize) {
     let before: HashMap<i32, proc::ProcIo> = proc::own_processes()
