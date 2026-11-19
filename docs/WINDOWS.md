@@ -27,11 +27,11 @@ it the way the Mac app does, and `app/Tests` holds the contract.
 
 Phase 1 (done): the workspace builds, lints and tests on x86_64 Windows (built and run on a
 runner), is type-checked for aarch64 Windows (not run), and the Mac is unchanged. What runs on Windows today is the free-space forecast: `mdif watch`, `status`,
-`forecast`, `alerts`, `keep`, `knowledge` (without Ask AI) and `agent` (the watcher at sign-in,
+`forecast`, `alerts`, `keep`, `knowledge` (without Ask AI), `owners`, `incidents` (growth per folder from the NTFS journal) and `agent` (the watcher at sign-in,
 through the user's `Run` key and `mdif-watch.exe`, the same program without a console window). The rest says it isn't available on
 this operating system yet, rather than printing numbers built on another system's picture of a
-disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `map`, `space`,
-`writers`, `owners` and `incidents`.
+disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `map`, `space` and
+`writers`.
 
 | Phase | What | State |
 |---|---|---|
@@ -90,7 +90,8 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   It is read with the unprivileged call on the root of the volume the watched folder is mounted
   on; a volume with no journal, or none this user may read, is a gap. It hasn't been checked as a
   standard (non-administrator) account, only as an administrator, and ReFS (128-bit file numbers,
-  version 3 records) isn't read. Windows owner tracking isn't switched on yet.
+  version 3 records) isn't read. Owner tracking is on: the watcher replays the journal every 30 minutes by default, and CI
+  grows a folder under a running watcher and finds it with `mdif owners`.
 - The watcher at sign-in is `mdif-watch.exe`, the CLI source linked for the GUI subsystem by
   `build.rs` (MSVC only: Windows GNU builds are not supported, and would show a console). One
   watcher per history is a lock file beside it, held across sign-ins, and `agent uninstall` asks

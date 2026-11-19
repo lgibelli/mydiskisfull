@@ -109,7 +109,7 @@ jobs:
       - name: What waits for Windows is refused
         run: |
           mdif=./target/release/mdif.exe
-          for c in clean docker map owners incidents space suggest tidy timemachine tweaks writers; do
+          for c in clean docker map space suggest tidy timemachine tweaks writers; do
             if out=$($mdif $c 2>&1); then echo "mdif $c should be refused"; exit 1; fi
             echo "$out" | grep -q "isn't available on this operating system yet" \
               || { echo "mdif $c: $out"; exit 1; }
@@ -144,6 +144,22 @@ jobs:
           out=$($mdif agent status); echo "$out"
           echo "$out" | grep -q "Watcher: not running"
           echo "$out" | grep -q "Starts at sign-in: no"
+
+      # A folder that fills while the watcher runs is found by the NTFS journal
+      # and listed by its owner.
+      - name: A growing folder is found
+        run: |
+          mdif=./target/release/mdif.exe
+          db="$RUNNER_TEMP/owners.sqlite3"
+          dir="$USERPROFILE/mdif-ci-grow"
+          rm -rf "$dir"; mkdir -p "$dir"
+          ( sleep 6; for i in $(seq 1 14); do head -c 6000000 /dev/urandom > "$dir/f$i.bin"; sleep 2; done ) &
+          filler=$!
+          timeout 60 $mdif watch --interval 4 --owners-every 4 --db "$db" || true
+          wait $filler || true
+          $mdif owners --hours 1 --json --db "$db" | tee /dev/stderr \
+            | jq -e '[.growth[] | select(.owner | test("mdif-ci-grow")) | .bytes] | add > 30000000'
+          rm -rf "$dir"
 
   windows-arm:
     name: check (Windows on ARM)

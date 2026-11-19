@@ -87,7 +87,6 @@ enum Cmd {
         history: History,
     },
     /// Which folders grew or shrank, and what came back after cleanups
-    #[command(hide = !cfg!(target_os = "macos"))]
     Owners {
         /// Window, in hours
         #[arg(long, default_value_t = 24)]
@@ -102,7 +101,6 @@ enum Cmd {
         history: History,
     },
     /// Runaway disk fillers: folders that keep growing, processes that churn
-    #[command(hide = !cfg!(target_os = "macos"))]
     Incidents {
         /// How far back to look, in days
         #[arg(long, default_value_t = 7)]
@@ -438,8 +436,6 @@ const NOT_HERE_YET: &[&str] = &[
     "map",
     "space",
     "writers",
-    "owners",
-    "incidents",
 ];
 
 /// The command the line names, before its arguments are parsed: the first
