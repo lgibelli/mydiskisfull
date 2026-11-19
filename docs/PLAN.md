@@ -414,6 +414,8 @@ mydiskisfull/
   crates/
     mdif-macos/   FFI: getattrlistbulk (private size, clone ID, dataless/sparse/purgeable flags),
                   proc_pid_rusage, statfs, setiopolicy_np, FSEvents, NSFileManager eviction
+    mdif-windows/ the same for Windows (windows-sys); mdif_core::os picks the backend.
+                  See docs/WINDOWS.md
     mdif-core/    scanner, owners, map; history store + decimation; forecast and incident
                   detection; rules, suggestions, tweaks; providers; TM monitor
     mdif-cli/     `mdif map | watch | forecast | owners | incidents | suggest | tweaks | writers`

@@ -303,6 +303,7 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | Crate | What it does |
 |---|---|
 | `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np`, `sysctl` (boot time, swap) |
+| `crates/mdif-windows` | The same for Windows, on `windows-sys` (volumes, locks, file identity, processes, the user's folders); the rest is written as `docs/WINDOWS.md` says. `mdif_core::os` picks one of the two |
 | `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder, incidents, suggestions and tweaks (reversible settings and configuration profiles) |
 | `crates/mdif-cli` | The `mdif` command |
 | `app/` | The app (SwiftUI): a main window and a glance in the menu bar. It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
