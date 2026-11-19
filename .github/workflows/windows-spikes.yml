@@ -1,0 +1,29 @@
+name: Windows spikes
+
+# Measurements the Windows design waits on (docs/WINDOWS.md, Phase 0), run by
+# hand on a real runner: `gh workflow run windows-spikes.yml --ref <branch>`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spikes:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure
+        run: |
+          cargo test -p mdif-windows --test spikes --release --locked -- \
+            --ignored --nocapture --test-threads=1 2>&1 | tee spikes.txt
+          echo "## Spikes" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -o "SPIKE.*" spikes.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
