@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mdif_macos::bulk::{self, EF_MAY_SHARE_BLOCKS, Entry, Kind};
+use mdif_macos::bulk::{self, Entry, Kind};
 use mdif_macos::extents;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -118,7 +118,7 @@ impl Totals {
         if e.mtime < cold_before {
             self.cold += e.allocated;
         }
-        if e.ext_flags & EF_MAY_SHARE_BLOCKS != 0 {
+        if e.may_share_blocks() {
             self.cloned += e.shared();
         }
         if e.is_dataless() {
@@ -230,6 +230,25 @@ struct Clones {
 /// cover.
 type Shared = (Arc<[(u64, u64)]>, u64);
 
+/// Bytes covered by `extents`, overlaps counted once. Sorts in place.
+pub fn union_len(extents: &mut [(u64, u64)]) -> u64 {
+    extents.sort_unstable();
+    let mut total = 0;
+    let mut cur: Option<(u64, u64)> = None;
+    for &(start, len) in extents.iter() {
+        let end = start + len;
+        cur = match cur {
+            Some((s, e)) if start <= e => Some((s, e.max(end))),
+            Some((s, e)) => {
+                total += e - s;
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    total + cur.map_or(0, |(s, e)| e - s)
+}
+
 /// Extents of the files under a folder that share blocks, each counted
 /// once, and what they'd add up to file by file.
 #[derive(Default)]
@@ -307,7 +326,7 @@ impl Ctx<'_> {
         if e.is_dataless() {
             return None;
         }
-        if e.kind != Kind::File || e.ext_flags & EF_MAY_SHARE_BLOCKS == 0 || e.shared() == 0 {
+        if e.kind != Kind::File || !e.may_share_blocks() || e.shared() == 0 {
             // Its shared bytes, if any, are only shared with a snapshot.
             self.plain.fetch_add(e.allocated, Ordering::Relaxed);
             return None;
@@ -316,7 +335,7 @@ impl Ctx<'_> {
             return s.clone();
         }
         let read = extents::physical(path, BLOCK).ok().map(|mut x| {
-            let mapped = extents::union_len(&mut x);
+            let mapped = union_len(&mut x);
             (Arc::<[(u64, u64)]>::from(x), mapped)
         });
         let mut clones = self.clones.lock().unwrap();
@@ -537,6 +556,13 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    #[test]
+    fn union_merges_overlaps() {
+        let mut v = vec![(10, 10), (0, 5), (15, 10), (40, 1)];
+        assert_eq!(union_len(&mut v), 5 + 15 + 1);
+        assert_eq!(union_len(&mut []), 0);
+    }
 
     fn write(path: &Path, len: usize) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

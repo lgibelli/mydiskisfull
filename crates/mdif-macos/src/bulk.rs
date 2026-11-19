@@ -125,6 +125,12 @@ impl Entry {
         self.allocated.saturating_sub(self.private)
     }
 
+    /// Whether this file may share blocks with clones: only then are its
+    /// extents worth reading to count shared blocks once.
+    pub fn may_share_blocks(&self) -> bool {
+        self.ext_flags & EF_MAY_SHARE_BLOCKS != 0
+    }
+
     pub fn is_purgeable(&self) -> bool {
         self.ext_flags & EF_IS_PURGEABLE != 0
     }

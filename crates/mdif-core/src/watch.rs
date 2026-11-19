@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use mdif_macos::fsevents::{self, Stream, flag};
+use mdif_macos::changes;
 use mdif_macos::{fs, proc};
 
 use crate::alerts;
@@ -300,7 +300,7 @@ impl Watcher {
         };
         let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
             (Some(id), Some(wall)) => (id as u64, wall),
-            _ => (fsevents::current_event_id(), unix_now()),
+            _ => (changes::now(), unix_now()),
         };
         // The boot volume's paths are reported through its firmlinks
         // (`/Users`, `/private`, ...), so watch from the root.
@@ -574,22 +574,9 @@ impl Owners {
     /// files the `heavy` writers have open, and update the sizes.
     fn period(&mut self, now: i64, heavy: &[i32]) -> Result<(Vec<(String, i64)>, Period)> {
         let wall = unix_now();
-        let mut stream = Stream::start(&[&self.root], self.last_id, Duration::from_millis(50))
-            .context("starting FSEvents")?;
-        let deadline = std::time::Instant::now() + REPLAY_TIMEOUT;
-        let mut events = Vec::new();
-        let mut done = false;
-        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-            match stream.next_timeout(left) {
-                Some(e) if e.flags & flag::HISTORY_DONE != 0 => {
-                    done = true;
-                    break;
-                }
-                Some(e) => events.push(e),
-                None => break,
-            }
-        }
-        drop(stream);
+        let replay = changes::replay(&self.root, self.last_id, REPLAY_TIMEOUT)
+            .context("replaying the file-system journal")?;
+        let (mut events, done) = (replay.events, replay.complete);
         let replayed = events.len();
         if let Some(id) = events.iter().map(|e| e.id).max() {
             self.last_id = id;
@@ -602,7 +589,7 @@ impl Owners {
         open_dirs.sort();
         open_dirs.dedup();
         let open_files = open_dirs.len();
-        events.extend(open_dirs.into_iter().map(|path| fsevents::Event {
+        events.extend(open_dirs.into_iter().map(|path| changes::Event {
             path,
             flags: 0,
             id: 0,

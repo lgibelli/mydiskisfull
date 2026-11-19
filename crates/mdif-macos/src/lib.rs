@@ -2,6 +2,8 @@
 //!
 //! - [`bulk`]: directory listing with APFS private size, clone family and
 //!   cloud-placeholder flags (`getattrlistbulk`).
+//! - [`changes`]: what changed since a saved position (FSEvents behind a
+//!   neutral face).
 //! - [`extents`]: where a file's data physically lives, to count blocks
 //!   shared by modified clones once.
 //! - [`fsevents`]: which directories changed, live or replayed from a saved
@@ -16,6 +18,7 @@
 compile_error!("mdif-macos only builds on macOS");
 
 pub mod bulk;
+pub mod changes;
 pub mod extents;
 pub mod fs;
 pub mod fsevents;

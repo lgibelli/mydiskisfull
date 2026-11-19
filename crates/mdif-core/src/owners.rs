@@ -51,9 +51,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use mdif_macos::bulk::{self, Detail, EF_MAY_SHARE_BLOCKS, Entry, Kind};
+use mdif_macos::bulk::{self, Detail, Entry, Kind};
+use mdif_macos::changes::{Event, flag};
 use mdif_macos::fs::FsId;
-use mdif_macos::fsevents::{Event, flag};
 
 use crate::privacy;
 
@@ -240,7 +240,7 @@ pub fn entry_size(e: &Entry) -> u64 {
         return 0;
     }
     let mut share = e.nlink.max(1) as u64;
-    if e.ext_flags & EF_MAY_SHARE_BLOCKS != 0 {
+    if e.may_share_blocks() {
         share *= e.clone_refcnt.max(1) as u64;
     }
     e.allocated / share
