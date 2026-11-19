@@ -311,8 +311,9 @@ impl Watcher {
             PathBuf::from(mount)
         };
         let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
-            // 0 is "no journal could be asked" (Windows), not a position.
-            (Some(id), Some(wall)) if id != 0 => (id as u64, wall),
+            // 0 is "no journal could be asked" on Windows, not a position (on a
+            // Mac it is the start of all the history there is, and a position).
+            (Some(id), Some(wall)) if id != 0 || cfg!(target_os = "macos") => (id as u64, wall),
             // The journal's position now, taken now, not at the first replay.
             _ => (changes::now(&root), unix_now()),
         };
