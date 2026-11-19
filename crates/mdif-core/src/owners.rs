@@ -148,7 +148,8 @@ impl Rules {
 
     /// The rules for Windows: Program Files and the profile's folders, one name
     /// deep, so what a program keeps is told from what another does. `home` is
-    /// the profile folder, `C:\Users\me`; its drive is the system drive. Names
+    /// the profile folder, `C:\Users\me`; the system's own folders are on the
+    /// drive Windows says it is on (the profile's if that can't be told). Names
     /// are as Windows spells them (the journal and the listing give them so).
     pub fn for_windows(home: &Path) -> Rules {
         let drive: PathBuf = home
@@ -163,9 +164,24 @@ impl Rules {
         // `a/b` as its names, so the path has no mixed separators.
         let below =
             |base: &Path, p: &str| p.split('/').fold(base.to_path_buf(), |acc, n| acc.join(n));
-        let at = |p: &str| below(&drive, p);
+        // Windows and Program Files are on the system drive, which isn't
+        // necessarily the profile's.
+        #[cfg(windows)]
+        let system: PathBuf = crate::os::sys::system_directory()
+            .components()
+            .take_while(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+            .collect();
+        #[cfg(not(windows))]
+        let system = drive.clone();
+        let at = |p: &str| below(&system, p);
         let mut r = Rules { rules: Vec::new() }
             .depth(drive.clone(), 1)
+            .depth(system.clone(), 1)
             .depth(at("Users"), 1)
             .depth(at("Program Files"), 1)
             .depth(at("Program Files (x86)"), 1)
@@ -193,7 +209,6 @@ impl Rules {
         for media in [
             "Documents",
             "Desktop",
-            "Downloads",
             "Pictures",
             "Videos",
             "Music",
@@ -925,7 +940,17 @@ mod tests {
     fn write(p: &Path, len: usize) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         let mut f = fs::File::create(p).unwrap();
-        std::io::Write::write_all(&mut f, &vec![3u8; len]).unwrap();
+        // Not one repeated byte: a compressed folder would take less than it holds.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ len as u64;
+        let data: Vec<u8> = (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        std::io::Write::write_all(&mut f, &data).unwrap();
         f.sync_all().unwrap();
     }
 

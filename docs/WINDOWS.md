@@ -71,6 +71,9 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
     relative to the checked folder handle (`NtCreateFile` with a root directory) closes that gap.
   - A count that can't be had is `LINKS_UNKNOWN`: the scanner deduplicates the file but never
     counts it as wholly ours, and the owner tracker splits it by two.
+  - The owner tracker's re-listings (`Detail::Sizes`) ask the 256 most recently changed files of
+    each folder for their own size and link count, by path like the link counts above: a log held
+    open is listed behind otherwise.
   - A file with several names shows the size of the name that was listed; another name's entry
     can be stale until it's closed. A handle's own size would be current.
   - The file number is the low 8 bytes of the 128-bit ID. NTFS only uses that much; on ReFS two
