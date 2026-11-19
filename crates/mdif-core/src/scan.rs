@@ -574,7 +574,13 @@ mod tests {
             .collect();
         fs::write(path, data).unwrap();
         // APFS reports a private size of 0 until dirty data is flushed.
-        fs::File::open(path).unwrap().sync_all().unwrap();
+        // Opened for writing: Windows flushes only a handle that may write.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
     }
 
     fn opts(min: u64) -> Options {
