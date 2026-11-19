@@ -173,6 +173,25 @@ jobs:
           jq -e '[.growth[] | select(.owner | test("mdif-ci-held")) | .bytes] | add > 20000000' "$RUNNER_TEMP/owners.json"
           rm -rf "$fresh" "$held"
 
+      # The watcher's own budget: under 1 s of CPU and 1 MB written an hour at the
+      # defaults (a sample every 5 minutes, folders every 30), measured here with
+      # one folder update every 6 samples, as on the Mac.
+      - name: The watcher's cost stays inside its budget
+        run: |
+          mdif=./target/release/mdif.exe
+          db="$RUNNER_TEMP/budget.sqlite3"
+          status=0
+          timeout 120 $mdif watch --quiet --interval 5 --owners-every 30 --db "$db" || status=$?
+          [ "$status" = 124 ] || { echo "the watcher ended with $status"; exit 1; }
+          $mdif forecast --db "$db"
+          $mdif owners --db "$db" --hours 1
+          $mdif incidents --db "$db"
+          $mdif forecast --db "$db" --json | jq -e '.watcher_cost
+            | .samples >= 20
+              and .periods >= 1
+              and .cpu_us_per_sample * 12 + .cpu_us_per_period * 2 < 1000000
+              and .written_per_sample * 12 < 1000000'
+
       # A real filler on a real NTFS volume (a VHDX mounted in a folder: the
       # runner is an administrator), through the whole watcher.
       - name: End to end on an NTFS volume
