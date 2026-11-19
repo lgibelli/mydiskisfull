@@ -1330,7 +1330,8 @@ const XCODE: &str = "Xcode's DerivedData and old device support files are rebuil
                      Xcode → Settings → Locations shows DerivedData; delete it while Xcode \
                      isn't building.";
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

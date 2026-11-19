@@ -1,5 +1,5 @@
 //! End to end: real processes doing real I/O on a real APFS volume, watched
-//! by the real watcher.
+//! by the real watcher. macOS only: the volume is a disk image from `hdiutil`.
 //!
 //! A scratch APFS disk image gets three child processes, each in its own
 //! folder:
@@ -28,6 +28,8 @@
 //! ```sh
 //! cargo test -p mdif-core --test e2e_watch -- --ignored --nocapture
 //! ```
+
+#![cfg(target_os = "macos")]
 
 use std::collections::HashMap;
 use std::ffi::OsStr;

@@ -1280,15 +1280,19 @@ mod tests {
                 usage: USAGE
             }
         );
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(d.join(FILE))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        // Readable by its owner only, where files have modes.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(d.join(FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let host = load(d).host;
         assert!(host.starts_with("urn:uuid:"));
 

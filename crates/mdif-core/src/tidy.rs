@@ -1326,7 +1326,8 @@ fn usage(dir: &Path, may_open: &dyn Fn(&Path) -> bool) -> Option<Usage> {
     Some(u)
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::fs::{File, FileTimes};

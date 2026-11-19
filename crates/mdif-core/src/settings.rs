@@ -289,6 +289,7 @@ fn remove_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Write `to`, check it reads back, then put `before` back and check
@@ -340,6 +341,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn json_is_written_through_a_symlink_with_its_permissions() {
         let dir = tempfile::tempdir().unwrap();
@@ -410,8 +412,10 @@ mod tests {
     }
 
     /// A scratch defaults domain, removed with its plist even if the test fails.
+    #[cfg(target_os = "macos")]
     struct Scratch(String);
 
+    #[cfg(target_os = "macos")]
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = Command::new("/usr/bin/defaults")
@@ -424,6 +428,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn user_defaults_round_trip_through_cfprefsd() {
         let scratch = Scratch(format!(

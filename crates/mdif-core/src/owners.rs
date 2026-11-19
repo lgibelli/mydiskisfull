@@ -849,6 +849,8 @@ mod tests {
         assert_eq!(up.listed, 0, "{up:?}");
     }
 
+    // Follows a moved folder by its number, which only macOS can do so far.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_folder_moved_to_the_trash_takes_its_size_along_until_emptied() {
         let _on = crate::privacy::SWITCH

@@ -2717,7 +2717,8 @@ fn month(t: i64, now: i64) -> String {
     }
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
