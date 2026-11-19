@@ -122,8 +122,10 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
                 st.mount_point
             );
         }
-        // When it can't be told, the disk figures are not trusted.
-        let quota = fs::quota_limited(root).unwrap_or(true);
+        // When it can't be told, or the volume is a share, the disk figures are not
+        // trusted (said differently below).
+        let remote = fs::is_remote(root).unwrap_or(true);
+        let quota = fs::quota_limited(root);
         let mut notes = vec![
             "A file under 1 MiB is taken to have one name, so a small hard-linked file is counted \
              once per name here and its share can be off."
@@ -132,14 +134,27 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
              after it closes shows it."
                 .to_string(),
         ];
-        if quota {
-            notes.push(
+        match quota {
+            Ok(true) => notes.push(
                 "This account has a disk quota, so the disk's size and free space are its quota's, \
                  and what the scan finds isn't compared with them."
                     .to_string(),
+            ),
+            Err(_) => notes.push(
+                "Whether this account has a disk quota couldn't be told, so what the scan finds \
+                 isn't compared with the disk's figures."
+                    .to_string(),
+            ),
+            Ok(false) => {}
+        }
+        if remote {
+            notes.push(
+                "This is a network drive or share, which reports the volume behind it: what the \
+                 scan finds isn't compared with it."
+                    .to_string(),
             );
         }
-        (notes, quota)
+        (notes, quota.unwrap_or(true) || remote)
     };
     #[cfg(not(windows))]
     let (notes, quota_limited) = (Vec::new(), false);

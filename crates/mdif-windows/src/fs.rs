@@ -18,7 +18,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_DESCRIPTOR, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileStandardInfo,
-    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx,
     GetFinalPathNameByHandleW, GetLogicalDriveStringsW, GetVolumeInformationW,
     GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx,
     OpenFileById,
@@ -127,6 +127,16 @@ pub fn quota_limited(path: &Path) -> io::Result<bool> {
         return Err(io::Error::last_os_error());
     }
     Ok(avail != free)
+}
+
+/// Whether the volume holding `path` is a network drive or share: its server
+/// reports the volume behind it, not the folder shared.
+pub fn is_remote(path: &Path) -> io::Result<bool> {
+    let mount = volume_path(&std::path::absolute(path)?)?;
+    // SAFETY: `mount` is NUL-ended.
+    let kind = unsafe { GetDriveTypeW(mount.as_ptr()) };
+    // DRIVE_REMOTE is 4; a UNC root has no drive type of its own and is remote.
+    Ok(kind == 4 || text(&mount).starts_with(r"\\") && !text(&mount).starts_with(r"\\?\"))
 }
 
 /// The name of the file system of the volume holding `path`: `NTFS`, `ReFS`,
@@ -547,8 +557,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kind = file_system(dir.path()).unwrap();
         assert!(!kind.is_empty());
-        // Whatever the account's quota, the probe answers.
+        // Whatever the account's quota, the probes answer; a temp folder is local.
         quota_limited(dir.path()).unwrap();
+        assert!(!is_remote(dir.path()).unwrap());
     }
 
     #[test]

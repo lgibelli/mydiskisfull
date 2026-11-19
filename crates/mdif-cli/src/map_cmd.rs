@@ -38,12 +38,10 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     let t = &m.scan.root.totals;
     // The root is the volume's own root, whichever drive: not only the boot volume.
     // As an absolute path, so `D:` (the current folder of D:) is not taken for `D:\`;
-    // and not on a share, where the server reports the volume behind it.
+    // (A share, a quota and an unknown quota are `quota_limited`: no reconciliation.)
     let trimmed = |p: &str| p.trim_end_matches(['\\', '/']).to_lowercase();
     let absolute = std::path::absolute(&m.root).unwrap_or_else(|_| m.root.clone());
-    let on_a_share = cfg!(windows) && absolute.to_string_lossy().starts_with(r"\\");
     let whole_volume = !m.quota_limited
-        && !on_a_share
         && (m.root == map::boot_volume()
             || trimmed(&absolute.to_string_lossy()) == trimmed(&m.fs.mount_point));
     println!();
