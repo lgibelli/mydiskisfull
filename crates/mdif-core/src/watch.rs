@@ -591,7 +591,8 @@ impl Owners {
             .context("replaying the file-system journal")?;
         let (mut events, done) = (replay.events, replay.complete);
         let replayed = events.len();
-        if let Some(id) = events.iter().map(|e| e.id).max() {
+        // Where the journal says to resume, or else after the newest event.
+        if let Some(id) = replay.next.or_else(|| events.iter().map(|e| e.id).max()) {
             self.last_id = id;
         }
         let mut open_dirs: Vec<PathBuf> = heavy

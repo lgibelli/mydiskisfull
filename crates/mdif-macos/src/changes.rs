@@ -24,6 +24,9 @@ pub struct Replay {
     /// Whether the journal said it had delivered all of its history. When
     /// false (`timeout` ran out first) there may be more: a gap.
     pub complete: bool,
+    /// Where to resume next time, when it isn't the newest event's id. The
+    /// Mac's events say it themselves, so this is always `None` here.
+    pub next: Option<u64>,
 }
 
 /// The position of "now": where a first replay starts from.
