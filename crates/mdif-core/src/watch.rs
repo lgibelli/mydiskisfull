@@ -407,6 +407,7 @@ impl Watcher {
                 self.set_steady();
             }
         }
+        let mut missed = false;
         let (growth, period) = match self.owners.as_mut() {
             Some(o) if due => {
                 let heavy: Vec<i32> = self
@@ -428,13 +429,11 @@ impl Watcher {
                     Err(e) => {
                         eprintln!("the folders weren't measured at {now}: {e:#}");
                         o.last_period = Some(now);
-                        // Recorded as a period with a gap, so a report says that
-                        // the folders weren't all checked.
-                        let missed = Period {
-                            gaps: 1,
-                            ..Period::default()
-                        };
-                        (Vec::new(), Some((missed, Duration::ZERO, false)))
+                        // Recorded as a gap below, so a report says that the folders
+                        // weren't all checked; but not as a period, which would
+                        // be measured growth that incident detection reads as nil.
+                        missed = true;
+                        (Vec::new(), None)
                     }
                 }
             }
@@ -458,6 +457,20 @@ impl Watcher {
             if p.gaps > 0 {
                 meta.push((GAP_KEY.to_string(), now.to_string()));
             }
+        }
+        if missed {
+            let last = LastPeriod {
+                at: now,
+                gaps: 1,
+                listed: 0,
+                entries: 0,
+                deferred: 0,
+                skipped: 0,
+                cpu_us: 0,
+                biggest: Vec::new(),
+            };
+            meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
+            meta.push((GAP_KEY.to_string(), now.to_string()));
         }
         if let (Some(o), Some(_)) = (&self.owners, period) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
@@ -697,7 +710,11 @@ pub struct LastPeriod {
 /// When the folders last weren't all checked (a gap in the journal, or a period
 /// that couldn't run), if they ever weren't.
 pub fn recorded_gap(store: &Store) -> Result<Option<i64>> {
-    Ok(store.meta(GAP_KEY)?.and_then(|v| v.parse().ok()))
+    if let Some(at) = store.meta(GAP_KEY)?.and_then(|v| v.parse().ok()) {
+        return Ok(Some(at));
+    }
+    // A history from before the gap time was kept apart: the last period's own.
+    Ok(recorded_period(store)?.filter(|p| p.gaps > 0).map(|p| p.at))
 }
 
 pub fn recorded_period(store: &Store) -> Result<Option<LastPeriod>> {
@@ -798,6 +815,39 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_gap_is_kept_apart_and_found_in_an_older_history() {
+        let store = Store::open_in_memory().unwrap();
+        let point = SpacePoint {
+            ts: 1_000,
+            total: 10,
+            avail: 5,
+        };
+        assert_eq!(recorded_gap(&store).unwrap(), None);
+        // A history from before the gap time had its own key: the period's.
+        let old = r#"{"at":900,"gaps":2,"listed":0,"entries":0,"deferred":0,"skipped":0,"cpu_us":0,"biggest":[]}"#;
+        store
+            .record("v", point, &[], &[], &[(PERIOD_KEY, old)])
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(900));
+        // Its own key wins once there is one, and survives a clean period.
+        let clean = r#"{"at":1100,"gaps":0,"listed":1,"entries":1,"deferred":0,"skipped":0,"cpu_us":0,"biggest":[]}"#;
+        store
+            .record(
+                "v",
+                point,
+                &[],
+                &[],
+                &[(GAP_KEY, "950"), (PERIOD_KEY, clean)],
+            )
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(950));
+        store
+            .record("v", point, &[], &[], &[(PERIOD_KEY, clean)])
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(950));
+    }
 
     // Needs the list of processes, which Windows doesn't give yet.
     #[cfg(target_os = "macos")]
