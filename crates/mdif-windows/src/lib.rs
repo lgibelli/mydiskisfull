@@ -10,6 +10,8 @@
 //! - [`fs`]: volume statistics, file identity, locks, and the per-process
 //!   switch that stops cloud placeholders from being downloaded.
 //! - [`proc`]: processes: their I/O, their programs, ending them.
+//! - [`startup`]: what starts at login (the `Run` key and Task Manager's
+//!   switch for it); Windows only.
 //! - [`sys`]: when the PC started, the user's folders, the system folder,
 //!   standard error into a log, the background priority.
 //!
@@ -25,6 +27,7 @@ pub mod changes;
 pub mod extents;
 pub mod fs;
 pub mod proc;
+pub mod startup;
 pub mod sys;
 
 use std::io;

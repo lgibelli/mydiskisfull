@@ -109,11 +109,40 @@ jobs:
       - name: What waits for Windows is refused
         run: |
           mdif=./target/release/mdif.exe
-          for c in agent clean docker map owners incidents space suggest tidy timemachine tweaks writers; do
+          for c in clean docker map owners incidents space suggest tidy timemachine tweaks writers; do
             if out=$($mdif $c 2>&1); then echo "mdif $c should be refused"; exit 1; fi
             echo "$out" | grep -q "isn't available on this operating system yet" \
               || { echo "mdif $c: $out"; exit 1; }
           done
+
+      # The watcher at sign-in: the Run key, a program with no console window,
+      # one instance at a time, and the sample it takes at once.
+      - name: The watcher starts at sign-in
+        run: |
+          mdif=./target/release/mdif.exe
+          python3 - <<'PY'
+          import struct
+          def subsystem(path):
+              d = open(path, 'rb').read()
+              pe = struct.unpack_from('<I', d, 0x3c)[0]
+              return struct.unpack_from('<H', d, pe + 24 + 68)[0]
+          assert subsystem('target/release/mdif-watch.exe') == 2, 'mdif-watch must be a GUI program'
+          assert subsystem('target/release/mdif.exe') == 3, 'mdif must be a console program'
+          PY
+          $mdif agent status | tee /dev/stderr | grep -q "Starts at sign-in: no"
+          $mdif agent install --interval 60
+          sleep 8
+          $mdif agent status | tee /dev/stderr | grep -q "Watcher: running"
+          $mdif agent status | grep -q "Starts at sign-in: yes"
+          # The first sample is taken at once, in the default history.
+          $mdif forecast --json | jq -e '.samples >= 1'
+          # A second watcher refuses to run beside it.
+          if out=$(timeout 30 $mdif watch --interval 60 2>&1); then echo "a second watcher ran"; exit 1; fi
+          echo "$out" | grep -q "already running" || { echo "$out"; exit 1; }
+          $mdif agent uninstall
+          sleep 3
+          $mdif agent status | tee /dev/stderr | grep -q "Watcher: not running"
+          $mdif agent status | grep -q "Starts at sign-in: no"
 
   windows-arm:
     name: check (Windows on ARM)

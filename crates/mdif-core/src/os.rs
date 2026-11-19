@@ -12,7 +12,7 @@
 #[cfg(target_os = "macos")]
 pub use mdif_macos::{bulk, changes, extents, fs, proc, sys};
 #[cfg(windows)]
-pub use mdif_windows::{bulk, changes, extents, fs, proc, sys};
+pub use mdif_windows::{bulk, changes, extents, fs, proc, startup, sys};
 
 #[cfg(not(any(target_os = "macos", windows)))]
 compile_error!("MyDiskIsFull has no backend for this operating system yet");

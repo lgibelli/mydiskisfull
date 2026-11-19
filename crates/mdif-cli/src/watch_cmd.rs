@@ -18,21 +18,13 @@ use serde_json::{Value, json};
 /// How to start the watcher, for whoever has no history: the agent where
 /// the OS has one, or running it by hand.
 pub(crate) fn start_hint() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Start the watcher with `mdif agent install` (or run `mdif watch`)."
-    } else {
-        "Start the watcher with `mdif watch`."
-    }
+    "Start the watcher with `mdif agent install` (or run `mdif watch`)."
 }
 
 /// How to look up whether the watcher runs, where there is a way; with its
 /// leading space.
 pub(crate) fn running_hint() -> &'static str {
-    if cfg!(target_os = "macos") {
-        " (`mdif agent status`)"
-    } else {
-        ""
-    }
+    " (`mdif agent status`)"
 }
 
 /// The watcher's own budget, from the plan.
@@ -161,6 +153,17 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     if log {
         open_log()?;
     }
+    // One watcher: two would sample the same history twice. (launchd sees to it
+    // on a Mac; here the name is held for as long as this process lives.)
+    #[cfg(windows)]
+    let _only = if once {
+        None
+    } else {
+        match mdif_core::os::startup::claim(crate::agent_windows::INSTANCE)? {
+            Some(guard) => Some(guard),
+            None => anyhow::bail!("the watcher is already running (`mdif agent status`)"),
+        }
+    };
     if attached {
         exit_when_stdin_closes();
     }

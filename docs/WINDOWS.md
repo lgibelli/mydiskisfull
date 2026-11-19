@@ -27,17 +27,18 @@ it the way the Mac app does, and `app/Tests` holds the contract.
 
 Phase 1 (done): the workspace builds, lints and tests on x86_64 Windows (built and run on a
 runner), is type-checked for aarch64 Windows (not run), and the Mac is unchanged. What runs on Windows today is the free-space forecast: `mdif watch`, `status`,
-`forecast`, `alerts`, `keep` and `knowledge` (without Ask AI). The rest says it isn't available on
+`forecast`, `alerts`, `keep`, `knowledge` (without Ask AI) and `agent` (the watcher at sign-in,
+through the user's `Run` key and `mdif-watch.exe`, the same program without a console window). The rest says it isn't available on
 this operating system yet, rather than printing numbers built on another system's picture of a
-disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `agent`, `map`, `space`,
+disk: `suggest`, `clean`, `tidy`, `docker`, `timemachine`, `tweaks`, `map`, `space`,
 `writers`, `owners` and `incidents`.
 
 | Phase | What | State |
 |---|---|---|
 | 0 | Spikes on the runner: the NTFS journal without admin, listing speed, whether network I/O counts as writes (placeholders and toasts still to measure) | measured, below |
 | 1 | The seam: builds and tests on Windows, no change on the Mac | done |
-| 2 | The backend for real: listing from a handle (allocated size, file number, links), process list and writes, Recycle Bin, moved folders by number | |
-| 3 | The watcher and trends: the change journal, per-process writes, the agent (a `Run` key), the e2e test on an NTFS disk image | |
+| 2 | The backend for real: listing from a handle (allocated size, file number, links), process list and writes, Recycle Bin, moved folders by number | listing and process list done; Recycle Bin, moved folders open |
+| 3 | The watcher and trends: the change journal, per-process writes, the agent (a `Run` key: done), the e2e test on an NTFS disk image | |
 | 4 | Windows' own catalogue: what fills a disk there, handlers, clean-ups, tidy-ups, tweaks (registry), the backups page | |
 | 5 | An optional elevated service for the journal at full precision and the file table | |
 | 6 | The app (Tauri) | |

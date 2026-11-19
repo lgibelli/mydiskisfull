@@ -10,6 +10,13 @@ rust-version.workspace = true
 name = "mdif"
 path = "src/main.rs"
 
+# The same program with no console window, for what starts at login on
+# Windows (build.rs gives it the GUI subsystem): `mdif watch --quiet --log`.
+[[bin]]
+name = "mdif-watch"
+path = "src/watch_main.rs"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

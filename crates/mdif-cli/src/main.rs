@@ -1,6 +1,13 @@
-//! `mdif`: the MyDiskIsFull command line.
+// `mdif`: the MyDiskIsFull command line. (A plain comment: `watch_main.rs` includes this file.)
 
+#[cfg(not(windows))]
 mod agent_cmd;
+#[cfg(windows)]
+mod agent_windows;
+#[cfg(not(windows))]
+use agent_cmd as agent;
+#[cfg(windows)]
+use agent_windows as agent;
 mod alerts_cmd;
 mod clean_cmd;
 mod docker_cmd;
@@ -226,8 +233,7 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
     },
-    /// Run the watcher in the background (a LaunchAgent)
-    #[command(hide = !cfg!(target_os = "macos"))]
+    /// Run the watcher in the background (a LaunchAgent; at sign-in on Windows)
     Agent {
         #[command(subcommand)]
         action: AgentAction,
@@ -404,13 +410,13 @@ enum KeepAction {
 
 #[derive(Subcommand)]
 enum AgentAction {
-    /// Install the watcher as a LaunchAgent and start it
+    /// Install the watcher (a LaunchAgent; the Run key on Windows) and start it
     Install {
         /// Seconds between samples
         #[arg(long, default_value_t = 300)]
         interval: u64,
     },
-    /// Stop the watcher and remove the LaunchAgent (the history is kept)
+    /// Stop the watcher and remove it from login (the history is kept)
     Uninstall,
     /// Whether the watcher is running, and how big its history is
     Status,
@@ -429,7 +435,6 @@ const NOT_HERE_YET: &[&str] = &[
     "docker",
     "timemachine",
     "tweaks",
-    "agent",
     "map",
     "space",
     "writers",
@@ -441,7 +446,24 @@ const NOT_HERE_YET: &[&str] = &[
 /// argument, or what `help` is asked about. Names that aren't text are
 /// none (clap says what's wrong with them).
 fn command_named() -> Vec<String> {
-    named_in(std::env::args_os().skip(1))
+    named_in(arguments().into_iter().skip(1))
+}
+
+/// The command line. `mdif-watch` (the program that starts at login, without a
+/// console window) is `mdif watch --quiet --log` and whatever follows.
+fn arguments() -> Vec<std::ffi::OsString> {
+    let mut args: Vec<_> = std::env::args_os().collect();
+    if watcher_program(args.first()) {
+        args.splice(1..1, ["watch", "--quiet", "--log"].map(Into::into));
+    }
+    args
+}
+
+fn watcher_program(argv0: Option<&std::ffi::OsString>) -> bool {
+    argv0
+        .map(std::path::Path::new)
+        .and_then(|p| p.file_stem())
+        .is_some_and(|s| s.eq_ignore_ascii_case("mdif-watch"))
 }
 
 fn named_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
@@ -473,7 +495,7 @@ fn main() -> Result<()> {
     if let Some(name) = not_here_yet(&command_named()) {
         bail!("`mdif {name}` isn't available on this operating system yet");
     }
-    match Cli::parse().cmd {
+    match Cli::parse_from(arguments()).cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
         Cmd::Forecast {
             json,
@@ -580,9 +602,9 @@ fn main() -> Result<()> {
             Some(TweakAction::Revert { id }) => tweaks_cmd::revert(&db, &id, json)?,
         },
         Cmd::Agent { action } => match action {
-            AgentAction::Install { interval } => agent_cmd::install(interval)?,
-            AgentAction::Uninstall => agent_cmd::uninstall()?,
-            AgentAction::Status => agent_cmd::status()?,
+            AgentAction::Install { interval } => agent::install(interval)?,
+            AgentAction::Uninstall => agent::uninstall()?,
+            AgentAction::Status => agent::status()?,
         },
         Cmd::Map {
             root,
@@ -628,6 +650,25 @@ mod tests {
             let expected = (!cfg!(target_os = "macos")).then_some(*name);
             assert_eq!(not_here_yet(&[name.to_string()]), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn the_windowless_watcher_is_the_watch_command_with_its_own_arguments() {
+        let prog = |p: &str| Some(std::ffi::OsString::from(p));
+        assert!(watcher_program(
+            prog(
+                &std::path::Path::new("Program Files")
+                    .join("x")
+                    .join("mdif-watch.exe")
+                    .to_string_lossy()
+            )
+            .as_ref()
+        ));
+        assert!(watcher_program(prog("MDIF-WATCH.EXE").as_ref()));
+        assert!(watcher_program(prog("mdif-watch").as_ref()));
+        assert!(!watcher_program(prog("mdif.exe").as_ref()));
+        assert!(!watcher_program(prog("mdif-watcher").as_ref()));
+        assert!(!watcher_program(None));
     }
 
     #[test]
