@@ -519,6 +519,11 @@ mod tests {
             PathBuf::from(r"\\srv\share\d")
         );
         assert_eq!(fs::plain(PathBuf::from(r"C:\a")), PathBuf::from(r"C:\a"));
+        // A volume with no letter keeps its name: stripped, it would be relative.
+        assert_eq!(
+            fs::plain(PathBuf::from(r"\\?\Volume{1234}\x")),
+            PathBuf::from(r"\\?\Volume{1234}\x")
+        );
         assert!(under(Path::new(r"C:\"), Path::new(r"c:\Users\X")));
         assert!(under(Path::new(r"C:\Users"), Path::new(r"c:\Users")));
         // Names are exact: `repo` and `Repo` can be two folders.

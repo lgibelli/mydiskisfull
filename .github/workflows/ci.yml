@@ -173,6 +173,11 @@ jobs:
           jq -e '[.growth[] | select(.owner | test("mdif-ci-held")) | .bytes] | add > 20000000' "$RUNNER_TEMP/owners.json"
           rm -rf "$fresh" "$held"
 
+      # A real filler on a real NTFS volume (a VHDX mounted in a folder: the
+      # runner is an administrator), through the whole watcher.
+      - name: End to end on an NTFS volume
+        run: cargo test --locked -p mdif-core --test e2e_watch_windows -- --ignored --nocapture
+
   windows-arm:
     name: check (Windows on ARM)
     if: ${{ !inputs.spikes }}

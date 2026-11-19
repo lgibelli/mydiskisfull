@@ -439,12 +439,16 @@ pub(crate) fn folder_by_id(volume: HANDLE, id: u64) -> io::Result<Option<PathBuf
 }
 
 /// `\\?\C:\x` as `C:\x`, and `\\?\UNC\s\x` as `\\s\x`: the paths the rest of the
-/// program uses.
+/// program uses. A volume with no drive letter is only named by its GUID
+/// (`\\?\Volume{...}\x`), which stays as it is: without the prefix it would be a
+/// relative path.
 pub(crate) fn plain(path: PathBuf) -> PathBuf {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+    } else if let Some(rest) = s.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
         PathBuf::from(rest)
     } else {
         path
