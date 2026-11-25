@@ -74,8 +74,7 @@ enum Cmd {
         /// Print errors only
         #[arg(long)]
         quiet: bool,
-        /// Append errors to ~/Library/Logs/MyDiskIsFull/watch.log
-        #[arg(long)]
+        #[arg(long, help = LOG_HELP)]
         log: bool,
         /// Exit when standard input closes: the app that started it quit
         #[arg(long)]
@@ -112,7 +111,6 @@ enum Cmd {
         history: History,
     },
     /// What to do about what fills the disk, so it stays fixed
-    #[command(hide = !cfg!(target_os = "macos"))]
     Suggest {
         /// Print the result as JSON
         #[arg(long)]
@@ -122,9 +120,9 @@ enum Cmd {
     },
     /// Do the clean-ups a suggestion offers: remove finished worktrees,
     /// delete build output, move what an app left behind to the Trash,
-    /// delete local Time Machine snapshots, remove what Docker can. Each is
-    /// checked again first
-    #[command(hide = !cfg!(target_os = "macos"))]
+    /// delete local Time Machine snapshots, remove what Docker can (on
+    /// Windows, build output, a project's packages and finished worktrees so
+    /// far). Each is checked again first
     Clean {
         /// What a suggestion offers to clean (its action's paths; a local
         /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it;
@@ -152,8 +150,8 @@ enum Cmd {
         db: PathBuf,
     },
     /// Clean-ups the watcher does once a day, each once you turn it on: old
-    /// simulators, old Rust build caches, caches apps stopped using
-    #[command(hide = !cfg!(target_os = "macos"))]
+    /// build folders, node_modules and Rust build caches (on a Mac also old
+    /// simulators, and caches apps stopped using)
     Tidy {
         #[command(subcommand)]
         action: Option<TidyAction>,
@@ -220,7 +218,6 @@ enum Cmd {
         volume: PathBuf,
     },
     /// Settings that stop something from filling the disk again
-    #[command(hide = !cfg!(target_os = "macos"))]
     Tweaks {
         #[command(subcommand)]
         action: Option<TweakAction>,
@@ -238,8 +235,7 @@ enum Cmd {
     },
     /// Where the disk space is now, reconciled with what the file system reports
     Map {
-        /// Directory to scan (default: the whole Data volume)
-        #[arg(long, default_value_os_t = map::boot_volume())]
+        #[arg(long, default_value_os_t = map::boot_volume(), help = ROOT_HELP)]
         root: PathBuf,
         /// Levels of the tree to print
         #[arg(long, default_value_t = 3)]
@@ -251,9 +247,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Where the space goes: macOS, apps, build output, caches, your files...
-    /// biggest first, and what of it is waste
-    #[command(hide = !cfg!(target_os = "macos"))]
+    /// Where the space goes: the system, apps, build output, caches, your
+    /// files... biggest first, and what of it is waste
     Space {
         /// Print the result as JSON (what the app reads)
         #[arg(long)]
@@ -322,23 +317,24 @@ enum TidyAction {
 #[derive(Subcommand)]
 enum KnowledgeAction {
     /// Download a newer list, if there is one (signed like the app's
-    /// updates; nothing about this Mac is sent)
+    /// updates; nothing about this computer is sent)
     Update,
     /// What's said about these folders
     About {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
-    /// This Mac's big or growing folders that nothing in particular is said
-    /// about (never your own folders)
+    /// This computer's big or growing folders that nothing in particular is
+    /// said about (never your own folders)
     Missing {
         /// Only folders this big, or grown as much in a week, in MB
         #[arg(long, default_value_t = 500)]
         min_mb: u64,
     },
     /// Ask AI what a folder is, when nothing's known about it: only its
-    /// name (never your own folders, nothing in it), its size and the macOS
-    /// version are sent, to OpenAI, on your ChatGPT plan (`sign-in` first)
+    /// name (never your own folders, nothing in it), its size and the
+    /// system's version are sent, to OpenAI, on your ChatGPT plan (`sign-in`
+    /// first)
     Ask {
         folder: PathBuf,
         /// Its size, sent rounded to two digits
@@ -415,26 +411,38 @@ enum AgentAction {
     },
     /// Stop the watcher and remove it from login (the history is kept)
     Uninstall,
+    /// Stop the watcher until the next sign-in (the installer does, to replace it)
+    #[command(hide = cfg!(target_os = "macos"))]
+    Stop,
+    /// Start the watcher now, as sign-in would
+    #[command(hide = cfg!(target_os = "macos"))]
+    Start,
     /// Whether the watcher is running, and how big its history is
-    Status,
+    Status {
+        /// Print it as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-/// What can't run on this OS yet: what a Mac has that the first Windows
-/// release doesn't (Time Machine, tweaks of macOS settings, the launch agent)
-/// or that waits for Windows' own list of what fills a disk (the map and the
-/// categories, and with them suggestions and clean-ups), or the list of the
-/// user's processes and what they write and the change journal (`writers`,
-/// `owners` and `incidents`, which would say "none" for what they can't see).
-const NOT_HERE_YET: &[&str] = &[
-    "suggest",
-    "clean",
-    "tidy",
-    "docker",
-    "timemachine",
-    "tweaks",
-    "space",
-    "writers",
-];
+/// Where `watch --log` writes ([`watch_cmd::log_path`]).
+#[cfg(target_os = "macos")]
+const LOG_HELP: &str = "Append errors to ~/Library/Logs/MyDiskIsFull/watch.log";
+#[cfg(windows)]
+const LOG_HELP: &str = r"Append errors to %LOCALAPPDATA%\MyDiskIsFull\Logs\watch.log";
+
+/// What `map` scans by default ([`map::boot_volume`]).
+#[cfg(target_os = "macos")]
+const ROOT_HELP: &str = "Directory to scan (default: the whole Data volume)";
+#[cfg(windows)]
+const ROOT_HELP: &str = "Directory to scan (default: the whole drive Windows is on)";
+
+/// What can't run on this OS yet: Time Machine (the Mac's: Windows' own
+/// backups wait for a page of their own), Docker (on Windows its disk is
+/// WSL's, which pruning doesn't shrink), and `writers`, which waits for
+/// evidence from the disk of what each process writes (a Windows write
+/// counter counts pipes too).
+const NOT_HERE_YET: &[&str] = &["docker", "timemachine", "writers"];
 
 /// The command the line names, before its arguments are parsed: the first
 /// argument, or what `help` is asked about. Names that aren't text are
@@ -472,7 +480,7 @@ fn named_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
 }
 
 /// The command named, when it can't run on this OS yet. Looked at before the
-/// arguments are parsed, so a bare `mdif agent` or `mdif help agent` says so
+/// arguments are parsed, so a bare `mdif tidy` or `mdif help tidy` says so
 /// rather than asking for what it would need or describing it.
 fn not_here_yet(named: &[String]) -> Option<&'static str> {
     if cfg!(target_os = "macos") {
@@ -598,7 +606,9 @@ fn main() -> Result<()> {
         Cmd::Agent { action } => match action {
             AgentAction::Install { interval } => agent::install(interval)?,
             AgentAction::Uninstall => agent::uninstall()?,
-            AgentAction::Status => agent::status()?,
+            AgentAction::Stop => agent::stop()?,
+            AgentAction::Start => agent::start()?,
+            AgentAction::Status { json } => agent::status(json)?,
         },
         Cmd::Map {
             root,
@@ -636,7 +646,16 @@ mod tests {
 
     #[test]
     fn what_waits_for_this_os_is_named_and_the_trends_are_not() {
-        for trends in ["status", "forecast", "watch", "alerts", "keep", "knowledge"] {
+        for trends in [
+            "status",
+            "forecast",
+            "watch",
+            "alerts",
+            "keep",
+            "knowledge",
+            "tidy",
+            "tweaks",
+        ] {
             assert_eq!(not_here_yet(&[trends.to_string()]), None, "{trends}");
         }
         assert_eq!(not_here_yet(&[]), None);
@@ -689,6 +708,12 @@ mod tests {
                 .find_subcommand(name)
                 .unwrap_or_else(|| panic!("no command {name}"));
             assert_eq!(sub.is_hide_set(), !cfg!(target_os = "macos"), "{name}");
+        }
+        // And what runs everywhere is in the help everywhere.
+        for sub in cli.get_subcommands() {
+            if !NOT_HERE_YET.contains(&sub.get_name()) {
+                assert!(!sub.is_hide_set(), "{} is hidden", sub.get_name());
+            }
         }
     }
 }

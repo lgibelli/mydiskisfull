@@ -34,10 +34,14 @@ pub fn clean(
         .collect();
     // Docker, asked once, right before: only what's still as shown goes.
     // What's old is asked when it's done, Docker started for it if need be.
-    let one_item = |p: &PathBuf| docker::is_item(p) && p != Path::new(docker::OLD);
+    // (Docker and Time Machine are a Mac's alone so far: elsewhere their
+    // names go to `clean::plan`, which says so.)
+    let mac = cfg!(target_os = "macos");
+    let one_item = |p: &PathBuf| mac && docker::is_item(p) && p != Path::new(docker::OLD);
+    let snapshot = |p: &PathBuf| mac && clean::snapshot_date(p).is_some();
     let docker_now = paths.iter().any(one_item).then(|| docker::report(&home));
     // Only worth running tmutil when one of them is a snapshot.
-    let snapshots = if paths.iter().any(|p| clean::snapshot_date(p).is_some()) {
+    let snapshots = if paths.iter().any(snapshot) {
         mdif_core::apfs::local_snapshots(volume).map_err(|e| format!("{e:#}"))
     } else {
         Ok(Vec::new())
@@ -68,9 +72,7 @@ pub fn clean(
                     removal,
                 }),
             },
-            _ if clean::snapshot_date(p).is_none() => {
-                clean::plan(p, &home, &keep, &finished, &churning)
-            }
+            _ if !snapshot(p) => clean::plan(p, &home, &keep, &finished, &churning),
             (Ok(listed), _) => clean::snapshot(p, listed, volume),
             (Err(why), _) => Err(why.clone()),
         };
@@ -97,6 +99,7 @@ pub fn clean(
                     Step::Trash { .. } => "Would move to the Trash",
                     Step::Delete(_) => "Would delete",
                     Step::Empty { .. } => "Would empty",
+                    Step::EmptyTrash(_) if cfg!(windows) => "Would empty the Recycle Bin",
                     Step::EmptyTrash(_) => "Would empty the Trash",
                     Step::FinderTrash(_) => "Would move to the Trash with Finder",
                     Step::Restart { .. } => "Would restart a helper of",
@@ -181,7 +184,8 @@ pub fn clean(
             .filter(|(d, _)| !d.how.starts_with("docker"))
             .map(|(d, _)| d.path.clone())
             .collect();
-        if done.iter().any(|(d, _)| d.how == "trashed") {
+        // (Windows measures its Recycle Bin when the report is made.)
+        if !cfg!(windows) && done.iter().any(|(d, _)| d.how == "trashed") {
             changed.push(home.join(".Trash"));
         }
         if docker_changed {
@@ -209,15 +213,23 @@ pub fn clean(
         for (d, size) in &done {
             let shown = printable(&tilde(&d.path.to_string_lossy())).into_owned();
             match d.how {
-                "trashed" => println!(
-                    "Moved to the Trash: {shown}{}",
-                    size.map_or(String::new(), |s| format!(
-                        " ({} comes back once the Trash is emptied)",
-                        bytes(s)
-                    ))
-                ),
+                "trashed" => {
+                    let bin = if cfg!(windows) {
+                        "the Recycle Bin"
+                    } else {
+                        "the Trash"
+                    };
+                    println!(
+                        "Moved to {bin}: {shown}{}",
+                        size.map_or(String::new(), |s| format!(
+                            " ({} comes back once {bin} is emptied)",
+                            bytes(s)
+                        ))
+                    )
+                }
                 "deleted" => println!("Deleted: {shown}"),
                 "emptied" => println!("Emptied: {shown}"),
+                "erased" if cfg!(windows) => println!("Emptied the Recycle Bin"),
                 "erased" => println!("Emptied the Trash"),
                 "restarted" => println!("Restarted a helper of {shown}"),
                 "released" => println!("Deleted the local snapshot {shown}"),

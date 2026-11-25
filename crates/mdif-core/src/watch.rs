@@ -57,6 +57,10 @@ pub struct Watcher {
     access_probes: Vec<PathBuf>,
     /// Free space at the last sample.
     last_avail: Option<u64>,
+    /// When a folder period was measured but couldn't be written (the history
+    /// couldn't commit: a full disk): its growth is lost, and the next sample
+    /// written says there was a gap then.
+    unrecorded: Option<i64>,
 }
 
 /// What counts as an incident. The defaults are the plan's clauses.
@@ -261,6 +265,7 @@ impl Watcher {
             period_writes: HashMap::new(),
             access_probes: Vec::new(),
             last_avail: None,
+            unrecorded: None,
         })
     }
 
@@ -321,6 +326,17 @@ impl Watcher {
         let mut tracker = Tracker::new(rules, fs::dev_of_volume(&self.volume).ok(), every.max(1));
         if let Ok(id) = fs::fsid(&self.volume) {
             tracker.follow_moves(id);
+        }
+        // What the watcher before this one was following: a file held open
+        // while it grows is silent in the journal, so nothing past the
+        // checkpoint would bring its folder back.
+        if let Some(text) = self.store.meta(&format!("owners.{}.following", self.key))? {
+            tracker.resume(
+                serde_json::from_str::<Vec<String>>(&text)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(PathBuf::from),
+            );
         }
         self.owners = Some(Owners {
             tracker,
@@ -480,11 +496,28 @@ impl Watcher {
             // (a history from before the gap time had its own key).
             meta.push((GAP_KEY.to_string(), at.to_string()));
         }
+        // A period that couldn't be written is a gap as of then, unless this
+        // sample has a newer one of its own (written last, it is what's kept).
+        if !(missed || period.is_some_and(|p| p.gaps > 0))
+            && let Some(at) = self.unrecorded
+        {
+            meta.push((GAP_KEY.to_string(), at.to_string()));
+        }
         // The checkpoint is kept too when the attempt failed (it is where the next
         // one starts), so a restart in between doesn't skip what happened since.
         if let (Some(o), true) = (&self.owners, missed || period.is_some()) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
             meta.push((format!("owners.{}.wall", self.key), o.last_wall.to_string()));
+            let following: Vec<String> = o
+                .tracker
+                .following()
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            meta.push((
+                format!("owners.{}.following", self.key),
+                serde_json::to_string(&following)?,
+            ));
         }
         if let Some(granted) = access {
             meta.push((ACCESS_KEY.to_string(), format!("{now} {granted}")));
@@ -502,8 +535,14 @@ impl Watcher {
         );
         meta.push(("watch.cost".to_string(), format_cost(&so_far)));
         let meta: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        self.store
-            .record(&self.key, point, &writes, &growth, &meta)?;
+        let recorded = self.store.record(&self.key, point, &writes, &growth, &meta);
+        match &recorded {
+            Ok(()) => self.unrecorded = None,
+            // The folders' checkpoint has moved on past what this period found.
+            Err(_) if missed || period.is_some() => self.unrecorded = Some(now),
+            Err(_) => {}
+        }
+        recorded?;
         if now - self.last_compact >= HOUR {
             self.store.compact(now)?;
             self.last_compact = now;
@@ -567,9 +606,19 @@ impl Watcher {
                     min_node: u64::MAX,
                     big_files: None,
                 };
-                let size = scan::scan(Path::new(owner), &opts)
-                    .ok()
-                    .map(|s| s.root.totals.allocated);
+                let path = Path::new(owner);
+                let size = if !privacy::may_open(path) {
+                    None
+                } else {
+                    match std::fs::symlink_metadata(path) {
+                        // A file directly in a folder above where owners are (the
+                        // home folder, a drive's root) is an owner of its own.
+                        Ok(m) if m.is_file() => Some(crate::portable::allocated(path, &m)),
+                        _ => scan::scan(path, &opts)
+                            .ok()
+                            .map(|s| s.root.totals.allocated),
+                    }
+                };
                 sizes.insert(owner.to_string(), (now, size));
                 size
             },

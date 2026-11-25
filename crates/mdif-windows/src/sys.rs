@@ -23,6 +23,9 @@ use windows_sys::core::{GUID, PWSTR};
 
 use crate::unsupported;
 
+pub use crate::private::user_sid;
+pub use crate::registry::{machine_number, set_user_number, user_number, user_subkeys};
+
 /// Windows asks nothing before a program opens a folder (there's no TCC), so
 /// there's nothing to probe.
 pub fn access_probes(_home: &Path) -> Vec<PathBuf> {
@@ -61,6 +64,32 @@ pub fn account_home() -> Option<PathBuf> {
 /// `C:\Users\me\AppData\Local`: per user, and not roamed to other PCs.
 pub fn local_app_data() -> Option<PathBuf> {
     known_folder(&FOLDERID_LocalAppData)
+}
+
+/// Which Windows this is, as Settings → System → About says it: "11 24H2",
+/// "10 22H2" (an older one without a feature update's name: its build).
+pub fn windows_version() -> io::Result<String> {
+    const KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let build = registry_text(KEY, "CurrentBuildNumber")
+        .ok_or_else(|| io::Error::other("Windows' build number isn't in the registry"))?;
+    let feature = registry_text(KEY, "DisplayVersion").or_else(|| registry_text(KEY, "ReleaseId"));
+    Ok(version_named(&build, feature.as_deref()))
+}
+
+/// "11 24H2" from the build ("26100") and the feature update's name: 11
+/// from build 22000 on (its registry still says "Windows 10" elsewhere).
+fn version_named(build: &str, feature: Option<&str>) -> String {
+    let n: u32 = build.trim().parse().unwrap_or(0);
+    let product = if n >= 22_000 { "11" } else { "10" };
+    match feature.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(f) => format!("{product} {f}"),
+        None => format!("{product} (build {n})"),
+    }
+}
+
+/// A text value under `HKEY_LOCAL_MACHINE`, if it's there.
+fn registry_text(key: &str, value: &str) -> Option<String> {
+    crate::registry::machine_text(key, value).ok().flatten()
 }
 
 /// The system folder, `C:\Windows\System32`, where Windows keeps its own
@@ -171,6 +200,18 @@ impl Drop for Background {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_is_said_as_settings_says_it() {
+        assert_eq!(version_named("26100", Some("24H2")), "11 24H2");
+        assert_eq!(version_named("19045", Some("22H2")), "10 22H2");
+        assert_eq!(version_named("17763", None), "10 (build 17763)");
+        assert_eq!(version_named("22000", Some(" ")), "11 (build 22000)");
+        // This PC's.
+        let here = windows_version().unwrap();
+        println!("Windows {here}");
+        assert!(here.starts_with("10 ") || here.starts_with("11 "), "{here}");
+    }
 
     #[test]
     fn the_users_folders_and_the_system_folder_come_from_windows() {

@@ -305,10 +305,11 @@ const STANDARD: &[&str] = &[
 /// `~/.bun/install/cache`, `~/.cache/<tool>`), or a place outside the home
 /// folder (`/usr/local`). Past what's known to be generic, the name stops:
 /// `~/.claude`, not the project named inside it. Nothing for your own
-/// folders, other accounts' or other disks'.
+/// folders, other accounts' or other disks'. On Windows, as
+/// [`generic_on_windows`] says.
 pub fn generic(path: &Path, home: &Path) -> Option<String> {
     let name = generic_name(path, home)?;
-    (!name.split('/').any(identifies)).then_some(name)
+    (!name.split(['/', '\\']).any(identifies)).then_some(name)
 }
 
 /// A name made for one Mac (a UUID, a long number) would tell it apart
@@ -335,6 +336,19 @@ fn identifies(name: &str) -> bool {
 }
 
 fn generic_name(path: &Path, home: &Path) -> Option<String> {
+    // `.` and `..` name another folder than the names say, which could be one
+    // of yours: nothing is said about such a path.
+    if path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return None;
+    }
+    if cfg!(windows) {
+        return generic_on_windows(path, home);
+    }
     let names = |p: &Path| -> Option<Vec<String>> {
         p.iter().map(|n| n.to_str().map(str::to_string)).collect()
     };
@@ -384,13 +398,145 @@ fn generic_name(path: &Path, home: &Path) -> Option<String> {
         return Some(format!("~/{}", keep.join("/")));
     }
     let n = names(path.strip_prefix("/").ok()?)?;
-    if n.is_empty() || matches!(n[0].as_str(), "Users" | "Volumes") {
+    // Without case, as the Mac's own volume compares names: `/users/me` is yours.
+    if n.is_empty()
+        || ["Users", "Volumes"]
+            .iter()
+            .any(|t| n[0].eq_ignore_ascii_case(t))
+    {
         return None;
     }
     Some(format!(
         "/{}",
         n.iter().take(3).cloned().collect::<Vec<_>>().join("/")
     ))
+}
+
+/// [`generic`] on Windows: an app's or a tool's folder in the profile
+/// ([`in_profile`]: `~\AppData\Local\Google\Chrome`, `~\.nuget\packages`),
+/// or one of Windows' own places on a drive ([`on_drive`]:
+/// `C:\ProgramData\Docker`), with backslashes as Windows shows them.
+fn generic_on_windows(path: &Path, home: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+    let names = |parts: std::path::Components| -> Option<Vec<String>> {
+        parts
+            .map(|c| match c {
+                Component::Normal(n) => n.to_str().map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    };
+    if let Ok(rel) = path.strip_prefix(home) {
+        return in_profile(&names(rel.components())?).map(|n| format!("~\\{}", n.join("\\")));
+    }
+    let mut parts = path.components();
+    let letter = match parts.next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => char::from(l).to_ascii_uppercase(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if parts.next()? != Component::RootDir {
+        return None;
+    }
+    on_drive(&names(parts)?).map(|n| format!("{letter}:\\{}", n.join("\\")))
+}
+
+/// Vendors whose folder in AppData holds several apps' (`Google\Chrome`,
+/// `Microsoft\Edge`): the app's is kept in the name too. Packages and
+/// Programs hold one app's folder each.
+const VENDORS: &[&str] = &[
+    "Microsoft",
+    "Google",
+    "Mozilla",
+    "JetBrains",
+    "Apple",
+    "Apple Computer",
+    "Adobe",
+    "NVIDIA Corporation",
+    "NVIDIA",
+    "Intel",
+    "AMD",
+    "Packages",
+    "Programs",
+];
+
+/// The generic part of a folder of the profile (`n`: its names below it):
+/// AppData, its three places, an app's folder in one (with its app's, for a
+/// vendor of several: [`VENDORS`]) and the standard names under it; a tool's
+/// dot-folder, as on a Mac. `Temp` stops at itself: what's in it is named by
+/// whatever made it. Your own folders (Documents, Desktop, OneDrive, a
+/// project's) say nothing generic.
+fn in_profile(n: &[String]) -> Option<Vec<String>> {
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let standard = |rest: &[String]| {
+        rest.iter()
+            .take_while(|x| STANDARD.iter().any(|s| is(s, x)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    match n {
+        [appdata] if is(appdata, "AppData") => Some(n.to_vec()),
+        [appdata, area, rest @ ..]
+            if is(appdata, "AppData")
+                && ["Local", "Roaming", "LocalLow"].iter().any(|a| is(a, area)) =>
+        {
+            let take = match rest.first() {
+                None => 0,
+                Some(t) if is(t, "Temp") => return Some(n[..3].to_vec()),
+                Some(v) if VENDORS.iter().any(|x| is(x, v)) => 2,
+                Some(_) => 1,
+            };
+            let take = take.min(rest.len());
+            Some(
+                n[..2 + take]
+                    .iter()
+                    .cloned()
+                    .chain(standard(&rest[take..]))
+                    .collect(),
+            )
+        }
+        [dot, rest @ ..] if dot.starts_with('.') => {
+            let tool = usize::from(matches!(dot.as_str(), ".cache" | ".config"))
+                + 2 * usize::from(dot == ".local");
+            Some(
+                std::iter::once(dot.clone())
+                    .chain(rest.iter().take(tool).cloned())
+                    .chain(standard(rest.get(tool..).unwrap_or_default()))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Windows' own places on a drive: generic whoever has them. A drive's other
+/// folders may be named for you or your work.
+const WINDOWS_PLACES: &[&str] = &[
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "Windows",
+    "Windows.old",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "Recovery",
+    "PerfLogs",
+    "XboxGames",
+    "$WinREAgent",
+    "$Windows.~BT",
+    "$Windows.~WS",
+];
+
+/// The generic part of a folder on a drive (`n`: its names below the
+/// root): in one of [`WINDOWS_PLACES`], three names at most.
+fn on_drive(n: &[String]) -> Option<Vec<String>> {
+    let first = n.first()?;
+    WINDOWS_PLACES
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(first))
+        .then(|| n.iter().take(3).cloned().collect())
 }
 
 /// Checks a copy and its signature, as `mdif knowledge check` does before
@@ -449,7 +595,8 @@ pub fn update(dir: &Path) -> Result<Updated> {
 
 fn fetch(url: &str, max: usize) -> Result<Vec<u8>> {
     let mut curl = Command::new(crate::tools::curl());
-    curl.args(["--fail", "--silent", "--show-error", "--location"])
+    // `-q` first: no ~/.curlrc, whose options would change what's fetched.
+    curl.args(["-q", "--fail", "--silent", "--show-error", "--location"])
         .args(["--proto", "=https", "--proto-redir", "=https"])
         .args(["--max-time", "30", "--max-filesize", &max.to_string(), url]);
     let out = crate::space::run_within(curl, Duration::from_secs(40))
@@ -540,6 +687,71 @@ mod tests {
     }
 
     #[test]
+    fn on_windows_only_apps_tools_and_windows_own_places_are_generic() {
+        let n = |p: &str| -> Vec<String> { p.split('\\').map(str::to_string).collect() };
+        let profile = |p: &str| in_profile(&n(p)).map(|x| x.join("\\"));
+        let drive = |p: &str| on_drive(&n(p)).map(|x| x.join("\\"));
+        for (p, want) in [
+            ("AppData", "AppData"),
+            ("AppData\\Local", "AppData\\Local"),
+            (
+                "AppData\\Local\\Temp\\chrome_drag1234",
+                "AppData\\Local\\Temp",
+            ),
+            (
+                "AppData\\Local\\npm-cache\\_cacache",
+                "AppData\\Local\\npm-cache",
+            ),
+            (
+                "appdata\\local\\Google\\Chrome\\User Data",
+                "appdata\\local\\Google\\Chrome",
+            ),
+            (
+                "AppData\\Roaming\\Code\\Cache",
+                "AppData\\Roaming\\Code\\Cache",
+            ),
+            (
+                "AppData\\Roaming\\Acme\\Client Project",
+                "AppData\\Roaming\\Acme",
+            ),
+            (
+                "AppData\\Local\\Packages\\SpotifyAB.SpotifyMusic_zpdnekdrzrea0\\LocalCache",
+                "AppData\\Local\\Packages\\SpotifyAB.SpotifyMusic_zpdnekdrzrea0",
+            ),
+            (".nuget\\packages\\newtonsoft.json", ".nuget"),
+            (".cache\\huggingface\\hub", ".cache\\huggingface"),
+        ] {
+            assert_eq!(profile(p).as_deref(), Some(want), "{p}");
+        }
+        for p in [
+            "Documents\\Taxes",
+            "Desktop",
+            "OneDrive\\Work",
+            "source\\repos\\client-app",
+            "AppDataX\\Local",
+            "AppData\\Elsewhere\\x",
+            "",
+        ] {
+            assert_eq!(profile(p), None, "{p}");
+        }
+        assert_eq!(
+            drive("ProgramData\\Docker\\windowsfilter\\x").as_deref(),
+            Some("ProgramData\\Docker\\windowsfilter")
+        );
+        assert_eq!(
+            drive("windows\\SoftwareDistribution").as_deref(),
+            Some("windows\\SoftwareDistribution")
+        );
+        for p in ["Users\\other\\AppData", "Projects\\Acme", "Users", ""] {
+            assert_eq!(drive(p), None, "{p}");
+        }
+        // A SID, a user's folder in the Recycle Bin, says who it is.
+        assert!(identifies("S-1-5-21-3623811015-3361044348-30300820-1013"));
+    }
+
+    // Names as a Mac has them (on Windows, `generic` follows Windows' rules).
+    #[cfg(target_os = "macos")]
+    #[test]
     fn only_names_that_say_nothing_about_you_are_generic() {
         let home = Path::new("/Users/me");
         let g = |p: &str| generic(&home.join(p), home);
@@ -604,6 +816,14 @@ mod tests {
         );
         assert_eq!(generic(Path::new("/Users/other/Library"), home), None);
         assert_eq!(generic(Path::new("/Volumes/Backup/x"), home), None);
+        // Whatever the case, and through `..`: still another account or a disk.
+        assert_eq!(generic(Path::new("/users/other/Library"), home), None);
+        assert_eq!(generic(Path::new("/VOLUMES/Backup/x"), home), None);
+        assert_eq!(
+            generic(Path::new("/usr/../Users/other/Library"), home),
+            None
+        );
+        assert_eq!(g("Library/Caches/../../devel/shop"), None);
         assert_eq!(
             generic(Path::new("/usr/local"), home).as_deref(),
             Some("/usr/local")

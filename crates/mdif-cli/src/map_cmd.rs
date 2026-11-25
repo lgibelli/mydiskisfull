@@ -11,7 +11,7 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     let c = &m.container;
     println!(
         "Disk {}  {}  ·  {} used  ·  {} free",
-        c.container_reference,
+        printable(&c.container_reference),
         bytes(c.capacity_ceiling),
         bytes(c.used()),
         bytes(c.capacity_free)
@@ -20,7 +20,8 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     vols.sort_by_key(|v| Reverse(v.capacity_in_use));
     let vols: Vec<String> = vols
         .iter()
-        .map(|v| format!("{} {}", v.label(), bytes(v.capacity_in_use)))
+        // A volume's name is the user's to choose: shown, not obeyed.
+        .map(|v| format!("{} {}", printable(v.label()), bytes(v.capacity_in_use)))
         .collect();
     println!("  volumes: {}", vols.join(" · "));
     if cfg!(not(target_os = "macos")) {
@@ -50,11 +51,17 @@ pub fn print_map(m: &DiskMap, depth: usize) {
         m.volume.label(),
         bytes(m.volume.capacity_in_use)
     );
+    let mac = cfg!(target_os = "macos");
     println!(
-        "  measured       {:>9}   = {} private + {} shared with clones/snapshots (counted once)",
+        "  measured       {:>9}   = {} private + {} {}",
         bytes(m.measured()),
         bytes(t.private),
-        bytes(m.scan.shared_once)
+        bytes(m.scan.shared_once),
+        if mac {
+            "shared with clones/snapshots (counted once)"
+        } else {
+            "not freed by deleting: other names or held open (counted once)"
+        }
     );
     if m.scan.shared_uncertain > 0 {
         println!(
@@ -70,16 +77,34 @@ pub fn print_map(m: &DiskMap, depth: usize) {
             bytes(t.linked_elsewhere)
         );
     }
-    if whole_volume {
+    if t.links_unknown > 0 {
         println!(
-            "  not measured   {:>9}   {}",
-            signed(m.unmeasured()),
-            if cfg!(target_os = "macos") {
-                "root-only files, file-system metadata, snapshot-only blocks"
-            } else {
-                "files only an administrator can read, file-system metadata, restore points"
-            }
+            "  names unknown  {:>9}   files that couldn't be opened to count their names (the page \
+             file and others Windows holds open): counted once, not as freed by deleting",
+            bytes(t.links_unknown)
         );
+    }
+    if whole_volume {
+        let unmeasured = m.unmeasured();
+        if unmeasured < 0 && !mac {
+            // Found more than is in use: what a file under 1 MiB with several
+            // names (Windows keeps thousands, in WinSxS) adds once per name.
+            println!(
+                "  counted twice  {:>9}   at least: small files with several names (hard links, as in \
+                 Windows' component store) are counted once per name",
+                bytes(unmeasured.unsigned_abs())
+            );
+        } else {
+            println!(
+                "  not measured   {:>9}   {}",
+                signed(unmeasured),
+                if mac {
+                    "root-only files, file-system metadata, snapshot-only blocks"
+                } else {
+                    "files only an administrator can read, file-system metadata, restore points"
+                }
+            );
+        }
     }
     if t.dataless_logical > 0 {
         println!(
@@ -121,18 +146,30 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     );
     print_node(m, &m.scan.root, 0, depth, true);
     println!();
-    println!(
-        "ON DISK = allocated blocks, what du and Finder add up (a clone is counted once per copy, a \
-         hard link once)."
-    );
-    println!(
-        "ONCE = what it really takes: the blocks its clones share counted once (Chrome leaves \
-         copies of itself that share all of theirs)."
-    );
-    println!(
-        "PRIVATE = freed immediately if deleted (not shared with a clone, a hard link elsewhere \
-         or a snapshot)."
-    );
+    if mac {
+        println!(
+            "ON DISK = allocated blocks, what du and Finder add up (a clone is counted once per \
+             copy, a hard link once)."
+        );
+        println!(
+            "ONCE = what it really takes: the blocks its clones share counted once (Chrome leaves \
+             copies of itself that share all of theirs)."
+        );
+        println!(
+            "PRIVATE = freed immediately if deleted (not shared with a clone, a hard link \
+             elsewhere or a snapshot)."
+        );
+    } else {
+        println!(
+            "ON DISK = allocated clusters (a hard link of 1 MiB or more counted once, a smaller \
+             one once per name)."
+        );
+        println!("ONCE = what it really takes: on NTFS the same, as files don't share clusters.");
+        println!(
+            "PRIVATE = freed if deleted (not a file with another name elsewhere, nor one whose \
+             names couldn't be counted)."
+        );
+    }
     // A local snapshot shares every block that existed when it was taken.
     if !m.snapshots.is_empty() && t.private < m.measured() / 10 {
         println!(

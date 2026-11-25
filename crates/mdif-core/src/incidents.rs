@@ -64,11 +64,18 @@ impl Default for GrowthParams {
             peak_tolerance: 0.02,
             horizon: 7 * DAY,
             allow: [
-                // Deliberate: photo imports and virtual machines.
+                // Deliberate: photo imports, virtual machines (VMware's folder
+                // on a Mac and on Windows, Parallels, UTM, VirtualBox,
+                // Hyper-V's disks) and games being downloaded (Steam).
                 "Photos Library.photoslibrary",
                 "Virtual Machines.localized",
+                "Virtual Machines",
                 "Parallels",
                 "com.utmapp.UTM",
+                "VirtualBox VMs",
+                "Hyper-V",
+                "Virtual Hard Disks",
+                "steamapps",
             ]
             .map(String::from)
             .to_vec(),
@@ -375,11 +382,9 @@ fn fit(t: &[f64], y: &[f64]) -> Option<(f64, f64)> {
 }
 
 fn display(path: &str, home: Option<&Path>) -> String {
-    let text = match home.and_then(|h| Path::new(path).strip_prefix(h).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.to_string(),
-    };
+    let text = home
+        .and_then(|h| crate::text::tilde(Path::new(path), h))
+        .unwrap_or_else(|| path.to_string());
     crate::text::printable(&text).into_owned()
 }
 
@@ -451,8 +456,11 @@ mod tests {
         assert!(i.fit > 0.99);
         assert!((i.full_in_days.unwrap() - 2.1).abs() < 0.2);
         let s = i.sentence(Some(Path::new("/Users/me")));
+        let sep = std::path::MAIN_SEPARATOR;
         assert!(
-            s.starts_with("~/Library/Logs/x grew 4.8 GB in 6 hours"),
+            s.starts_with(&format!(
+                "~{sep}Library{sep}Logs{sep}x grew 4.8 GB in 6 hours"
+            )),
             "{s}"
         );
         assert!(s.contains("full in 2 days"), "{s}");

@@ -4,11 +4,13 @@
 //! following a link or recalling a placeholder, what it turned out to be is
 //! read from the handle itself (a link, a placeholder or a file is refused),
 //! and the listing comes from that same handle (`FileIdExtdDirectoryInfo`),
-//! so what was checked is what is listed. No file in it is opened, and no
-//! access time changes. Allocated size and file number come with each entry.
+//! so what was checked is what is listed. Listing opens no file in it and
+//! changes no access time; allocated size and file number come with each
+//! entry.
 //!
 //! The listing has no link count. Files of [`LINK_MIN`] bytes or more are
-//! asked (one open each) so a big file with two names is counted once; a
+//! asked (one open each, for attributes only: no data is read, no access
+//! time changes) so a big file with two names is counted once; a
 //! smaller one is taken to have one name. NTFS has no clones, so private size
 //! is allocated size and nothing shares blocks.
 //!

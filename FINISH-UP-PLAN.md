@@ -1,7 +1,8 @@
 # Finish-up plan: the Windows port
 
-Branch `windows-port`, pushed, CI green on every job (macOS, real Windows runner, Windows on ARM,
-MSRV 1.88). The long-form plan and findings are in `docs/WINDOWS.md`; this file is what is left.
+Branch `windows-port`, CI green on every job at f90fb5f (macOS, real Windows runner, Windows on
+ARM, MSRV 1.88); the app, its installer and the `windows-app` job came after and haven't run on a
+runner yet. The long-form plan and findings are in `docs/WINDOWS.md`; this file is what is left.
 
 ## Where it stands
 
@@ -16,13 +17,18 @@ Actions Windows runner as the only test box, a per-user watcher with an optional
 | 3 | Watcher and trends: NTFS journal, `agent`, owner tracking, `owners`/`incidents`, e2e on a VHDX, budget job | done, on a real runner |
 | 4 | Windows catalogue | **started**: `mdif map` runs; the rest is open |
 | 5 | Optional elevated service | not started |
-| 6 | Tauri app | not started |
-| 7 | Packaging, signing, updater | not started |
+| 6 | Tauri app | **started**: tray, notifications, sign-in; Overview, Storage, History, Settings |
+| 7 | Packaging, signing, updater | **started**: the NSIS installer and its hooks, tested by CI; signing and updater open |
 
-What runs on Windows today: `watch`, `status`, `forecast`, `alerts`, `keep`, `knowledge` (no Ask AI),
-`agent`, `owners`, `incidents`, `map`. Still refused with "isn't available on this operating system
-yet" (`NOT_HERE_YET` in `crates/mdif-cli/src/main.rs`): `suggest`, `clean`, `tidy`, `docker`,
-`timemachine`, `tweaks`, `space`, `writers`. When a command's Windows half lands: remove its name from
+What runs on Windows today: `watch`, `status`, `forecast`, `alerts`, `keep`, `knowledge` (Ask AI too),
+`agent` (with `stop` and `start`, Windows' own, for the installer), `owners`, `incidents`, `map`, `space` (its only action: Delete for build output and
+packages), `clean` (build output, `node_modules` with a lockfile, a Rust build's incremental caches,
+finished worktrees; the rest refused by name), `suggest` (the history's incidents, growth and
+cleanups that came back, finished worktrees, build output, the tweaks; not yet snapshots, swap or
+Docker), `tweaks` (Storage Sense's Recycle Bin clean-up, Gradle, Claude Code), `tidy` (old build
+folders, `node_modules` and Rust's incremental caches; the first two only where Windows records when
+a file was last opened). Still refused with "isn't available on this operating system
+yet" (`NOT_HERE_YET` in `crates/mdif-cli/src/main.rs`): `docker`, `timemachine`, `writers`. When a command's Windows half lands: remove its name from
 that list, remove its `#[command(hide = !cfg!(target_os = "macos"))]` (the commands are hidden from
 `--help` on Windows until then), and remove it from the refusal loop in `ci.yml`.
 
@@ -31,54 +37,116 @@ that list, remove its `#[command(hide = !cfg!(target_os = "macos"))]` (the comma
 Done, with the findings of its review: estimates are said in words (`notes` in the JSON, `note:` in
 the text: small hard links, files held open for writing, a disk quota), a ReFS root is refused, a quota
 account gets no reconciliation, a partly downloaded cloud file counts what is resident, and the
-reconciliation is shown for any drive's root. Still open: hard-link counts for files under 1 MiB and
-a fresh size for files held open (both are noted, not measured), and a snapshot/restore-point line.
+reconciliation is shown for any drive's root. Run on a real Windows 11 PC too (C:, about 30 s): a file
+whose names can't be counted (the page file) is shown apart, and the component store's small hard
+links, which make the scan come to more than the drive has in use, are said as counted twice rather
+than as a negative remainder. FAT, exFAT and UDF drives are refused like ReFS. Still open: hard-link
+counts for files under 1 MiB and a fresh size for files held open (both are noted, not measured), a
+snapshot/restore-point line, and the gaps listed in `docs/WINDOWS.md` (a volume mounted in a folder,
+WOF-compressed files, names Win32 rewrites, `SUBST` drives).
 
 ## Phase 4: the Windows catalogue (parity with the Mac)
 
 Each item goes through its own engine and its own tests with temp dirs (and a scratch registry key),
 never the user's real settings.
 
-- **`space`**: the whole disk sorted into kinds. System files (WinSxS, Installer, SoftwareDistribution,
-  `pagefile.sys`, `hiberfil.sys`), leftovers (`Windows.old`, `$Recycle.Bin`), Program Files and
-  ProgramData, the profile (AppData Local/Roaming, Packages, Temp), dev folders (`.gradle`, npm,
-  `.nuget`, `.cargo`, Android), WSL and Docker `.vhdx`, VMs. What can't be read goes to "System data".
-  `space::purgeable` is 0 off macOS today.
-- **`handlers`**: what apps keep where (chat, mail OST/PST explained and never deleted, iPhone backups
-  under MobileSync, game libraries, browsers, OneDrive).
-- **`clean` and `tidy`**: Recycle Bin (needs `fs::trash`, a stub today), empty the Recycle Bin,
-  build output, emptying a cache while its app is closed (checked by process image path, using
+- **`space`**: **done, read-only** (`space/windows.rs`; a CI step on the runner's C: drive, and a
+  whole-report test that runs on Windows). System files (WinSxS, Installer, SoftwareDistribution,
+  `pagefile.sys`, `hiberfil.sys` and `swapfile.sys` as items), leftovers (`Windows.old`,
+  `$Recycle.Bin`), Program Files, the Store's apps and ProgramData, the profile (AppData
+  Local/Roaming, Packages, Temp, browsers' caches), dev folders, WSL and Docker, VMs, cloud
+  folders, Outlook. What can't be read goes to "System data". Still open: its actions (they come
+  with `clean`), app "last opened" dates (UserAssist, to verify first), names for Store packages (`Microsoft.WindowsTerminal_8wekyb3d8bbwe`).
+  .NET's `bin`/`obj` are build output beside a project file (see `clean`). Not yet run on a real
+  Windows PC.
+- **`handlers`**: **started**: `handlers::WINDOWS`, looked up on Windows only and matched whatever
+  the case: OneDrive, iCloud Drive and Dropbox, iPhone backups (both places), Spotify, Slack,
+  Telegram, the new Teams; their way said, nothing emptied, moved or opened yet. Still open: mail
+  (OST/PST explained and never deleted), game libraries (outside the profile: handlers start from
+  the home folder), browsers.
+- **`clean` and `tidy`**: **`clean` started**: build output, packages, incremental caches and
+  finished worktrees are deleted (`clean::plan` refuses the rest on Windows with
+  `NOT_ON_WINDOWS`; Windows-only tests in `clean::windows_tests` and a CI step on the runner).
+  **Emptying the Recycle Bin done**: `mdif clean C:\$Recycle.Bin` (exactly a drive's bin: nothing
+  inside it, no folder of its name elsewhere) calls `fs::empty_recycle_bin` (`SHEmptyRecycleBinW`
+  for that drive, no UI, after `SHQueryRecycleBinW` counts something in it); the app's Overview and
+  Storage offer it with the Mac's question; the space report measures the bin as it is now; CI
+  empties the runner's bin for real. **Moving to the Recycle Bin written** (`fs::trash`,
+  `mdif-windows/src/shell.rs`): `IFileOperation` with a progress sink that refuses what the shell
+  marks to be deleted for good; refused first, as the shell marks a file too big for the bin to
+  be recycled and then deletes it for good: a drive with no bin, a bin set to delete at once, and
+  a file bigger than the bin takes (its settings and Group Policy's, or Windows' default); CI's
+  `windows` job runs it for real, the too-big case with the bin set to 4 MB for a moment (not run
+  yet: needs a push). Old Files moves big unused files of yours with it
+(`clean::unused_file`); handlers will too. **.NET's `bin`/`obj`
+  done**: build output beside a `*.csproj`/`*.fsproj`/`*.vbproj` (`clean::dotnet_project`, the
+  folder's names only, any case), checked again when the report sorts them (`space::classify`),
+  owners of their own growth, and Visual Studio's `source\repos` a projects folder; Windows only
+  (`owners::dotnet_output`: refused on a Mac, where nothing suggests them); tests on both systems
+  and in CI's clean step. Still open: emptying a cache while
+  its app is closed (checked by process image path, using
   `proc::terminate_program`'s identity check), Docker (`docker.exe`), Android. Add `temp`
   (`%TEMP%` older than 7 days *and* not in use, not on the keep list, and re-checked by `clean::plan`:
   age alone is not enough, a program may still need what it wrote last week). Every new kind goes through `clean::plan` and `clean::run`, which
-  re-check each path. Simulators and backups drop out.
-- **`tweaks`**: `Setting::Registry` and `Setting::Ini`, the Windows catalogue (Storage Sense and
-  Recycle Bin days, Chrome/Edge model policies under `HKCU\Software\Policies`, WSL sparse VHD,
-  Recall, Gradle/Claude carry over). `startup.rs` already has the registry primitives.
-- **`suggest`**: causes for Windows folders (the generic advice and the Temp case exist); needs the
-  catalogue above and a keep-list check for kept files inside a temp folder.
+  re-check each path. Simulators and backups drop out. **`tidy` written** (`tidy::Id::ALL` is
+  per system): old build folders (.NET's `bin`/`obj` beside a project file too, and Visual
+  Studio's `source\repos` is a code folder), old `node_modules` and old Rust build caches, run by
+  the watcher once a day as on a Mac; the window's Prevention page has them as switches with Tidy
+  Now. Builds and `node_modules` are offered only where NTFS records when a file was last opened
+  (`fs::records_last_access`): on most PCs it doesn't (since Windows 10 1803 the default leaves it
+  off on a system drive over 128 GB: `fsutil behavior query disablelastaccess`), and by the date
+  changed alone a tool still run from `target\release`, or the packages of a project that runs,
+  look old; there they're greyed with that reason. Incremental caches go by the date changed
+  (every build writes them). That's a decision the author may revisit (the date changed alone,
+  said so). Caches and Docker's leftovers wait for `clean`'s Windows half of them. Tests: on every
+  system (`tidy::portable_tests`) and a CI step on the runner (not run yet: needs a push).
+- **`tweaks`**: written. `Setting::Registry` (numbers under `HKCU`, through
+  `mdif-windows/src/registry.rs`, which `startup` uses too); the Windows catalogue is the Recycle
+  Bin's clean-up by Storage Sense plus Gradle and Claude Code. Still open: whether Storage Sense
+  then empties the bin, seen on a PC; more tweaks (Chrome/Edge model policies need
+  `HKCU\Software\Policies`, which a user can't write; WSL's sparse VHD; Recall).
+- **`suggest`**: **runs** (`from_tweaks`, `from_system` and `from_leftovers` are the Mac's alone;
+  `suggest::windows_tests`, and a CI step that checks it says nothing of a Mac's). Still open:
+  causes for more Windows folders, the tweaks once they exist, a Windows `from_system` (restore
+  points' shadow storage, the page file, WSL's disks), and a keep-list check for kept files inside
+  a temp folder.
 - **Backups page** (the Time Machine twin): System Restore points and shadow storage, rebuildable
   folders inside OneDrive-backed Desktop/Documents. Design it with the author first.
 - **Apps not opened in months**: Uninstall keys and UserAssist (verify first); the action opens
   `ms-settings:appsfeatures`, never an uninstaller.
-- **Old files**: if `NtfsDisableLastAccessUpdate` is on, "old" uses mtime alone, and the report says so.
-- **Ask AI** on Windows: needs an ACL-protected token file (`portable::private_files()` is false
-  there, so sign-in is refused), a Windows version string instead of `sw_vers`, and the prompts and
-  knowledge entries that name macOS folders and apps need Windows folder names (AppData, Program
-  Files, Packages) so answers aren't about the wrong system.
+- **Old files**: done. If the drive doesn't record last access (`fs::records_last_access`: NTFS
+  and `NtfsDisableLastAccessUpdate`), "old" is what nothing changed, and the report says so
+  (`last_opened_unknown`); Windows' own rules for what's yours in `space::windows::own_file`.
+  Tested on Windows by `clean::windows_tests` (CI).
+- **Ask AI** on Windows: written. The token file has an access list of the user's alone
+  (`private.rs`), checked on every read; the version is Windows' (`sys::windows_version`); the AI
+  is told it's a PC; generic names follow Windows' places (`knowledge::generic_on_windows`); the
+  window has it (Settings, Storage's items). CI runs the stand-in OpenAI tests on Windows; a real
+  sign-in from a PC is the author's to try. Still open: Windows entries in the knowledge list.
 - **`writers` and per-process churn**: the Windows write counter includes pipes (measured), so
   writers are not recorded (`WRITES_ARE_DISK_WRITES = false`). Needs evidence from the disk (journal
   activity under the process's folders, or the service's ETW disk I/O) before it is switched on.
-- `mdif tidy`/`docker`/`timemachine` stay refused until their halves exist; `timemachine` may become
+- `mdif docker`/`timemachine` stay refused until their halves exist; `timemachine` may become
   the backups page above.
 
 ## Open in Phase 2 (known gaps, all listed in `docs/WINDOWS.md`)
 
-- Recycle Bin (`fs::trash`), still a stub.
+- Moving to the Recycle Bin (`fs::trash`): written (`shell.rs`), to be run on a real runner,
+  the too-big refusal included (its default size is Windows' documented one, from 2014: a bin
+  never yet set has no `MaxCapacity`).
 - Children are opened by path (`dir.join(name)`) for link counts and the held-open refresh, not
   relative to the checked folder handle (`NtCreateFile` with a root directory).
 - ReFS: 128-bit file IDs, version-3 journal records, block clones.
-- The journal position is checked as an administrator only, not as a standard account.
+- The journal position is checked as an administrator only, not as a standard account. A folder
+  the account can't open is left out of a replay, not counted as a gap.
+- The owner tracker's gap on Windows (`docs/WINDOWS.md`): a file moved into an old folder seen
+  for the first time (the Recycle Bin's, at the first deletion after the watcher starts) isn't
+  credited there; that needs the journal's rename records per file, or listing the bin at the
+  start. (Fixed: a file held open across a watcher restart is followed again; a folder that moves
+  and changes in one period takes its size along; first sightings no longer use up the period's
+  budget for known folders; a file directly in the profile folder or a drive's root is an owner
+  of its own; a folder made since the last period credits all it holds; a rescan cut short is a
+  gap, and the last gap is in `status --json` and `owners --json`.)
 - A mapped network drive has no volume GUID, so its history is keyed by its letter.
 - If the disk under a running watcher is swapped, folder tracking stops but open incidents stay open
   until a restart.
@@ -95,27 +163,54 @@ complete `space`/`map`, ETW disk I/O per process, admin clean-ups re-checked wit
 
 ## Phase 6: the Tauri app (`app-windows/`)
 
-Tauri 2.12.6 and the plugins are in the offline cache. Tray icon (free space in the tooltip) plus a
-window; a port of `Core.run` (runs `mdif`, `--json` last); polling as in `Monitor.swift`; toasts;
-single-instance; updater. UI is plain HTML/CSS/JS, no bundler or npm packages, JSDoc types mirroring
-`app/Sources/Model.swift`. Pages as on the Mac (Overview, Storage + Folders map, Old Files, History,
-Backups, Prevention, Clean Up, Settings, Ask AI); the **RailBar is redrawn in SVG and never replaced**;
-what an action did goes to a notices banner, only the question before what can't be undone is a
-dialog. A node contract check decodes `app/Tests` fixtures and live `mdif --json` on the runner.
-Dev loop on the Mac: `cargo tauri dev` against the Mac `mdif`, and a fixture mode for screenshots.
-Unmeasured spikes still to do first: toasts from an unpackaged exe, WebView2 presence, the
-`StartupApproved` behaviour with a real Task Manager toggle, cloud placeholders (needs a sync root).
+**Started** (what it is: `docs/WINDOWS.md`, "The app and its installer"). Done: the tray (free
+space and what fills it in the tooltip), the window hidden to the tray, single instance, a port of
+`Core.run` (`mdif.rs`, a fixed list of commands), the monitor and its notifications by the Mac's
+rules (`monitor.rs`, `news()` tested), the welcome (start the watcher; Get Started sets up opening
+at sign-in, `login.rs`), and the pages Overview (RailBar in SVG, Needs Attention, Recommendations, Recent Changes), Storage (kinds
+and their items, with clean-ups through `mdif clean`), History (Space Used with the forecast, clean-ups,
+Writes, left out on Windows with the write-churn alert: no writers are recorded there), the Clean Up
+sheet (the Mac's list, ticks and one-after-another run; `cleanUpRows` tested), Storage's Folders
+view (the disk map: sunburst, treemap and outline from `mdif map`, kept in the app's cache folder,
+measured while on screen; `map.js` tested) and Settings
+(watching, sign-in, notifications, alert choices, the watcher's measured cost), and launchd's part:
+a watcher that ended though it's set to start at sign-in is started again (`Supervisor`: seen ended
+twice two minutes apart, at most hourly, never one stopped on purpose with `mdif agent stop`, whose
+`stopped` marker any start clears; CI kills the watcher and sees the app start it). Tests: `cargo test` in
+`app-windows/src-tauri`, `node --test app-windows/ui/tests` (the window's logic against
+`app/Tests`, and `pages.test.mjs`, which builds the Prevention page on a stand-in document: a
+click on a switch's row must flip the switch, never press Tidy Now); both were checked by breaking
+what they guard. Seen offscreen in headless Chrome
+against Windows-like fixtures, light and dark; not yet run on a real Windows PC (CI starts it on the
+runner).
+
+Still open:
+- Pages: Backups (design first). Old Files, Ask AI and Prevention are done (written, previewed;
+  not yet run on a PC).
+- Spikes: toasts from the installed, unsigned app; the Task Manager switch flipped by hand; WebView2
+  on an older Windows 10.
+- The author clicks through it on a real PC.
 
 ## Phase 7: packaging and release
 
-Tauri NSIS per-user installer (no admin) with `mdif.exe` and `mdif-watch.exe`; Authenticode signing
-(the author picks a certificate or Azure Trusted Signing); the Tauri updater's own signing key (like
-the Sparkle one: generated once, private key kept off the repo, public key in the app, every update
-artifact signed in `release.yml`); updater feed (`latest.json`) on the latest *published* release, so
-only publishing ships; a `release.yml` Windows job that uploads a draft; a
-Windows section in `docs/RELEASING.md`, the README and the site. A Microsoft Store (MSIX) edition is
-out of scope for the first release. The author installs it on a real Windows PC and clicks through:
-that is the only step that needs a box outside CI.
+**Started.** `app-windows/build.sh [target]` builds the NSIS installer (per user, no administrator)
+with `mdif.exe` and `mdif-watch.exe` (`tauri.release.json`'s `externalBin`); on Windows with the
+Tauri CLI, or from a Mac with `cargo-xwin` and `makensis` (built this way: 3.3 MiB, the three
+programs x64, the watcher and the app GUI programs, `mdif` a console one). `src-tauri/windows/hooks.nsh`
+stops the watcher before an update and starts it after (`mdif agent stop|start`), and runs
+`mdif agent uninstall` on an uninstall; "Delete the application data" also removes the history.
+CI's `windows-app` job installs, updates over a running watcher and uninstalls it, and keeps the
+installer.
+
+Still open: Authenticode signing (the author picks a certificate or Azure Trusted Signing, then
+`bundle > windows > signCommand`); the updater (`tauri-plugin-updater` 2.14.1 is in the cache; its
+key is generated once by the author, like the Sparkle one, the private key kept off the repo and
+the public key in `tauri.conf.json`; every update artifact signed in `release.yml`); the feed
+(`latest.json`) on the latest *published* release, so only publishing ships; a `release.yml`
+Windows job that uploads a draft; a Windows section in the README and the site (`docs/RELEASING.md`
+has one: building, the version, what's still to decide); the ARM64 installer run on ARM hardware (CI's `windows-app` builds it
+from its x64 runner and `windows-app-arm` runs it on `windows-11-arm`: written, not run yet; `build.sh aarch64-pc-windows-msvc` builds it from a Mac: ARM64 programs, checked by their PE headers; x64 runs emulated on Windows on ARM). A Microsoft Store (MSIX) edition
+is out of scope for the first release.
 
 ## How to work on it
 
@@ -126,6 +221,12 @@ that is the only step that needs a box outside CI.
   x86_64-pc-windows-msvc -- -D warnings`. MSRV: `RUSTFLAGS="-D warnings"
   LIBSQLITE3_SYS_USE_PKG_CONFIG=1 cargo +1.88 check --offline --workspace --all-targets --target
   x86_64-pc-windows-msvc`. CI's clippy is newer than local 1.95, so trust CI for new lints.
+- The app, from `app-windows/src-tauri`: `cargo fmt --check`, `cargo clippy --offline --all-targets
+  -- -D warnings`, `cargo test --offline`; for Windows the same clippy with `--target
+  x86_64-pc-windows-msvc` (and `aarch64`) and LLVM's `llvm-rc` on the `PATH`. The window:
+  `node --test app-windows/ui/tests`, and the page in a browser (any static server at the repo's
+  root, then `app-windows/ui/index.html`, with `?fixtures=` for other test files). The installer:
+  `app-windows/build.sh`.
 - Real Windows: `git push origin windows-port` (SSH), then `gh workflow run ci.yml --ref windows-port`
   (CI only triggers on main and pull requests). Measurements: `-f spikes=true`.
 - Review every commit with Codex, from a checkout of that commit:

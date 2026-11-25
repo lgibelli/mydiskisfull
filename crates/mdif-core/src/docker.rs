@@ -150,15 +150,23 @@ pub fn report(home: &Path) -> Report {
     };
     let df = match run(
         &docker,
+        home,
         &["system", "df", "-v", "--format", "{{json .}}"],
         60,
     ) {
         Ok(out) => out,
         Err(why) => return failed(why),
     };
-    let totals = run(&docker, &["system", "df", "--format", "{{json .}}"], 60).unwrap_or_default();
+    let totals = run(
+        &docker,
+        home,
+        &["system", "df", "--format", "{{json .}}"],
+        60,
+    )
+    .unwrap_or_default();
     let networks = run(
         &docker,
+        home,
         &[
             "network",
             "ls",
@@ -373,7 +381,7 @@ pub fn remove(r: &Removal, home: &Path) -> Result<(), String> {
         Removal::Network(id) => (vec!["network", "rm", "--", id], 60),
         Removal::Cache => (vec!["builder", "prune", "--all", "--force"], 600),
     };
-    run(&docker, &args, wait).map(|_| ())
+    run(&docker, home, &args, wait).map(|_| ())
 }
 
 /// Waits for Docker Desktop's disk image to give back what was deleted in
@@ -401,9 +409,42 @@ pub fn settle(home: &Path, before: u64) -> u64 {
     before.saturating_sub(last)
 }
 
+/// The engines on this Mac, by their sockets: Docker Desktop's, then the
+/// usual one.
+fn local_sockets(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join(".docker/run/docker.sock"),
+        PathBuf::from("/var/run/docker.sock"),
+    ]
+}
+
 /// Runs `docker args`, within `wait` seconds: its output, or why not.
-fn run(docker: &Path, args: &[&str], wait: u64) -> Result<String, String> {
+///
+/// Always on this Mac's engine, whatever context or `DOCKER_HOST` the shell
+/// has: another engine's containers and images aren't on this disk, and a
+/// remote one's (`docker context use prod`) are nobody's to remove from here.
+fn run(docker: &Path, home: &Path, args: &[&str], wait: u64) -> Result<String, String> {
     let mut cmd = Command::new(docker);
+    for v in [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    ] {
+        cmd.env_remove(v);
+    }
+    // Docker Desktop's own commands speak to the app, not to an engine.
+    if args.first() != Some(&"desktop") {
+        let [desktop, usual] = local_sockets(home);
+        let socket = if !desktop.exists() && usual.exists() {
+            usual
+        } else {
+            desktop
+        };
+        cmd.arg("--host")
+            .arg(format!("unix://{}", socket.display()));
+    }
     cmd.args(args);
     let out = run_within(cmd, Duration::from_secs(wait))
         .ok_or("Docker didn't answer in time. Is Docker Desktop starting or stuck?")?;
@@ -438,12 +479,9 @@ pub fn not_running(said: &str) -> bool {
 pub fn answers_now(home: &Path) -> bool {
     #[cfg(unix)]
     {
-        [
-            home.join(".docker/run/docker.sock"),
-            PathBuf::from("/var/run/docker.sock"),
-        ]
-        .iter()
-        .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+        local_sockets(home)
+            .iter()
+            .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
     }
     // No Docker on Windows yet ([`command`]).
     #[cfg(windows)]
@@ -486,17 +524,24 @@ fn open_desktop() -> Result<(), String> {
 /// here (and so is to be quit after, [`stop`]).
 pub fn start(home: &Path) -> Result<bool, String> {
     let docker = command(home).ok_or("Docker isn't installed.")?;
-    if answers(&docker) {
+    if answers(&docker, home) {
         return Ok(false);
     }
     // Docker Desktop's own command waits until it's up. Without it (before
     // Docker Desktop 4.37), the app, opened hidden.
-    if run(&docker, &["desktop", "start", "--timeout", "180"], 200).is_err() {
+    if run(
+        &docker,
+        home,
+        &["desktop", "start", "--timeout", "180"],
+        200,
+    )
+    .is_err()
+    {
         open_desktop()?;
     }
     let begun = Instant::now();
     while begun.elapsed() < Duration::from_secs(180) {
-        if answers(&docker) {
+        if answers(&docker, home) {
             return Ok(true);
         }
         std::thread::sleep(Duration::from_secs(2));
@@ -507,11 +552,17 @@ pub fn start(home: &Path) -> Result<bool, String> {
 /// Quits Docker Desktop, once it was started for a clean-up.
 pub fn stop(home: &Path) -> Result<(), String> {
     let docker = command(home).ok_or("Docker isn't installed.")?;
-    run(&docker, &["desktop", "stop", "--timeout", "60"], 90).map(|_| ())
+    run(&docker, home, &["desktop", "stop", "--timeout", "60"], 90).map(|_| ())
 }
 
-fn answers(docker: &Path) -> bool {
-    run(docker, &["info", "--format", "{{.ServerVersion}}"], 30).is_ok()
+fn answers(docker: &Path, home: &Path) -> bool {
+    run(
+        docker,
+        home,
+        &["info", "--format", "{{.ServerVersion}}"],
+        30,
+    )
+    .is_ok()
 }
 
 /// What Docker has had no use for in [`OLD_AFTER`], from `r` (Docker's
@@ -584,7 +635,7 @@ pub fn old_now(home: &Path, now: i64) -> Result<Vec<Item>, String> {
             "--",
         ];
         args.extend(&ids);
-        parse_ran(&run(&docker, &args, 60)?)
+        parse_ran(&run(&docker, home, &args, 60)?)
     };
     Ok(old(&r, &ran, now))
 }
@@ -611,6 +662,7 @@ pub fn prune_old_cache(home: &Path) -> Result<u64, String> {
     let until = format!("until={}h", OLD_AFTER / 3600);
     let out = run(
         &docker,
+        home,
         &["builder", "prune", "--force", "--filter", &until],
         600,
     )?;

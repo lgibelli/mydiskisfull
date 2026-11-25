@@ -40,18 +40,23 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
     };
     // Which simulators can be erased goes by how they are now: a fraction
     // of a second, and only with Xcode's simulators on the disk.
-    if m.home.join(mdif_core::xcode::DEVICES).is_dir() {
+    if cfg!(target_os = "macos") && m.home.join(mdif_core::xcode::DEVICES).is_dir() {
         m.simulators = mdif_core::xcode::simulators();
     }
     // Which system images Android's emulators use, the same way: their
     // settings, a few small files.
     m.avds = mdif_core::android::avds(&m.home).ok();
     // The snapshots as they are now, not as they were at the scan: Time
-    // Machine takes and deletes them by the hour.
-    let snapshots =
-        mdif_core::apfs::local_snapshots(&mdif_core::map::boot_volume()).unwrap_or_default();
-    let r =
-        space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
+    // Machine takes and deletes them by the hour. A Mac's alone, as is a
+    // waiting update.
+    #[cfg(target_os = "macos")]
+    let r = {
+        let snapshots =
+            mdif_core::apfs::local_snapshots(&mdif_core::map::boot_volume()).unwrap_or_default();
+        space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref())
+    };
+    #[cfg(not(target_os = "macos"))]
+    let r = space::report(&m, &keep, &[]);
     // Again for the same measurement replaces it: nothing piles up.
     record(db, r.measured, &r);
     if json_out {
@@ -128,6 +133,7 @@ fn print(r: &Report, now: i64) {
             .iter()
             .map(|c| {
                 let what = match c.what {
+                    "trash" if cfg!(windows) => "in the Recycle Bin",
                     "trash" => "in the Trash",
                     "update" => "macOS update",
                     w => w,

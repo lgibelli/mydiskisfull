@@ -87,7 +87,9 @@ pub fn file_id(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     }
 }
 
-/// How many names the file has (1 when it can't be told).
+/// How many names the file has. One whose count can't be told has more than
+/// any file ([`LINKS_UNKNOWN`](crate::os::bulk::LINKS_UNKNOWN)): it may have
+/// another, so it's never taken to be wholly what deleting it frees.
 pub fn links(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(unix)]
     {
@@ -97,7 +99,27 @@ pub fn links(at: &(impl At + ?Sized), m: &Metadata) -> u64 {
     #[cfg(windows)]
     {
         let _ = m;
-        crate::os::fs::file_info(&at.path()).map_or(1, |i| u64::from(i.links))
+        crate::os::fs::file_info(&at.path())
+            .map_or(u64::from(crate::os::bulk::LINKS_UNKNOWN), |i| {
+                u64::from(i.links)
+            })
+    }
+}
+
+/// Whether Windows hides the entry: its hidden or system attribute
+/// (`NTUSER.DAT`, what a program keeps out of sight). On Unix a name that
+/// starts with a dot is what's hidden, and that's told by the name: false.
+pub fn hidden(m: &Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = m;
+        false
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        // FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+        m.file_attributes() & (0x2 | 0x4) != 0
     }
 }
 
@@ -156,6 +178,34 @@ pub fn is_dataless(m: &Metadata) -> bool {
         const RECALL_ON_OPEN: u32 = 0x0004_0000;
         const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
         m.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
+    }
+}
+
+/// Whether a sync service, or another program, manages the entry where it
+/// is: a cloud placeholder, its contents on this disk or not. Moving one to
+/// the Recycle Bin or the Trash can delete it online too.
+///
+/// On Windows, a cloud placeholder's attributes: pinned, unpinned, recalled
+/// ([`is_dataless`]), or a reparse point that isn't a link (a sync service's,
+/// a deduplicated file's). Windows shows placeholders as they are to most
+/// programs, and disguises them only for those it lists as needing it. On a
+/// Mac, a dataless file: one whose contents are here is in a cloud folder
+/// in ~/Library, which isn't yours anyway.
+pub fn managed(m: &Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const REPARSE_POINT: u32 = 0x0000_0400;
+        const PINNED: u32 = 0x0008_0000;
+        const UNPINNED: u32 = 0x0010_0000;
+        let a = m.file_attributes();
+        // A link is a reparse point too, told by its type (and not followed).
+        let reparse = a & REPARSE_POINT != 0 && !m.file_type().is_symlink();
+        reparse || a & (PINNED | UNPINNED) != 0 || is_dataless(m)
+    }
+    #[cfg(not(windows))]
+    {
+        is_dataless(m)
     }
 }
 
@@ -234,11 +284,39 @@ pub fn mode_of(m: &Metadata) -> u32 {
     }
 }
 
-/// Whether a file can be made readable by its owner alone. Where it can't
-/// (Windows: that takes an access-control list, which isn't written yet),
-/// nothing secret is stored.
+/// Whether a file can be made readable by its owner alone
+/// ([`make_private`]). Where it can't, nothing secret is stored.
 pub fn private_files() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
+}
+
+/// Makes the file at `path` readable and writable by its owner alone: mode
+/// 600, or on Windows an access list with the user's entry only, inherited
+/// from nothing.
+pub fn make_private(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(windows)]
+    {
+        crate::os::fs::make_private(path)
+    }
+}
+
+/// Whether the file at `path` can be trusted to be its owner's alone. On
+/// Windows its access list says, so a file copied in (or one that took its
+/// folder's list) isn't; on Unix the mode it was made with is trusted.
+pub fn private_to_me(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        true
+    }
+    #[cfg(windows)]
+    {
+        crate::os::fs::private_to_me(path).unwrap_or(false)
+    }
 }
 
 /// Create the file with these permission bits, where there are any.
@@ -320,6 +398,7 @@ mod tests {
         let md = std::fs::symlink_metadata(dir.path()).unwrap();
         assert_eq!(dev(&a, &ma), dev(dir.path(), &md));
         assert!(!is_dataless(&ma));
+        assert!(!managed(&ma) && !managed(&md));
         assert_eq!(uid(&ma), current_uid());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

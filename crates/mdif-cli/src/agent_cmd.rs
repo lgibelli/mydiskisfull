@@ -159,8 +159,49 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-pub fn status() -> Result<()> {
+/// `mdif agent stop` is Windows' (its installer replaces a program a running
+/// watcher holds). On a Mac launchd keeps the watcher running.
+pub fn stop() -> Result<()> {
+    bail!(
+        "on a Mac, launchd keeps the watcher running: `mdif agent uninstall` stops it, and \
+         `mdif agent install` starts it again"
+    )
+}
+
+/// `mdif agent start`: see [`stop`].
+pub fn start() -> Result<()> {
+    stop()
+}
+
+pub fn status(json_out: bool) -> Result<()> {
     let domain = domain()?;
+    if json_out {
+        let jobs: Vec<serde_json::Value> = [(LABEL, "mdif agent install"), (APP_LABEL, "the app")]
+            .into_iter()
+            .filter_map(|(label, by)| {
+                let text = print_job(&domain, label)?;
+                let field = |k: &str| {
+                    text.lines().map(str::trim).find_map(|l| {
+                        l.strip_prefix(k)
+                            .map(|v| v.trim_start_matches([' ', '=']).trim().to_string())
+                    })
+                };
+                Some(serde_json::json!({
+                    "label": label,
+                    "state": field("state"),
+                    "pid": field("pid"),
+                    "run_by": run_by_app(&text).unwrap_or_else(|| by.into()),
+                }))
+            })
+            .collect();
+        let out = serde_json::json!({
+            "running": jobs.iter().any(|j| j["state"] == "running"),
+            "jobs": jobs,
+            "history": watch_cmd::history_json(&watch_cmd::default_db())?,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     let mut found = false;
     for (label, by) in [(LABEL, "mdif agent install"), (APP_LABEL, "the app")] {
         let Some(text) = print_job(&domain, label) else {

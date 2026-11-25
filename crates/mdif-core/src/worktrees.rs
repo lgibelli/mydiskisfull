@@ -23,14 +23,16 @@
 //! Git reads, never writes: status runs without optional locks (no index
 //! refresh), and the trial merge writes its objects to a scratch folder
 //! instead of the repository. Repositories are the projects in the code
-//! folders ([`CODE_ROOTS`]) whose `.git` has worktrees, so git only runs
-//! where there are some.
+//! folders ([`owners::code_folders`]) whose `.git` has worktrees, so git
+//! only runs where there are some.
+//!
+//! [`owners::code_folders`]: crate::owners::code_folders
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::owners::{ARTIFACTS, CODE_ROOTS};
+use crate::owners::ARTIFACTS;
 use crate::privacy;
 
 /// How long nothing must have happened in an agent's worktree.
@@ -141,12 +143,11 @@ pub fn ignores(dir: &Path) -> Option<bool> {
     }
 }
 
-/// Projects in the code folders with linked worktrees.
+/// Projects in the code folders ([`crate::owners::code_folders`]) with
+/// linked worktrees.
 fn repos(home: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = CODE_ROOTS
-        .iter()
-        .map(|r| home.join(r))
-        .filter(|r| privacy::may_open(r))
+    let mut out: Vec<PathBuf> = crate::owners::code_folders(home)
+        .into_iter()
         .filter_map(|r| std::fs::read_dir(r).ok())
         .flat_map(|rd| rd.flatten())
         .map(|e| e.path())
@@ -167,7 +168,7 @@ struct Base {
 }
 
 /// A worktree as `git worktree list` describes it.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Listed {
     path: PathBuf,
     head: String,
@@ -235,6 +236,9 @@ impl Git {
     }
 
     fn finished_in(&self, repo: &Path, now: i64) -> Vec<Finished> {
+        if runs_its_own_commands(&repo.join(".git")) {
+            return Vec::new();
+        }
         let Some(listed) = self.out(repo, &["worktree", "list", "--porcelain", "-z"]) else {
             return Vec::new();
         };
@@ -243,12 +247,18 @@ impl Git {
             return Vec::new();
         }
         let objects = repo.join(".git/objects");
-        let mut list = parse_list(&listed).into_iter();
+        let all = parse_list(&listed);
+        // Removing one takes every worktree inside it, and what they hold.
+        let holds_another = |w: &Listed| {
+            all.iter()
+                .any(|o| o.path != w.path && o.path.starts_with(&w.path))
+        };
+        let mut list = all.iter().cloned();
         // The first is the main worktree.
         let Some(main) = list.next() else {
             return Vec::new();
         };
-        list.filter(|w| !w.locked && !w.prunable && privacy::may_open(&w.path))
+        list.filter(|w| !w.locked && !w.prunable && !holds_another(w) && privacy::may_open(&w.path))
             .filter_map(|w| {
                 let agents = is_agents(&w.path);
                 let touched = last_touched(&w.path)?;
@@ -362,26 +372,132 @@ impl Git {
 }
 
 /// Whether `rel`, ignored in `worktree`, can be made again: build output, a
-/// link, or what the main checkout has too (a file the same size).
+/// link, Finder's view settings, or what the main checkout has the same: a
+/// file with the same bytes, a folder whose every file main has the same.
+/// A folder of the same name isn't enough: `.idea/shelf`'s patches, a clone
+/// with commits of its own or a run's outputs are only in the worktree.
 fn remade(worktree: &Path, main: &Path, rel: &Path) -> bool {
+    let mut budget = REMADE_ENTRIES;
+    same_in_main(worktree, main, rel, &mut budget)
+}
+
+/// The most entries of one ignored folder [`remade`] looks at; past it, the
+/// folder is taken as the worktree's own.
+const REMADE_ENTRIES: usize = 5_000;
+
+/// The biggest file compared byte for byte; a bigger one (a database, a
+/// model) is taken as the worktree's own.
+const REMADE_BYTES: u64 = 256 * 1024;
+
+fn same_in_main(worktree: &Path, main: &Path, rel: &Path, budget: &mut usize) -> bool {
     if rel
         .file_name()
         .and_then(OsStr::to_str)
-        .is_some_and(|n| ARTIFACTS.contains(&n))
+        .is_some_and(|n| ARTIFACTS.contains(&n) || n == ".DS_Store")
     {
         return true;
     }
-    let Ok(here) = std::fs::symlink_metadata(worktree.join(rel)) else {
+    let Some(left) = budget.checked_sub(1) else {
+        return false;
+    };
+    *budget = left;
+    let here_at = worktree.join(rel);
+    let Ok(here) = std::fs::symlink_metadata(&here_at) else {
         return false;
     };
     if here.is_symlink() {
         return true;
     }
-    match std::fs::metadata(main.join(rel)) {
-        Ok(there) if here.is_dir() => there.is_dir(),
-        Ok(there) => there.is_file() && there.len() == here.len(),
-        Err(_) => false,
+    let there_at = main.join(rel);
+    let Ok(there) = std::fs::metadata(&there_at) else {
+        return false;
+    };
+    if here.is_dir() {
+        return there.is_dir()
+            && std::fs::read_dir(&here_at).is_ok_and(|entries| {
+                entries.into_iter().all(|e| {
+                    e.is_ok_and(|e| same_in_main(worktree, main, &rel.join(e.file_name()), budget))
+                })
+            });
     }
+    here.is_file()
+        && there.is_file()
+        && here.len() == there.len()
+        && here.len() <= REMADE_BYTES
+        && same_bytes(&here_at, &there_at)
+}
+
+/// Whether two small files hold the same bytes. Read with materialization
+/// forbidden: a cloud file not on this Mac fails to read, and is no copy.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    if crate::os::fs::forbid_dataless_materialization().is_err() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether a repository's own configuration names commands that checking it
+/// would run (`git status` runs a filter on a file it compares, a trial merge
+/// runs a merge driver), or pulls in another file that might. An archive
+/// unpacked into a code folder brings its `.git` with it, and nobody asked to
+/// run what it says: such a repository is left alone, none of its worktrees
+/// ever finished. The user's own configuration (git-lfs's filter, set
+/// globally) isn't the repository's, and runs as it would for them.
+fn runs_its_own_commands(git_dir: &Path) -> bool {
+    let mut configs = vec![git_dir.join("config"), git_dir.join("config.worktree")];
+    if let Ok(worktrees) = std::fs::read_dir(git_dir.join("worktrees")) {
+        configs.extend(
+            worktrees
+                .flatten()
+                .map(|w| w.path().join("config.worktree")),
+        );
+    }
+    // Submodules' repositories (`modules/<name>`, a name may have folders in
+    // it, and theirs in `modules/<name>/modules`), within a bound.
+    let mut stack = vec![git_dir.join("modules")];
+    let mut looked = 0;
+    while let Some(dir) = stack.pop() {
+        looked += 1;
+        if looked > 1_000 {
+            return true;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let at = e.path();
+            if at.join("HEAD").is_file() {
+                configs.push(at.join("config"));
+                stack.push(at.join("modules"));
+            } else {
+                stack.push(at);
+            }
+        }
+    }
+    configs
+        .iter()
+        .any(|c| std::fs::read(c).is_ok_and(|text| names_commands(&String::from_utf8_lossy(&text))))
+}
+
+/// Whether a git configuration file has a section that names a command run
+/// on files (`[filter "x"]`, `[merge "x"]`) or includes another file.
+fn names_commands(config: &str) -> bool {
+    config.lines().any(|l| {
+        let l: String = l
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        ["[filter", "[merge", "[include"]
+            .iter()
+            .any(|s| l.starts_with(s))
+    })
 }
 
 /// A folder for a trial merge's objects, removed when done.
@@ -505,6 +621,20 @@ mod tests {
         assert!(!l[1].locked && l[2].locked && l[3].prunable);
     }
 
+    /// Where the disk ignores case, "Projects" and "projects" are one folder:
+    /// its repositories are listed once, as the disk spells them, or each
+    /// finished worktree would be suggested twice.
+    #[test]
+    fn a_repository_is_found_once_whatever_its_code_folders_case() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for repo in ["Projects/shop", "CODE/tool", "Elsewhere/site"] {
+            std::fs::create_dir_all(h.join(repo).join(".git/worktrees/feature")).unwrap();
+        }
+        std::fs::create_dir_all(h.join("Projects/plain/.git")).unwrap();
+        assert_eq!(repos(h), [h.join("CODE/tool"), h.join("Projects/shop")]);
+    }
+
     #[test]
     fn agents_worktrees_are_in_claude_worktrees() {
         assert!(is_agents(Path::new("/r/.claude/worktrees/agent-1")));
@@ -538,6 +668,9 @@ mod tests {
                 .arg("-C")
                 .arg(&repo)
                 .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                // No maintenance after a commit or a merge: run in the
+                // background, it would pack the objects a test counts.
+                .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -550,6 +683,101 @@ mod tests {
         assert_eq!(tracks_files_in(&repo.join("build")), Some(false));
         assert!(!crate::clean::build_output(&repo.join("dist")));
         assert!(crate::clean::build_output(&repo.join("build")));
+    }
+
+    /// The setup's git, isolated from the user's configuration (hooks,
+    /// signing); what's tested isn't, as in real use.
+    fn setup_git(git: &Git, dir: &Path, args: &[&str]) {
+        let st = Command::new(&git.bin)
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            // No maintenance after a commit or a merge: run in the
+            // background, it would pack the objects a test counts.
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    /// An npm project's `build` is also where electron-builder keeps what an
+    /// app is built from: build output only when git ignores it.
+    #[test]
+    fn an_npm_projects_build_folder_is_output_only_when_ignored() {
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("electron-app");
+        let build = app.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("icon.icns"), "icon").unwrap();
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        // Outside a repository nothing says which it is.
+        assert!(!crate::clean::build_output(&build));
+        // In one, not ignored: an icon not committed yet.
+        setup_git(&git, &app, &["init", "-q", "-b", "main"]);
+        assert!(!crate::clean::build_output(&build));
+        std::fs::write(app.join(".gitignore"), "/build\n").unwrap();
+        assert!(crate::clean::build_output(&build));
+        // Beside a Gradle file it's what Gradle builds, ignored or not.
+        std::fs::write(app.join(".gitignore"), "").unwrap();
+        std::fs::write(app.join("build.gradle"), "").unwrap();
+        assert!(crate::clean::build_output(&build));
+    }
+
+    /// Removing a worktree takes every worktree inside it, and their work:
+    /// one that holds another isn't finished, however merged.
+    #[test]
+    fn a_worktree_holding_another_is_not_finished() {
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("app");
+        std::fs::create_dir(&repo).unwrap();
+        setup_git(&git, &repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), ".claude/worktrees/\n").unwrap();
+        setup_git(&git, &repo, &["add", "."]);
+        setup_git(&git, &repo, &["commit", "-qm", "start"]);
+        let outer = repo.join(".claude/worktrees/outer");
+        let add = |at: &Path, branch: &str, path: &Path| {
+            setup_git(
+                &git,
+                at,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    branch,
+                    path.to_str().unwrap(),
+                ],
+            );
+        };
+        add(&repo, "outer", &outer);
+        let later = crate::watch::unix_now() + QUIET + 60;
+        let finished = || {
+            git.finished_in(&repo, later)
+                .into_iter()
+                .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // On its own it's finished: main's commit, nothing else in it.
+        assert_eq!(finished(), ["outer"]);
+        // A session in it starts another inside it, with work of its own.
+        let inner = outer.join(".claude/worktrees/inner");
+        add(&outer, "inner", &inner);
+        std::fs::write(inner.join("notes.md"), "not committed\n").unwrap();
+        assert_eq!(finished(), Vec::<String>::new());
     }
 
     /// A repository with a worktree in each state, built by the real git.
@@ -569,6 +797,9 @@ mod tests {
                 .arg("-C")
                 .arg(dir)
                 .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                // No maintenance after a commit or a merge: run in the
+                // background, it would pack the objects a test counts.
+                .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -588,6 +819,7 @@ mod tests {
         run(&repo, &["commit", "-qm", "start"]);
         // What building the project makes, and its settings, in main too.
         std::fs::create_dir(repo.join("gen")).unwrap();
+        put(repo.join("gen/code.rs"), "fn x() {}\n");
         put(repo.join(".env"), "KEY=1\n");
         for (name, branch) in [
             ("ff", "ff"),
@@ -598,6 +830,8 @@ mod tests {
             ("ignored", "ignored"),
             ("generated", "generated"),
             ("env", "env"),
+            ("same-size", "same-size"),
+            ("own-files", "own-files"),
             ("locked", "locked"),
         ] {
             let p = wt(name);
@@ -648,6 +882,12 @@ mod tests {
         put(wt("generated").join(".env"), "KEY=1\n");
         // Settings of its own: ignored, but not to be thrown away.
         put(wt("env").join(".env"), "KEY=other\n");
+        // The same size as main's, but not the same settings.
+        put(wt("same-size").join(".env"), "KEY=2\n");
+        // A folder main has too, with a file only the worktree has.
+        std::fs::create_dir(wt("own-files").join("gen")).unwrap();
+        put(wt("own-files").join("gen/code.rs"), "fn x() {}\n");
+        put(wt("own-files").join("gen/notes.md"), "mine\n");
         run(&repo, &["worktree", "lock", wt("locked").to_str().unwrap()]);
 
         let objects = || {
@@ -718,5 +958,46 @@ mod tests {
         let err = remove(&dirty).unwrap_err();
         assert!(err.contains("modified or untracked"), "{err}");
         assert!(wt("dirty").join("a.txt").exists());
+
+        // A command of the repository's own, which checking would run: the
+        // repository is left alone, and it never runs.
+        let ran = dir.path().join("ran");
+        let config = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+        put(
+            repo.join(".git/config"),
+            &format!(
+                "{config}[filter \"probe\"]\n\tclean = sh -c 'touch {}; cat'\n",
+                ran.display()
+            ),
+        );
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        put(repo.join(".git/info/attributes"), "* filter=probe\n");
+        put(wt("ff").join("a.txt"), "one\n");
+        assert_eq!(found(now + IDLE + 60), []);
+        assert!(!ran.exists());
+    }
+
+    #[test]
+    fn a_repositorys_own_commands_are_told_from_the_users() {
+        assert!(names_commands(
+            "[core]\n\tbare = false\n[filter \"x\"]\n\tclean = cat\n"
+        ));
+        assert!(names_commands("[ Merge \"ours\" ]\n\tdriver = true\n"));
+        assert!(names_commands("[includeIf \"gitdir:~/w/\"]\n\tpath = x\n"));
+        assert!(names_commands("[filter.lfs]\n"));
+        assert!(!names_commands(
+            "[core]\n\tfilemode = true\n[remote \"origin\"]\n\turl = x\n"
+        ));
+        // A submodule's repository has its own configuration.
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        let sub = git.join("modules/libs/one");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(git.join("config"), "[core]\n").unwrap();
+        std::fs::write(sub.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(sub.join("config"), "[core]\n").unwrap();
+        assert!(!runs_its_own_commands(&git));
+        std::fs::write(sub.join("config"), "[filter \"x\"]\n\tsmudge = x\n").unwrap();
+        assert!(runs_its_own_commands(&git));
     }
 }

@@ -288,6 +288,9 @@ fn under(root: &Path, path: &Path) -> bool {
     }
 }
 
+/// `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: i32 = 5;
+
 /// How many folders one replay looks up, which is what it costs: past it the
 /// rest is a gap, and the next replay goes on from there.
 const MAX_FOLDERS: usize = 50_000;
@@ -320,9 +323,11 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
         complete: false,
         next: Some(next),
     };
+    // No position to go on from (no journal could be read when the last one
+    // was taken): from here on, but nothing before it was seen.
     if since == 0 {
         return Ok(Replay {
-            complete: true,
+            complete: false,
             next: Some(end),
             ..Replay::default()
         });
@@ -344,7 +349,15 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
             break;
         }
         let Some((next, records, skipped)) = volume.read(id, at, &mut buf)? else {
-            return Ok(gap(end));
+            // Cut short or made again while it was read: what was found stays,
+            // and the rest is a gap.
+            let Replay { mut events, .. } = gap(end);
+            out.events.append(&mut events);
+            return Ok(Replay {
+                events: out.events,
+                complete: false,
+                next: Some(end),
+            });
         };
         // Records of a layout that wasn't read are changes that weren't seen.
         if skipped > 0 {
@@ -363,6 +376,10 @@ pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> 
                     }
                     let found = match volume.folder(r.parent) {
                         Ok(p) => p.filter(|p| under(root, p)),
+                        // Not this account's to open (Windows' own folders, other
+                        // accounts' profiles): nor to list, so nothing in it could
+                        // be measured, and its changes are no gap in what can be.
+                        Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => None,
                         Err(_) => {
                             // Not placed: not a change that can be said to be
                             // outside the watched folder.
@@ -562,7 +579,8 @@ mod tests {
             eprintln!("no readable journal on {volume_root}: skipped");
             return;
         };
-        assert!(baseline.complete && baseline.events.is_empty());
+        // From now on: nothing before it was seen, so not complete.
+        assert!(!baseline.complete && baseline.events.is_empty());
         // Nothing has changed under a folder that hasn't been touched.
         let busy = root.join("busy");
         let quiet = root.join("quiet");

@@ -9,7 +9,6 @@
 //! Access. Other protected places (Mail, Safari, the Trash) fail quietly
 //! instead, and need no care.
 
-use std::ffi::OsStr;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -50,41 +49,49 @@ pub fn prompts(path: &Path) -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
-    let path = path.strip_prefix(DATA_ROOT).map_or(path, |rest| rest);
-    if path.starts_with("/Volumes") && path.components().count() > 2 {
-        return true;
+    // The names as the file system takes them: `..` goes back one, and case
+    // doesn't count, as on the Mac's own volume (`/users/me/documents` is
+    // Documents all the same).
+    let mut names: Vec<String> = Vec::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(n) => names.push(n.to_string_lossy().to_lowercase()),
+            Component::ParentDir => {
+                names.pop();
+            }
+            _ => {}
+        }
     }
-    let names: Vec<&OsStr> = path
+    let data: Vec<String> = Path::new(DATA_ROOT)
         .components()
         .filter_map(|c| match c {
-            Component::Normal(n) => Some(n),
+            Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
             _ => None,
         })
         .collect();
-    // /Users/<name>/...
-    let [users, _, rest @ ..] = names.as_slice() else {
-        return false;
-    };
-    if *users != "Users" {
-        return false;
+    if names.starts_with(&data) {
+        names.drain(..data.len());
     }
-    match rest {
-        [top, ..]
-            if ["Desktop", "Documents", "Downloads"]
-                .map(OsStr::new)
-                .contains(top) =>
-        {
-            true
-        }
-        [lib, place, ..] if *lib == "Library" => {
-            let inside = rest.len() > 2;
-            match place.to_str() {
-                Some("Mobile Documents" | "CloudStorage") => true,
-                // Listing the containers is fine; looking inside one isn't.
-                Some("Containers" | "Group Containers") => inside,
-                _ => false,
-            }
-        }
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    match names.as_slice() {
+        ["volumes", _, ..] => true,
+        ["users", _, "desktop" | "documents" | "downloads", ..] => true,
+        [
+            "users",
+            _,
+            "library",
+            "mobile documents" | "cloudstorage",
+            ..,
+        ] => true,
+        // Listing the containers is fine; looking inside one isn't.
+        [
+            "users",
+            _,
+            "library",
+            "containers" | "group containers",
+            _,
+            ..,
+        ] => true,
         _ => false,
     }
 }
@@ -106,6 +113,12 @@ mod tests {
             "/Users/me/Library/Group Containers/group.x/Library",
             "/System/Volumes/Data/Users/me/Documents/a",
             "/Volumes/Backup/Users",
+            // The volume ignores case, and `..` goes back.
+            "/users/me/documents/Taxes",
+            "/Users/me/DESKTOP",
+            "/volumes/Backup",
+            "/Users/me/devel/../Documents/x",
+            "/Users/me/Library/Developer/../CloudStorage/x",
         ] {
             assert!(prompts(Path::new(p)), "{p}");
         }
@@ -119,6 +132,7 @@ mod tests {
             "/private/var/folders/x/T/Documents",
             "/Applications",
             "/Volumes",
+            "/Users/me/Documents/..",
         ] {
             assert!(!prompts(Path::new(p)), "{p}");
         }

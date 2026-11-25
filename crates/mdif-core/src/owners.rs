@@ -44,7 +44,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,22 @@ pub const ARTIFACTS: &[&str] = &[
     ".venv",
 ];
 
+/// What a .NET build makes beside its project file (`App.csproj`): build
+/// output only with one there ([`clean::build_output`]), so not among
+/// [`ARTIFACTS`], which the rest takes by name (`bin` is also where people
+/// keep their scripts). Owners split there on Windows, where .NET is at
+/// home.
+///
+/// [`clean::build_output`]: crate::clean::build_output
+pub const DOTNET_OUTPUT: &[&str] = &["bin", "obj"];
+
+/// Whether a folder called `name` may be .NET's build output ([`DOTNET_OUTPUT`]):
+/// on Windows whatever its case (`Bin` is the folder a build writes `bin` to
+/// there), and never on other systems, where nothing suggests it.
+pub fn dotnet_output(name: &str) -> bool {
+    cfg!(windows) && DOTNET_OUTPUT.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
 /// Home folders whose children are projects.
 pub const CODE_ROOTS: &[&str] = &[
     "devel",
@@ -85,6 +101,35 @@ pub const CODE_ROOTS: &[&str] = &[
     "repos",
     "work",
 ];
+
+/// The folders projects are in: what the home folder holds under a name
+/// [`CODE_ROOTS`] has, whatever the case, as the disk spells it (where it
+/// ignores case, "Code" and "code" are one folder, to be looked at once),
+/// and on Windows Visual Studio's `source\repos`. Folders, or links (the
+/// caller says whether it follows one), that may be opened.
+pub fn code_folders(home: &Path) -> Vec<PathBuf> {
+    let named = |n: &OsStr| {
+        n.to_str()
+            .is_some_and(|n| CODE_ROOTS.iter().any(|r| r.eq_ignore_ascii_case(n)))
+    };
+    let mut out: Vec<PathBuf> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()))
+        .filter(|e| named(&e.file_name()))
+        .map(|e| e.path())
+        .collect();
+    if cfg!(windows) {
+        let repos = home.join("source").join("repos");
+        if std::fs::symlink_metadata(&repos).is_ok() {
+            out.push(repos);
+        }
+    }
+    out.retain(|r| privacy::may_open(r));
+    out.sort();
+    out
+}
 
 /// Owner growth is reported once it adds up to this much, either way; the
 /// rest is carried to later periods so slow growth isn't lost.
@@ -112,6 +157,16 @@ pub const PERIOD_ENTRIES: usize = 20_000;
 /// Known folders asked where they are now, at most, when one that was tracked is
 /// gone from where it was.
 const MAX_LOOKUPS: usize = 8;
+
+/// Folders being followed ([`Tracker::following`]) kept across a restart at
+/// most: each is listed in the first period after it, whatever it costs.
+pub const MAX_FOLLOWED: usize = 256;
+
+/// A file directly in a folder above where owners are ([`Rules::above_owners`])
+/// is an owner of its own from this size: smaller ones aren't anyone's.
+const LOOSE_MIN: u64 = 1 << 20;
+/// Of those, the biggest followed per folder at most.
+const MAX_LOOSE: usize = 1024;
 
 /// Directories re-listed per period at most when FSEvents asks for a whole
 /// subtree to be rescanned (it does after dropping events).
@@ -230,7 +285,8 @@ impl Rules {
         for code in CODE_ROOTS {
             r = r.projects(home.join(code));
         }
-        r
+        // Where Visual Studio puts them.
+        r.projects(home.join("source").join("repos"))
     }
 
     /// The rules for a Mac with `home` as the user's home folder.
@@ -292,39 +348,51 @@ impl Rules {
     }
 
     pub fn owner_of(&self, path: &Path) -> PathBuf {
-        let root: PathBuf;
+        let (mut owner, rest, take, _) = self.place(path);
+        owner.extend(&rest[..take]);
+        owner
+    }
+
+    /// Whether `dir` is above where owners are: a rule's prefix (the home
+    /// folder, a drive's root) or a level between it and its owners. No folder
+    /// owns the files directly in it, so each is an owner of its own: a log
+    /// growing in the home folder isn't the whole home folder growing.
+    pub fn above_owners(&self, dir: &Path) -> bool {
+        self.place(dir).3
+    }
+
+    /// The rule `path` is under: its prefix, the names below it, how many of
+    /// those name its owner, and whether it's above where owners are.
+    fn place<'a>(&self, path: &'a Path) -> (PathBuf, Vec<&'a OsStr>, usize, bool) {
         let (prefix, depth) = match self
             .rules
             .iter()
             .filter(|(p, _)| path.starts_with(p))
             .max_by_key(|(p, _)| p.components().count())
         {
-            Some((p, d)) => (p, d),
+            Some((p, d)) => (p.clone(), d.clone()),
             // No rule covers it (another drive): one name below its root.
-            None => {
-                root = path
-                    .components()
+            None => (
+                path.components()
                     .take_while(|c| {
                         matches!(
                             c,
                             std::path::Component::Prefix(_) | std::path::Component::RootDir
                         )
                     })
-                    .collect();
-                (&root, &Depth::Fixed(1))
-            }
+                    .collect(),
+                Depth::Fixed(1),
+            ),
         };
         let rest: Vec<&OsStr> = path
-            .strip_prefix(prefix)
+            .strip_prefix(&prefix)
             .map(|r| r.iter().collect())
             .unwrap_or_default();
-        let take = match depth {
-            Depth::Fixed(n) => (*n).min(rest.len()),
-            Depth::Projects => project_depth(&rest),
+        let (take, above) = match depth {
+            Depth::Fixed(n) => (n.min(rest.len()), rest.len() < n),
+            Depth::Projects => (project_depth(&rest), rest.is_empty()),
         };
-        let mut owner = prefix.clone();
-        owner.extend(&rest[..take]);
-        owner
+        (prefix, rest, take, above)
     }
 }
 
@@ -336,9 +404,10 @@ fn project_depth(rest: &[&OsStr]) -> usize {
     if rest.len() >= 4 && rest[1] == ".claude" && rest[2] == "worktrees" {
         return 4;
     }
+    let artifact = |c: &str| ARTIFACTS.contains(&c) || dotnet_output(c);
     rest[1..]
         .iter()
-        .position(|c| c.to_str().is_some_and(|c| ARTIFACTS.contains(&c)))
+        .position(|c| c.to_str().is_some_and(artifact))
         .map_or(1, |i| i + 2)
 }
 
@@ -404,7 +473,9 @@ pub struct Update {
     /// prompt (see [`crate::privacy`]).
     pub skipped: usize,
     /// Whole-volume rescans FSEvents asked for (history lost, e.g. after
-    /// its journal was reset), which are skipped.
+    /// its journal was reset), which are skipped, and rescans cut short by
+    /// the period's [`MAX_RESCAN`]: what was measured is less than what
+    /// happened.
     pub gaps: usize,
 }
 
@@ -417,12 +488,22 @@ pub struct Tracker {
     fsid: Option<FsId>,
     dirs: BTreeMap<PathBuf, Dir>,
     carry: HashMap<PathBuf, i64>,
-    /// Changed but deferred.
+    /// Changed but deferred, or listed again next period whatever the
+    /// journal says.
     pending: BTreeSet<PathBuf>,
+    /// Of those, the ones listed again because they grow or had a file
+    /// written (one held open is silent in the journal until it's closed):
+    /// what a restart must not forget ([`Tracker::following`]).
+    followed: BTreeSet<PathBuf>,
+    /// The files directly in folders above where owners are, each an owner
+    /// ([`Rules::above_owners`]): their sizes as last listed.
+    loose: HashMap<PathBuf, BTreeMap<OsString, u64>>,
     /// Seconds per period, the unit of deferral.
     period: i64,
     /// Entries a period lists before folders seen before wait.
     budget: usize,
+    /// Folders a period's rescans list at most ([`MAX_RESCAN`]).
+    rescan: usize,
     /// Bytes per period a steady folder changes by less than.
     steady: u64,
 }
@@ -437,8 +518,11 @@ impl Tracker {
             dirs: BTreeMap::new(),
             carry: HashMap::new(),
             pending: BTreeSet::new(),
+            followed: BTreeSet::new(),
+            loose: HashMap::new(),
             period,
             budget: PERIOD_ENTRIES,
+            rescan: MAX_RESCAN,
             steady: STEADY,
         }
     }
@@ -461,6 +545,24 @@ impl Tracker {
 
     pub fn dirs_tracked(&self) -> usize {
         self.dirs.len()
+    }
+
+    /// The folders listed again whatever the journal says (growing, or with
+    /// a file written: an open file is silent in NTFS's journal until it's
+    /// closed), at most [`MAX_FOLLOWED`]: kept with the journal's checkpoint,
+    /// so a restart goes on looking at them ([`Tracker::resume`]).
+    pub fn following(&self) -> Vec<PathBuf> {
+        self.followed.iter().take(MAX_FOLLOWED).cloned().collect()
+    }
+
+    /// Goes on looking at the folders a tracker before a restart was
+    /// following: each is listed next period (as a folder seen for the first
+    /// time), and followed again if it grows.
+    pub fn resume(&mut self, dirs: impl IntoIterator<Item = PathBuf>) {
+        for dir in dirs.into_iter().take(MAX_FOLLOWED) {
+            self.pending.insert(dir.clone());
+            self.followed.insert(dir);
+        }
     }
 
     /// Re-list the directories in `events` and return the growth per owner.
@@ -495,12 +597,23 @@ impl Tracker {
             dirty.entry(dir).or_insert(false);
         }
         let mut deltas: HashMap<PathBuf, i64> = HashMap::new();
-        let mut budget = MAX_RESCAN;
+        let mut budget = self.rescan;
         // Folders listed before that are due, and how overdue (1: just due).
         let mut due: Vec<(f64, PathBuf)> = Vec::new();
+        // Folders seen for the first time, listed last: one that moved here is
+        // found gone from its old place by listing that place, and what was
+        // known of it moves along, so it's then measured against what it held
+        // rather than counted as freed there and new here. Rescans, and new
+        // folders holding known ones (an old place, seen first itself), go
+        // first.
+        let mut first: Vec<PathBuf> = Vec::new();
         for (dir, recursive) in dirty {
             let (wait, seen) = match self.dirs.get(&dir) {
                 Some(d) if !recursive => (d.defer() as i64 * self.period, d.seen),
+                _ if !recursive && self.known_children(&dir).is_empty() => {
+                    first.push(dir);
+                    continue;
+                }
                 _ => {
                     self.measure(
                         dir,
@@ -541,6 +654,17 @@ impl Tracker {
                 &mut up,
             );
         }
+        for dir in first {
+            self.measure(
+                dir,
+                false,
+                created_after,
+                now,
+                &mut budget,
+                &mut deltas,
+                &mut up,
+            );
+        }
         for (owner, d) in deltas {
             *self.carry.entry(owner).or_default() += d;
         }
@@ -571,9 +695,12 @@ impl Tracker {
         up: &mut Update,
     ) {
         let mut stack = vec![dir];
+        // Folders below left out of a rescan: its budget ran out.
+        let mut cut = false;
         while let Some(dir) = stack.pop() {
             if !privacy::may_open(&dir) {
                 up.skipped += 1;
+                self.followed.remove(&dir);
                 continue;
             }
             match bulk::read_dir_with(&dir, Detail::Sizes) {
@@ -603,11 +730,18 @@ impl Tracker {
                     }
                     let (mut own, mut created) = (0u64, 0u64);
                     let mut written = false;
+                    let above = self.rules.above_owners(&dir);
+                    // Each an owner (name, size, new since the last period).
+                    let mut loose: Vec<(&OsStr, u64, bool)> = Vec::new();
                     for e in &entries {
                         if e.kind == Kind::Dir {
-                            if recursive && !e.is_dataless() && *budget > 0 {
-                                *budget -= 1;
-                                stack.push(dir.join(&e.name));
+                            if recursive && !e.is_dataless() {
+                                if *budget > 0 {
+                                    *budget -= 1;
+                                    stack.push(dir.join(&e.name));
+                                } else {
+                                    cut = true;
+                                }
                             }
                             continue;
                         }
@@ -617,14 +751,24 @@ impl Tracker {
                             created += size;
                         }
                         written |= e.mtime > created_after;
+                        if above && size >= LOOSE_MIN {
+                            loose.push((e.name.as_os_str(), size, e.crtime > created_after));
+                        }
                     }
+                    let meta = std::fs::symlink_metadata(&dir).ok();
+                    // Made since the last period: all it holds came since, a
+                    // file moved in too (it keeps its own creation time).
+                    let made = meta
+                        .as_ref()
+                        .and_then(|m| m.created().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .is_some_and(|d| d.as_secs() as i64 > created_after);
                     let mut state = Dir {
                         own,
                         entries: entries.len().min(u32::MAX as usize) as u32,
                         seen: now,
                         steady: 0,
-                        inode: std::fs::symlink_metadata(&dir)
-                            .map_or(0, |m| crate::portable::file_id(&dir, &m)),
+                        inode: meta.map_or(0, |m| crate::portable::file_id(&dir, &m)),
                     };
                     let before = self.dirs.get(&dir).copied();
                     if let Some(b) = before {
@@ -636,27 +780,83 @@ impl Tracker {
                     self.dirs.insert(dir.clone(), state);
                     let delta = match before {
                         Some(b) => own as i64 - b.own as i64,
+                        None if made => own as i64,
                         None => created as i64,
                     };
-                    if delta != 0 {
+                    if above {
+                        self.credit_loose(&dir, before.is_some(), loose, deltas);
+                    } else if delta != 0 {
                         *deltas.entry(self.rules.owner_of(&dir)).or_default() += delta;
                     }
                     // Growing: listed again next period, whatever FSEvents says.
-                    if delta > 0 && delta >= self.steady as i64 {
+                    let growing = delta > 0 && delta >= self.steady as i64;
+                    // NTFS writes a journal record for a file when it is first
+                    // changed and again when it is closed, so a file kept open
+                    // while it grows is silent in between: a folder with a file
+                    // written since the last period, or seen for the first time,
+                    // is looked at again.
+                    let silent = cfg!(windows) && (written || before.is_none());
+                    // One followed before a restart: seen first again, and
+                    // looked at again for what it grows from now on.
+                    let resumed = before.is_none() && self.followed.contains(&dir);
+                    if growing || silent || resumed {
                         self.pending.insert(dir.clone());
-                    } else if cfg!(windows) && (written || before.is_none()) {
-                        // NTFS writes a journal record for a file when it is first
-                        // changed and again when it is closed, so a file kept open
-                        // while it grows is silent in between: a folder with a file
-                        // written since the last period, or seen for the first time,
-                        // is looked at again.
-                        self.pending.insert(dir.clone());
+                        self.followed.insert(dir.clone());
+                    } else {
+                        self.followed.remove(&dir);
                     }
                 }
-                Err(e) if is_gone(&e) => self.gone(&dir, deltas),
-                Err(_) => up.unreadable += 1,
+                Err(e) if is_gone(&e) => {
+                    self.followed.remove(&dir);
+                    self.gone(&dir, deltas);
+                }
+                Err(_) => {
+                    self.followed.remove(&dir);
+                    up.unreadable += 1;
+                }
             }
         }
+        // What changed below the folders left out isn't known: a gap, not a
+        // period that saw everything.
+        if cut {
+            up.gaps += 1;
+        }
+    }
+
+    /// Credits each file directly in `dir`, a folder above where owners are, to
+    /// itself: what it grew since `dir` was last listed (`known`), or, the
+    /// first time, its size if it's new since the last period. A file no
+    /// longer there (or now under [`LOOSE_MIN`]) is freed.
+    fn credit_loose(
+        &mut self,
+        dir: &Path,
+        known: bool,
+        mut files: Vec<(&OsStr, u64, bool)>,
+        deltas: &mut HashMap<PathBuf, i64>,
+    ) {
+        if files.len() > MAX_LOOSE {
+            files.sort_by_key(|f| Reverse(f.1));
+            files.truncate(MAX_LOOSE);
+        }
+        let before = self.loose.remove(dir).filter(|_| known);
+        let mut now = BTreeMap::new();
+        for (name, size, new) in files {
+            let was = match &before {
+                Some(b) => b.get(name).copied().unwrap_or(0),
+                None if new => 0,
+                None => size,
+            };
+            if size != was {
+                *deltas.entry(dir.join(name)).or_default() += size as i64 - was as i64;
+            }
+            now.insert(name.to_os_string(), size);
+        }
+        for (name, size) in before.into_iter().flatten() {
+            if !now.contains_key(&name) {
+                *deltas.entry(dir.join(&name)).or_default() -= size as i64;
+            }
+        }
+        self.loose.insert(dir.to_path_buf(), now);
     }
 
     /// The children of `dir` that it, or folders known below them, are
@@ -704,7 +904,17 @@ impl Tracker {
         for p in below {
             let d = self.dirs.remove(&p).expect("just listed");
             let pending = self.pending.remove(&p);
-            *deltas.entry(self.rules.owner_of(&p)).or_default() -= d.own as i64;
+            let followed = self.followed.remove(&p);
+            // Its files each an owner, or all its folder's.
+            let loose = self.loose.remove(&p);
+            match &loose {
+                Some(files) => {
+                    for (name, size) in files {
+                        *deltas.entry(p.join(name)).or_default() -= *size as i64;
+                    }
+                }
+                None => *deltas.entry(self.rules.owner_of(&p)).or_default() -= d.own as i64,
+            }
             let Some(to) = &to else { continue };
             let rel = p.strip_prefix(root).expect("below it");
             let moved = if rel.as_os_str().is_empty() {
@@ -713,9 +923,20 @@ impl Tracker {
                 to.join(rel)
             };
             if !self.dirs.contains_key(&moved) {
-                *deltas.entry(self.rules.owner_of(&moved)).or_default() += d.own as i64;
+                match loose.filter(|_| self.rules.above_owners(&moved)) {
+                    Some(files) => {
+                        for (name, size) in &files {
+                            *deltas.entry(moved.join(name)).or_default() += *size as i64;
+                        }
+                        self.loose.insert(moved.clone(), files);
+                    }
+                    None => *deltas.entry(self.rules.owner_of(&moved)).or_default() += d.own as i64,
+                }
                 if pending {
                     self.pending.insert(moved.clone());
+                }
+                if followed {
+                    self.followed.insert(moved.clone());
                 }
                 self.dirs.insert(moved, d);
             }
@@ -748,6 +969,9 @@ impl Tracker {
         let pending = &self.pending;
         self.dirs
             .retain(|p, d| d.seen >= before || pending.contains(p));
+        self.followed.retain(|p| pending.contains(p));
+        let dirs = &self.dirs;
+        self.loose.retain(|p, _| dirs.contains_key(p));
     }
 }
 
@@ -883,6 +1107,20 @@ mod tests {
             r"C:\Users\me\devel\app\src\main.rs",
             r"C:\Users\me\devel\app",
         );
+        // Visual Studio's projects, and what a .NET build makes beside one.
+        same(
+            r"C:\Users\me\source\repos\Shop\Shop.Web\bin\Debug\net8.0\Shop.Web.dll",
+            r"C:\Users\me\source\repos\Shop\Shop.Web\bin",
+        );
+        same(
+            r"C:\Users\me\source\repos\Shop\Shop.Web\Pages\Index.cshtml",
+            r"C:\Users\me\source\repos\Shop",
+        );
+        same(
+            r"C:\Users\me\devel\api\obj\project.assets.json",
+            r"C:\Users\me\devel\api\obj",
+        );
+        same(r"C:\Users\me\source\notes.txt", r"C:\Users\me\source");
         assert!(
             !Rules::for_windows(Path::new(r"C:\Users\me"))
                 .owner_of(Path::new(r"C:\Users\me\AppData\Local\x"))
@@ -890,6 +1128,25 @@ mod tests {
                 .contains('/'),
             "no mixed separators"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_folders_above_owners_are_the_top_ones_on_windows() {
+        let r = Rules::for_windows_on(Path::new(r"C:\Users\me"), Path::new(r"C:\Windows\System32"));
+        let above = |p: &str| r.above_owners(Path::new(p));
+        for top in [r"C:\", r"C:\Users\me", r"C:\Users\me\AppData\Local", r"D:\"] {
+            assert!(above(top), "{top}");
+        }
+        for owned in [
+            r"C:\$Recycle.Bin",
+            r"C:\Users\me\Downloads",
+            r"C:\Windows\WinSxS",
+            r"D:\Games",
+        ] {
+            assert!(!above(owned), "{owned}");
+        }
+        assert_eq!(owner(r"C:\pagefile.sys"), r"C:\pagefile.sys");
     }
 
     #[cfg(unix)]
@@ -949,6 +1206,34 @@ mod tests {
             "/opt/homebrew/Cellar"
         );
         assert_eq!(owner("/Volumes/USB/stuff"), "/Volumes");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_folders_above_owners_are_the_top_ones() {
+        let r = Rules::for_home(Path::new("/Users/me"));
+        let above = |p: &str| r.above_owners(Path::new(p));
+        for top in [
+            "/",
+            "/Users/me",
+            "/Users/me/Library",
+            "/Users/me/Documents",
+            "/Users/me/devel",
+            // Owners are two levels down: one in between.
+            "/Users/me/Library/Developer/Xcode",
+        ] {
+            assert!(above(top), "{top}");
+        }
+        for owned in [
+            "/Users/me/Documents/Taxes",
+            "/Users/me/Downloads",
+            "/Users/me/devel/app",
+            "/Users/me/Library/Caches/com.spotify.client",
+            // All of it one owner.
+            "/Users/me/.Trash",
+        ] {
+            assert!(!above(owned), "{owned}");
+        }
     }
 
     #[cfg(not(windows))]
@@ -1076,6 +1361,50 @@ mod tests {
         assert_eq!(up.listed, 0, "{up:?}");
     }
 
+    #[test]
+    fn a_restart_goes_on_following_a_growing_folder() {
+        // A download kept open: the journal says nothing more of it until
+        // it's closed, so a watcher that restarts must remember its folder.
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let film = root.join("Storage/film");
+        let file = film.join("film.mkv");
+        write(&file, 20 * MB as usize);
+        let rules = || Rules::default().depth(&root, 1);
+        let mut tr = Tracker::new(rules(), None, 1);
+        tr.apply(&[event(&film)], 0, 100);
+        assert_eq!(tr.following(), std::slice::from_ref(&film));
+
+        let kept = tr.following();
+        let mut tr = Tracker::new(rules(), None, 1);
+        tr.resume(kept);
+        let append = |mb: u64| {
+            let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+            std::io::Write::write_all(&mut f, &vec![3u8; (mb * MB) as usize]).unwrap();
+            f.sync_all().unwrap();
+        };
+        // Seen first again (what it grew meanwhile isn't known)...
+        append(10);
+        let up = tr.apply(&[], i64::MAX, 200);
+        assert_eq!(up.listed, 1, "{up:?}");
+        // ...and exact from then on, with no event.
+        append(30);
+        let up = tr.apply(&[], i64::MAX, 300);
+        // (Allocated bytes: the last block was partly in use already.)
+        assert!(
+            growth(&up, &root.join("Storage")) >= 29 * MB as i64,
+            "{up:?}"
+        );
+        // Without what was kept, nothing would have listed it.
+        let mut forgetful = Tracker::new(rules(), None, 1);
+        assert_eq!(forgetful.apply(&[], i64::MAX, 200).listed, 0);
+        // A followed folder that's gone isn't followed any more.
+        fs::remove_dir_all(&film).unwrap();
+        tr.apply(&[], i64::MAX, 400);
+        tr.apply(&[event(&root.join("Storage"))], i64::MAX, 500);
+        assert!(tr.following().is_empty(), "{:?}", tr.following());
+    }
+
     // Follows a moved folder by its number, which only macOS can do so far.
     #[cfg(target_os = "macos")]
     #[test]
@@ -1119,6 +1448,44 @@ mod tests {
         assert_eq!(growth(&up, &trash), 0, "{up:?}");
     }
 
+    // Follows a moved folder by its number, which only macOS is tested on.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_that_moves_and_grows_in_one_period_takes_its_size_along() {
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (incomplete, movies) = (root.join("Downloads/incomplete"), root.join("Movies"));
+        let film = incomplete.join("film");
+        write(&film.join("film.mkv"), 20 * MB as usize);
+        fs::create_dir_all(&movies).unwrap();
+        let rules = Rules::default().depth(&root, 1);
+        let mut tr = Tracker::new(rules.clone(), None, 1);
+        tr.follow_moves(crate::os::fs::fsid(&root).unwrap());
+        tr.apply(&[event(&incomplete), event(&film)], 0, 100);
+
+        // Done downloading: moved where films go, and written once more there.
+        let moved = movies.join("film");
+        fs::rename(&film, &moved).unwrap();
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(moved.join("film.mkv"))
+            .unwrap();
+        std::io::Write::write_all(&mut f, &vec![3u8; 10 * MB as usize]).unwrap();
+        f.sync_all().unwrap();
+        let up = tr.apply(
+            &[event(&incomplete), event(&movies), event(&moved)],
+            i64::MAX,
+            200,
+        );
+        let downloads = growth(&up, &root.join("Downloads"));
+        assert!(downloads <= -(20 * MB as i64), "{up:?}");
+        // What it held went along, and what it grew there counts too.
+        assert!(growth(&up, &movies) >= 29 * MB as i64, "{up:?}");
+    }
+
     #[test]
     fn first_sight_ignores_files_older_than_the_last_period() {
         let t = tempfile::tempdir().unwrap();
@@ -1129,6 +1496,34 @@ mod tests {
         let up = tr.apply(&[event(&dir)], i64::MAX, 100);
         assert!(up.growth.is_empty(), "{up:?}");
         assert_eq!(up.listed, 1);
+    }
+
+    #[test]
+    fn a_new_folder_credits_what_was_moved_into_it() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (videos, films) = (root.join("Videos"), root.join("Films"));
+        let film = videos.join("film.mkv");
+        write(&film, 4 * MB as usize);
+        let born = fs::metadata(&film)
+            .unwrap()
+            .created()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        let up = tr.apply(&[event(&videos)], born, 100);
+        assert!(up.growth.is_empty(), "{up:?}");
+
+        // A folder made since, and the film moved into it: the film is older
+        // than the last period, the folder isn't.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::create_dir(&films).unwrap();
+        fs::rename(&film, films.join("film.mkv")).unwrap();
+        let up = tr.apply(&[event(&videos), event(&films)], born, 200);
+        assert!(growth(&up, &videos) <= -(4 * MB as i64), "{up:?}");
+        assert!(growth(&up, &films) >= 4 * MB as i64, "{up:?}");
     }
 
     #[test]
@@ -1169,6 +1564,70 @@ mod tests {
         assert_eq!(up.listed, 3);
         let g = growth(&up, &root.join("p"));
         assert!((6 * MB as i64..7 * MB as i64).contains(&g), "{up:?}");
+    }
+
+    #[test]
+    fn a_file_directly_in_a_top_folder_is_an_owner_of_its_own() {
+        // A log growing in the home folder (or a drive's root) is the log
+        // growing, measured against itself, not the whole home folder.
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let old = root.join("old.bin");
+        write(&old, 4 * MB as usize);
+        write(&root.join("app/data.bin"), 2 * MB as usize);
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        // First sight: nothing there is new.
+        let up = tr.apply(&[event(&root), event(&root.join("app"))], i64::MAX, 100);
+        assert!(up.growth.is_empty(), "{up:?}");
+
+        let log = root.join("app.log");
+        write(&log, 3 * MB as usize);
+        write(&root.join("small.txt"), 1000);
+        let up = tr.apply(&[event(&root)], i64::MAX, 200);
+        assert!(growth(&up, &log) >= 3 * MB as i64, "{up:?}");
+        assert_eq!(growth(&up, &root), 0, "{up:?}");
+        // A small file is nobody's.
+        assert_eq!(up.growth.len(), 1, "{up:?}");
+
+        // Deleted: freed under its own name. A folder there is still one.
+        fs::remove_file(&old).unwrap();
+        fs::remove_dir_all(root.join("app")).unwrap();
+        let up = tr.apply(&[event(&root)], i64::MAX, 300);
+        assert!(growth(&up, &old) <= -(4 * MB as i64), "{up:?}");
+        assert!(growth(&up, &root.join("app")) <= -(2 * MB as i64), "{up:?}");
+        assert_eq!(growth(&up, &root), 0, "{up:?}");
+
+        // Seen first after a restart: only a file new since the last period.
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        let up = tr.apply(&[event(&root)], 0, 100);
+        assert!(growth(&up, &log) >= 3 * MB as i64, "{up:?}");
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        let up = tr.apply(&[event(&root)], i64::MAX, 100);
+        assert!(up.growth.is_empty(), "{up:?}");
+    }
+
+    #[test]
+    fn a_rescan_cut_short_by_its_budget_is_a_gap() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        for name in ["a", "b", "c", "d"] {
+            write(&root.join("p").join(name).join("x.bin"), MB as usize);
+        }
+        let rescan = Event {
+            path: root.join("p"),
+            flags: flag::MUST_SCAN_SUBDIRS,
+            id: 1,
+        };
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.rescan = 2;
+        let up = tr.apply(std::slice::from_ref(&rescan), 0, 1);
+        // `p` and two of its four folders.
+        assert_eq!((up.listed, up.gaps), (3, 1), "{up:?}");
+        // Within the budget: no gap.
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.rescan = 4;
+        let up = tr.apply(&[rescan], 0, 1);
+        assert_eq!((up.listed, up.gaps), (5, 0), "{up:?}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -147,11 +147,21 @@ fn token_user(process: HANDLE) -> Option<Vec<u8>> {
         return None;
     }
     // SAFETY: on success `buf` starts with a TOKEN_USER whose SID follows it
-    // inside `buf`; the SID's own length is what's copied (`GetLengthSid`).
+    // inside the bytes written: checked before the SID is read, its fixed
+    // part (8 bytes) first, then the length it says it has.
     unsafe {
         let user = &*buf.as_ptr().cast::<TOKEN_USER>();
         let sid = user.User.Sid;
+        let start = buf.as_ptr() as usize;
+        let end = start + (need as usize).min(buf.len() * 8);
+        let at = sid as usize;
+        if at < start || at + 8 > end || IsValidSid(sid) == 0 {
+            return None;
+        }
         let len = GetLengthSid(sid) as usize;
+        if at + len > end {
+            return None;
+        }
         Some(std::slice::from_raw_parts(sid.cast::<u8>(), len).to_vec())
     }
 }

@@ -27,7 +27,7 @@ pub fn list(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         "What raises an alert (`mdif alerts set <key> <value>`; `mdif alerts reset` for the \
          defaults):"
     );
-    for k in Key::ALL {
+    for k in Key::ALL.into_iter().filter(|k| k.applies()) {
         let note = if s.is_set(k) { "" } else { " (default)" };
         println!(
             "  {:<17} {:<24} {}",
@@ -72,9 +72,17 @@ pub fn reset(db: &Path, volume: &Path, keys: &[String], json_out: bool) -> Resul
 
 fn parse(key: &str) -> Result<Key> {
     match Key::parse(key) {
-        Some(k) => Ok(k),
+        Some(k) if k.applies() => Ok(k),
+        Some(k) => bail!(
+            "{} does nothing here: no process's writes are measured on this system yet",
+            k.name()
+        ),
         None => {
-            let keys: Vec<&str> = Key::ALL.iter().map(|k| k.name()).collect();
+            let keys: Vec<&str> = Key::ALL
+                .iter()
+                .filter(|k| k.applies())
+                .map(|k| k.name())
+                .collect();
             bail!("no setting called {}: {}", printable(key), keys.join(", "))
         }
     }

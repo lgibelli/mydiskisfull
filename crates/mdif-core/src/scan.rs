@@ -56,6 +56,10 @@ pub struct Totals {
     /// Private bytes of hard-linked files that also have links outside this
     /// folder: deleting the folder doesn't free them.
     pub linked_elsewhere: u64,
+    /// Private bytes of files whose names couldn't be counted (Windows: one
+    /// it holds open, such as the page file): counted once, but not as freed
+    /// by deleting the folder, as they may have other names.
+    pub links_unknown: u64,
     /// Allocated bytes times their file's modification time, summed: see
     /// [`Totals::mean_mtime`].
     #[serde(skip)]
@@ -91,6 +95,7 @@ impl Totals {
         self.unreadable_dirs += o.unreadable_dirs;
         self.other_volumes += o.other_volumes;
         self.linked_elsewhere += o.linked_elsewhere;
+        self.links_unknown += o.links_unknown;
         self.mtime_weighted += o.mtime_weighted;
         self.cold += o.cold;
         self.cloned += o.cloned;
@@ -133,6 +138,7 @@ impl Totals {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Node {
+    #[serde(serialize_with = "crate::text::lossy_path")]
     pub path: PathBuf,
     pub totals: Totals,
     /// Largest first. Only kept down to `Options::max_depth` and for
@@ -188,6 +194,7 @@ pub struct Scan {
     /// high.
     pub shared_uncertain: u64,
     /// Sample of directories we could not read (permissions).
+    #[serde(serialize_with = "crate::text::lossy_paths")]
     pub unreadable: Vec<PathBuf>,
     /// With [`Options::big_files`]: the files that big, in no order.
     #[serde(skip)]
@@ -395,6 +402,8 @@ pub fn size_of(path: &Path) -> Option<u64> {
 }
 
 pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
+    // Every scan, whoever asks: a listing must never download a cloud folder.
+    crate::os::fs::forbid_dataless_materialization()?;
     if !crate::privacy::may_open(root) {
         return Err(crate::portable::denied());
     }
@@ -446,6 +455,24 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         Err(crate::portable::denied())
     };
     let entries = match listed {
+        // A volume mounted here: its folder was listed above with this
+        // volume's device (the folder it covers), but what's in it is the
+        // other volume's, which this scan doesn't cross into.
+        Ok(e) if e.first().is_some_and(|f| f.dev != ctx.dev) => {
+            base.dirs = 0;
+            base.other_volumes = 1;
+            return Walked {
+                node: Node {
+                    path: dir.to_path_buf(),
+                    totals: base,
+                    children: Vec::new(),
+                },
+                base,
+                links,
+                blocks: Blocks::default(),
+                unreadable: Vec::new(),
+            };
+        }
         Ok(e) => e,
         Err(_) => {
             base.unreadable_dirs = 1;
@@ -522,7 +549,11 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
     let mut totals = base;
     for l in links.values() {
         totals.add_linked(&l.entry, ctx.cold_before);
-        totals.linked_elsewhere += l.entry.private;
+        if l.entry.nlink == bulk::LINKS_UNKNOWN {
+            totals.links_unknown += l.entry.private;
+        } else {
+            totals.linked_elsewhere += l.entry.private;
+        }
     }
     children.sort_by_key(|n| std::cmp::Reverse(n.totals.allocated));
     Walked {
@@ -764,6 +795,58 @@ mod tests {
         let s = scan(t.path(), &opts(0)).unwrap();
         assert_eq!(s.root.totals.files, 2, "data.bin + the symlink itself");
         assert!(s.root.totals.allocated < 5_000_000);
+    }
+
+    // A disk image mounted inside the scanned folder: its folder is listed with
+    // this volume's device, but nothing in it is this volume's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_volume_mounted_inside_is_not_crossed_into() {
+        let t = tempfile::tempdir().unwrap();
+        let (img, mnt) = (t.path().join("v.dmg"), t.path().join("root/mnt"));
+        fs::create_dir_all(&mnt).unwrap();
+        let hdiutil = |args: &[&std::ffi::OsStr]| {
+            Command::new("/usr/bin/hdiutil")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let made = hdiutil(&[
+            "create".as_ref(),
+            "-quiet".as_ref(),
+            "-size".as_ref(),
+            "16m".as_ref(),
+            "-fs".as_ref(),
+            "APFS".as_ref(),
+            img.as_os_str(),
+        ]) && hdiutil(&[
+            "attach".as_ref(),
+            "-quiet".as_ref(),
+            "-nobrowse".as_ref(),
+            "-mountpoint".as_ref(),
+            mnt.as_os_str(),
+            img.as_os_str(),
+        ]);
+        if !made {
+            eprintln!("no disk image could be mounted: skipped");
+            return;
+        }
+        struct Detach<'a>(&'a Path);
+        impl Drop for Detach<'_> {
+            fn drop(&mut self) {
+                let _ = Command::new("/usr/bin/hdiutil")
+                    .args(["detach".as_ref(), "-force".as_ref(), self.0.as_os_str()])
+                    .status();
+            }
+        }
+        let _detach = Detach(&mnt);
+        write(&mnt.join("inside.bin"), 4_000_000);
+        write(&t.path().join("root/outside.bin"), 1_000_000);
+        let s = scan(&t.path().join("root"), &opts(0)).unwrap();
+        let totals = s.root.totals;
+        assert_eq!(totals.files, 1, "{totals:?}");
+        assert_eq!(totals.other_volumes, 1, "{totals:?}");
+        assert!(totals.allocated < 2_000_000, "{totals:?}");
     }
 
     #[test]

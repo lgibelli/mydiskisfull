@@ -1,8 +1,9 @@
 //! Settings a tweak may change, and how to put each one back.
 //!
-//! A [`Setting`] is one value somewhere on the Mac: a user default, a key of
-//! a JSON settings file, a line of an env file, a whole file, or one of our
-//! configuration profiles. Each reads as `None` when absent, and writing
+//! A [`Setting`] is one value somewhere on the computer: a user default, a
+//! key of a JSON settings file, a line of an env file, a whole file, one of
+//! our configuration profiles, or (on Windows) a number in the user's part of
+//! the registry. Each reads as `None` when absent, and writing
 //! `None` removes it, so the value read before a change is all it takes to
 //! undo the change exactly.
 //!
@@ -37,6 +38,13 @@ pub enum Setting {
     /// One of our configuration profiles, saved in `dir` when downloaded.
     /// Reads as `true` once installed and in effect.
     Profile { profile: Profile, dir: PathBuf },
+    /// A number (`REG_DWORD`) under `HKEY_CURRENT_USER\key` on Windows, as
+    /// Settings writes it; `name` says what it is, for people.
+    Registry {
+        key: String,
+        value: String,
+        name: String,
+    },
 }
 
 impl Setting {
@@ -48,6 +56,9 @@ impl Setting {
             Setting::File { path } => Ok(read_text(path)?.map(Value::String)),
             Setting::Profile { profile, .. } => {
                 Ok(profile.in_effect().then_some(Value::Bool(true)))
+            }
+            Setting::Registry { key, value, .. } => {
+                Ok(registry::read(key, value)?.map(Value::from))
             }
         }
     }
@@ -101,7 +112,49 @@ impl Setting {
                     profile.identifier
                 ),
             },
+            Setting::Registry { key, value, .. } => {
+                let n = match to {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .with_context(|| {
+                                format!("{value}: the registry holds a number here, not {v}")
+                            })?,
+                    ),
+                };
+                registry::write(key, value, n)
+            }
         }
+    }
+}
+
+/// `HKEY_CURRENT_USER`'s numbers, which only Windows has.
+mod registry {
+    use anyhow::Result;
+
+    #[cfg(windows)]
+    pub fn read(key: &str, value: &str) -> Result<Option<u32>> {
+        use anyhow::Context;
+        crate::os::sys::user_number(key, value)
+            .with_context(|| format!("reading HKEY_CURRENT_USER\\{key}\\{value}"))
+    }
+
+    #[cfg(windows)]
+    pub fn write(key: &str, value: &str, to: Option<u32>) -> Result<()> {
+        use anyhow::Context;
+        crate::os::sys::set_user_number(key, value, to)
+            .with_context(|| format!("changing HKEY_CURRENT_USER\\{key}\\{value}"))
+    }
+
+    #[cfg(not(windows))]
+    pub fn read(_: &str, _: &str) -> Result<Option<u32>> {
+        anyhow::bail!("the registry is Windows'")
+    }
+
+    #[cfg(not(windows))]
+    pub fn write(_: &str, _: &str, _: Option<u32>) -> Result<()> {
+        anyhow::bail!("the registry is Windows'")
     }
 }
 
@@ -114,6 +167,12 @@ impl fmt::Display for Setting {
             }
             Setting::File { path } => write!(f, "{}", path.display()),
             Setting::Profile { profile, .. } => write!(f, "profile \"{}\"", profile.name),
+            // Where it is, short enough to read and enough to find it in
+            // Registry Editor: "Storage Sense (HKCU\…\StoragePolicy\01)".
+            Setting::Registry { key, value, name } => {
+                let last = key.rsplit('\\').next().unwrap_or(key);
+                write!(f, "{name} (HKCU\\…\\{last}\\{value})")
+            }
         }
     }
 }

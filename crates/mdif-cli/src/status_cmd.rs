@@ -66,7 +66,14 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         &facts(volume, &pts, &cleanups, now),
         &Params::default(),
     );
-    let alert = user.alert(f.as_ref(), st.avail, st.total);
+    let interval = watch_cmd::sampling_interval(&pts);
+    // A forecast is as of the last sample. Once the watcher has stopped, its
+    // dates are about a disk that has changed since, so no alert comes of it;
+    // free space under the floor still does, as it's read now.
+    let stale = pts
+        .last()
+        .is_some_and(|last| now - last.ts > 3 * interval.max(60));
+    let alert = user.alert(f.as_ref().filter(|_| !stale), st.avail, st.total);
     let keep = crate::keep_cmd::load_or_warn(db);
     let open: Vec<Episode> = match &store {
         Some(s) => s
@@ -88,7 +95,12 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => watch::recorded_cost(s)?,
         None => None,
     };
-    let interval = watch_cmd::sampling_interval(&pts);
+    // When the folders last weren't all checked (a gap in the journal, a
+    // rescan cut short): incidents can be missing since then.
+    let last_gap = match &store {
+        Some(s) => watch::recorded_gap(s)?,
+        None => None,
+    };
 
     if json_out {
         let out = json!({
@@ -104,7 +116,9 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
                 "first": pts.first().map(|p| p.ts),
                 "last": pts.last().map(|p| p.ts),
                 "interval_secs": interval,
+                "stale": stale,
                 "bytes": watch_cmd::history_bytes(db),
+                "last_gap": last_gap,
             },
             "incidents": open.iter().map(|e| episode_json(e, &home, &keep)).collect::<Vec<_>>(),
             "tweaks": applied.iter().map(|a| json!({

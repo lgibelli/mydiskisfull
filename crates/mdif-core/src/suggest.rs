@@ -204,8 +204,12 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     if parts.windows(2).any(|w| w == [".claude", "worktrees"]) {
         return Fix::Steps(WORKTREE.into());
     }
-    if ARTIFACTS.contains(&name.as_str())
+    // Right in the home folder it's a folder of yours (`~/build`), not a
+    // project's output.
+    let dotnet = || owners::dotnet_output(&name) && clean::build_output(owner);
+    if (ARTIFACTS.contains(&name.as_str()) || dotnet())
         && let Some(project) = owner.parent()
+        && !clean::built_in_home(owner, home)
     {
         return artifact(&name, project);
     }
@@ -230,14 +234,28 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     }
     // `mdif writers` isn't there on Windows (yet): what can be done is by hand.
     if cfg!(windows) {
+        if ["pagefile.sys", "swapfile.sys"]
+            .iter()
+            .any(|f| name.eq_ignore_ascii_case(f))
+        {
+            return Fix::Steps(PAGE_FILE.into());
+        }
         let temp = parts
             .windows(3)
             .any(|w| w[0] == "AppData" && w[1] == "Local" && w[2].eq_ignore_ascii_case("Temp"));
+        // A file directly in the profile folder or a drive's root is an owner
+        // of its own (no privacy prompt on Windows to look).
         return Fix::Steps(if temp {
             "Temporary files. Settings → System → Storage → Temporary files removes what \
              isn't in use, and Storage Sense can do it on a schedule; a program that keeps \
              filling it is the one to look at."
                 .to_string()
+        } else if owner.is_file() {
+            format!(
+                "{name} keeps growing. The program writing it may have a setting for how big it \
+                 gets (a log level, a cache size), or it is failing and writing the same thing \
+                 over and over; closing it stops that for now."
+            )
         } else {
             format!(
                 "Open {name} and see what is growing in it. The program that keeps it may have \
@@ -446,12 +464,20 @@ pub fn gather(
             .is_some_and(|fi| fi.days < 30.0);
         from_history(store, home, now, &mut out)?;
     }
-    from_tweaks(store, home, now, tight, keep, &mut out);
-    if tight {
+    // The tweaks' catalogue, local snapshots, swap, Docker's disk image and
+    // what updates leave in /Users/Shared are a Mac's: on Windows, what the
+    // watcher found and finished worktrees, so far.
+    let mac = cfg!(target_os = "macos");
+    if mac {
+        from_tweaks(store, home, now, tight, keep, &mut out);
+    }
+    if mac && tight {
         from_system(home, &st.mount_point, st.avail, &mut out);
     }
     from_worktrees(home, store, now, keep, &mut out);
-    from_leftovers(&mut out);
+    if mac {
+        from_leftovers(&mut out);
+    }
     out.retain(|s| {
         s.path
             .as_deref()
@@ -511,7 +537,8 @@ fn measure_folders(
             continue;
         };
         let kind = s.action.as_ref().map(|a| a.kind);
-        let build = kind.is_none() && clean::build_output(&path);
+        let build =
+            kind.is_none() && !clean::built_in_home(&path, home) && clean::build_output(&path);
         let trash = kind == Some("trash");
         if !(s.measured.followed || build || trash) {
             continue;
@@ -1077,6 +1104,13 @@ fn from_worktrees(
             };
             let command = if n == 1 {
                 format!("git -C {} worktree remove {}", shell_quote(repo), rel(g[0]))
+            } else if cfg!(windows) {
+                // PowerShell's own loop: it has no `for … do`.
+                format!(
+                    "foreach ($w in {}) {{ git -C {} worktree remove $w }}",
+                    g.iter().map(|f| rel(f)).collect::<Vec<_>>().join(", "),
+                    shell_quote(repo)
+                )
             } else {
                 format!(
                     "cd {} && for w in {}; do git worktree remove \"$w\"; done",
@@ -1246,10 +1280,12 @@ fn artifact(name: &str, project: &Path) -> Fix {
     let has = |f: &str| crate::privacy::may_open(project) && project.join(f).exists();
     let q = shell_quote(project);
     match name {
+        // This target: cargo's own may be set elsewhere (build.target-dir).
         "target" if has("Cargo.toml") => Fix::Run {
             command: format!(
-                "cargo clean --manifest-path {}",
-                shell_quote(&project.join("Cargo.toml"))
+                "cargo clean --manifest-path {} --target-dir {}",
+                shell_quote(&project.join("Cargo.toml")),
+                shell_quote(&project.join("target"))
             ),
             note: "Rust rebuilds it locally, without downloading. Each worktree builds its own; \
                    pointing them at one folder (build.target-dir in .cargo/config.toml) stops \
@@ -1257,7 +1293,12 @@ fn artifact(name: &str, project: &Path) -> Fix {
                 .into(),
         },
         "build" | ".dart_tool" if has("pubspec.yaml") => Fix::Run {
-            command: format!("cd {q} && flutter clean"),
+            // PowerShell (Windows' own shell, 5.1) has no `&&`.
+            command: if cfg!(windows) {
+                format!("Set-Location -LiteralPath {q}; flutter clean")
+            } else {
+                format!("cd {q} && flutter clean")
+            },
             note: "Flutter rebuilds it locally on the next run.".into(),
         },
         "node_modules" => Fix::Steps(
@@ -1291,18 +1332,15 @@ fn key_for(fix: &Fix, subject: &str) -> String {
 }
 
 pub(crate) fn display(path: &Path, home: &Path) -> String {
-    let text = match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    };
+    let text = crate::text::tilde(path, home).unwrap_or_else(|| path.display().to_string());
     crate::text::printable(&text).into_owned()
 }
 
-/// `'…'`, safe to paste into a shell whatever the path holds.
+/// The path quoted for the shell, whatever it holds ([`text::shell_quote`]).
+///
+/// [`text::shell_quote`]: crate::text::shell_quote
 fn shell_quote(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    format!("'{}'", s.replace('\'', r"'\''"))
+    crate::text::shell_quote(&path.to_string_lossy())
 }
 
 /// A path's last part, for a title ("target", "myapp").
@@ -1333,6 +1371,10 @@ const RELOCATED: &str = "Each macOS update moves aside the files it didn't recog
 
 const SWAP: &str = "Restart the Mac when it suits you: swap files are only removed then. If it \
                     fills again, an app is using more memory than the Mac has.";
+const PAGE_FILE: &str = "Windows grows its page file when programs use more memory than the PC \
+                         has. A restart usually brings it back to its usual size; if it grows \
+                         again, Task Manager → Processes, sorted by Memory, shows which program \
+                         uses the most.";
 const WORKTREE: &str = "An agent's worktree, with its own build output. Once its work is \
                         merged, `git worktree remove <path>` deletes it (it refuses if \
                         anything is uncommitted).";
@@ -1349,6 +1391,41 @@ const XCODE: &str = "Xcode's DerivedData and old device support files are rebuil
                      isn't building.";
 
 // What these tests assert is macOS: its folders, tools and file system.
+/// What Windows' folders get: its own words and PowerShell's commands.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_folders_get_windows_fixes() {
+        let home = Path::new(r"C:\Users\me");
+        let steps = |p: &Path| match for_folder(p, home) {
+            Fix::Steps(s) => s,
+            f => panic!("{}: {f:?}", p.display()),
+        };
+        assert!(steps(Path::new(r"C:\pagefile.sys")).contains("page file"));
+        assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Temp")).contains("Temporary files"));
+        assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Spotify")).starts_with("Open Spotify"));
+        // A file is said as one (a file directly in the profile folder is an
+        // owner of its own).
+        let t = tempfile::tempdir().unwrap();
+        let log = t.path().join("huge.log");
+        std::fs::write(&log, "x").unwrap();
+        assert!(steps(&log).starts_with("huge.log keeps growing"));
+        // Commands are PowerShell's: single quotes, no `&&`.
+        let app = t.path().join("app");
+        std::fs::create_dir_all(app.join("target")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "").unwrap();
+        let Fix::Run { command, .. } = for_folder(&app.join("target"), home) else {
+            panic!("no command");
+        };
+        assert!(
+            command.starts_with("cargo clean --manifest-path '"),
+            "{command}"
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -1466,6 +1543,13 @@ mod tests {
             for_folder(&proj.join("target"), Path::new(HOME)),
             Fix::Steps(_)
         ));
+        // Right in the home folder a folder named like it is yours, whatever
+        // `npm install` left beside it.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("package.json"), "{}").unwrap();
+        std::fs::create_dir(home.path().join("build")).unwrap();
+        let fix = for_folder(&home.path().join("build"), home.path());
+        assert!(!fix.line().contains("build output"), "{}", fix.line());
     }
 
     #[test]

@@ -357,6 +357,11 @@ impl Pool {
                     if w[u] == 0.0 || days[day_of(j0)] == 0.0 {
                         continue;
                     }
+                    // Left out is left out whole: a block that starts the day
+                    // before would carry hours of it into the run without it.
+                    if exclude.is_some_and(|k| (j0..j0 + block).any(|j| day_of(j) == k)) {
+                        continue;
+                    }
                     let hours = &h.x[j0..j0 + block];
                     let known: Vec<f64> = hours.iter().flatten().copied().collect();
                     if known.len() * 2 < block {

@@ -38,6 +38,7 @@ pub fn boot_volume() -> PathBuf {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskMap {
+    #[serde(serialize_with = "crate::text::lossy_path")]
     pub root: PathBuf,
     pub container: Container,
     /// The volume `root` lives on.
@@ -79,6 +80,26 @@ impl DiskMap {
     }
 }
 
+/// Refuses a drive that isn't NTFS: what's measured of it would be wrong.
+#[cfg(windows)]
+pub fn ntfs_only(root: &Path) -> Result<()> {
+    let shown = root.display();
+    // ReFS keeps 128-bit file IDs and shares blocks between files: neither is
+    // measured, so what it says about hard links and clones would be wrong.
+    let kind = fs::file_system(root).with_context(|| format!("which file system {shown} is"))?;
+    if kind.eq_ignore_ascii_case("ReFS") {
+        anyhow::bail!(
+            "{shown} is ReFS (a Dev Drive), whose shared blocks and file numbers aren't read yet"
+        );
+    }
+    // FAT, exFAT and UDF list their folders without the 128-bit file IDs the
+    // listing asks for: every folder would fail, and look unreadable.
+    if !kind.eq_ignore_ascii_case("NTFS") {
+        anyhow::bail!("{shown} is {kind}: only NTFS drives are measured yet");
+    }
+    Ok(())
+}
+
 pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
     let st = fs::statfs(root).with_context(|| format!("statfs {}", root.display()))?;
@@ -112,16 +133,7 @@ pub fn build(root: &Path, opts: &Options) -> Result<DiskMap> {
     };
     #[cfg(windows)]
     let (notes, quota_limited) = {
-        // ReFS keeps 128-bit file IDs and shares blocks between files: neither is
-        // measured, so what it says about hard links and clones would be wrong.
-        let kind = fs::file_system(root)
-            .with_context(|| format!("which file system {} is", st.mount_point))?;
-        if kind.eq_ignore_ascii_case("ReFS") {
-            anyhow::bail!(
-                "{} is ReFS (a Dev Drive), whose shared blocks and file numbers aren't read yet",
-                st.mount_point
-            );
-        }
+        ntfs_only(root)?;
         // When it can't be told, or the volume is a share, the disk figures are not
         // trusted (said differently below).
         let remote = fs::is_remote(root);

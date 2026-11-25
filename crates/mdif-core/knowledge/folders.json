@@ -219,7 +219,7 @@
       "path": "Library/Caches/ms-playwright",
       "what": "The browsers Playwright downloaded to run tests: Chromium, Firefox and WebKit, for each Playwright version.",
       "grows": "Each Playwright version needs its own browsers; Playwright deletes a version's once nothing on this Mac uses it.",
-      "helps": "`npx playwright uninstall --all` removes them all; tests download them again."
+      "helps": "`npx playwright uninstall --all` removes them all; tests then fail until `npx playwright install` downloads them again."
     },
     {
       "path": "Library/Caches/cargo-xwin",

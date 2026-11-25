@@ -26,6 +26,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::CreateEventW;
 
+pub use crate::private::{make_private, private_to_me};
 use crate::{unsupported, wide};
 
 /// `FILE_FLAG_OPEN_NO_RECALL`: opening a cloud placeholder doesn't download it.
@@ -99,15 +100,10 @@ pub fn statfs(path: &Path) -> io::Result<FsStats> {
     // A path without a drive is on the current drive, which the lookup
     // can't know without being told where that is.
     let mount = volume_path(&std::path::absolute(path)?)?;
-    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
-    // SAFETY: `mount` is NUL-ended; the outputs are valid for writes.
-    if unsafe { GetDiskFreeSpaceExW(mount.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
     // Windows gives `total` and `avail` for the calling user (with disk
     // quotas, what the quota allows) and `free` for the whole volume: only
     // the two for the user add up, so those are what's reported.
-    let _ = free;
+    let Space { avail, total, .. } = space_of(&mount)?;
     Ok(FsStats {
         total,
         free: avail,
@@ -120,13 +116,29 @@ pub fn statfs(path: &Path) -> io::Result<FsStats> {
 /// Whether the figures `statfs` gives are the caller's quota and not the
 /// volume's: Windows then gives this user less free space than the volume has.
 pub fn quota_limited(path: &Path) -> io::Result<bool> {
-    let mount = volume_path(&std::path::absolute(path)?)?;
+    let space = space_of(&volume_path(&std::path::absolute(path)?)?)?;
+    Ok(space.avail != space.free)
+}
+
+/// A volume's space as `GetDiskFreeSpaceExW` gives it.
+struct Space {
+    /// What this user may still write: the volume's free space, or less
+    /// with a disk quota.
+    avail: u64,
+    /// What this user may have on it: its size, or the quota.
+    total: u64,
+    /// What's free on the volume, for everyone.
+    free: u64,
+}
+
+/// The space of the volume mounted at `mount` (NUL-ended).
+fn space_of(mount: &[u16]) -> io::Result<Space> {
     let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
     // SAFETY: `mount` is NUL-ended; the outputs are valid for writes.
     if unsafe { GetDiskFreeSpaceExW(mount.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(avail != free)
+    Ok(Space { avail, total, free })
 }
 
 /// Whether the volume holding `path` is a network drive or share: its server
@@ -178,6 +190,32 @@ pub fn file_system(path: &Path) -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     Ok(text(&name))
+}
+
+/// Whether the volume holding `path` records when a file was last opened
+/// (read), so "not opened in months" can be told there. Only NTFS is
+/// trusted, and NTFS records it only when `NtfsDisableLastAccessUpdate`
+/// says so: since Windows 10 1803 the system decides at start-up and leaves
+/// it off on a system drive over 128 GB, so on most PCs it isn't.
+pub fn records_last_access(path: &Path) -> io::Result<bool> {
+    if !file_system(path)?.eq_ignore_ascii_case("NTFS") {
+        return Ok(false);
+    }
+    // No value (or one that isn't a number): not recorded, as before 1803.
+    let policy = crate::registry::machine_number(
+        r"SYSTEM\CurrentControlSet\Control\FileSystem",
+        "NtfsDisableLastAccessUpdate",
+    )
+    .unwrap_or(None);
+    Ok(policy.is_some_and(last_access_on))
+}
+
+/// Whether `NtfsDisableLastAccessUpdate`'s value leaves NTFS updating when
+/// a file was last opened: 0 (as before Windows 10 1803), 0x80000000 (set
+/// by the user) or 0x80000002 (left to the system, which turned it on).
+/// Anything else (1, 0x80000001, 0x80000003: off) isn't.
+fn last_access_on(policy: u32) -> bool {
+    matches!(policy, 0 | 0x8000_0000 | 0x8000_0002)
 }
 
 /// Mounted file systems, as (volume name, mount point): `(r"\\?\Volume{...}\",
@@ -384,9 +422,234 @@ pub fn dev_of(path: &Path) -> io::Result<i32> {
     Ok(by_handle(&open_attributes(path)?)?.dwVolumeSerialNumber as i32)
 }
 
-/// Moves `path` to the Recycle Bin. Not written yet.
-pub fn trash(_path: &Path) -> io::Result<PathBuf> {
-    Err(unsupported("the Recycle Bin"))
+/// Moves `path` to its drive's Recycle Bin, as Explorer's Delete does, and
+/// says where it went there. Never deleted for good: what Windows would
+/// delete at once is refused and left as it is. Told here, before the shell
+/// is asked: a drive or share as a whole, a volume with no bin (removable,
+/// network, a share, one with no letter or mounted in a folder), a bin set
+/// to delete at once, and a file bigger than the bin takes, which the shell
+/// deletes for good while telling the sink it recycles it (seen on Windows
+/// 11). The sink refuses the rest (`shell.rs`): a folder too big for the bin
+/// goes item by item, each marked to be deleted for good, as another
+/// project found (CI checks that one is never deleted for good). Only files
+/// go to the bin on Windows so far (`clean::unused_file`).
+pub fn trash(path: &Path) -> io::Result<PathBuf> {
+    let path = plain(std::path::absolute(path)?);
+    if is_root(&path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a drive or a share as a whole doesn't go to the Recycle Bin",
+        ));
+    }
+    let mount = volume_path(&path)?;
+    // SAFETY: `mount` is NUL-ended.
+    let kind = unsafe { GetDriveTypeW(mount.as_ptr()) };
+    if !has_recycle_bin(kind, &text(&mount)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this drive has no Recycle Bin (a removable or network drive, a share, a volume \
+             with no letter or mounted in a folder): Windows would delete it for good, so it's \
+             left as it is",
+        ));
+    }
+    let meta = std::fs::symlink_metadata(&path)?;
+    match bin_takes(&bin_settings(&mount)?, space_of(&mount)?.total) {
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows is set to delete files on this drive at once, not to move them to the \
+                 Recycle Bin (in the bin's Properties, or by Group Policy): it's left as it is",
+            ));
+        }
+        Some(most) if meta.is_file() && !fits(meta.len(), most) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "it's bigger than this drive's Recycle Bin takes ({} MB, as its Properties \
+                     count them): Windows would delete it for good, so it's left as it is",
+                    most >> 20
+                ),
+            ));
+        }
+        Some(_) => {}
+    }
+    crate::shell::recycle(&path)
+}
+
+/// Whether `path` is a drive, a share or a volume as a whole (`C:\`,
+/// `\\server\share`): nothing to move anywhere.
+fn is_root(path: &Path) -> bool {
+    path.parent().is_none()
+}
+
+/// Whether what's on the volume mounted at `mount` (`GetVolumePathNameW`'s
+/// answer), a drive of type `kind` (`GetDriveTypeW`'s), can go to a Recycle
+/// Bin: a fixed drive's (3), mounted at its letter (`C:\`). Removable (2)
+/// and network (4) drives, discs and RAM disks have none, a share neither,
+/// and the shell doesn't recycle from a volume named only by its GUID or
+/// mounted in a folder.
+fn has_recycle_bin(kind: u32, mount: &str) -> bool {
+    let b = mount.as_bytes();
+    let lettered =
+        b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    kind == 3 && lettered
+}
+
+/// How a volume's Recycle Bin is set: in the bin's Properties (per volume,
+/// under `BitBucket\Volume\{GUID}`) and by Group Policy.
+#[derive(Debug, Default)]
+struct BinSettings {
+    /// "Don't move files to the Recycle Bin" (`NukeOnDelete`), or the policy
+    /// "Do not move deleted files to the Recycle Bin" (`NoRecycleFiles`).
+    deletes_at_once: bool,
+    /// The bin's maximum size, in MB as Windows counts them (MiB):
+    /// `MaxCapacity`, there once the bin has been used or set.
+    max_mb: Option<u32>,
+    /// The policy "Maximum allowed Recycle Bin size": a percentage of the
+    /// user's quota on the volume (`RecycleBinSize`).
+    policy_percent: Option<u32>,
+}
+
+/// The most a file may be and still go to the bin set as `s`, on a volume
+/// where the user may have `quota` bytes; `None` when nothing goes there.
+/// With nothing set, Windows' default: a tenth of the first 40 GB of the
+/// quota and a twentieth of the rest. With more than one set, the least.
+fn bin_takes(s: &BinSettings, quota: u64) -> Option<u64> {
+    const FIRST: u64 = 40_000_000_000;
+    if s.deletes_at_once {
+        return None;
+    }
+    let set = [
+        s.max_mb.map(|mb| u64::from(mb) << 20),
+        s.policy_percent
+            .map(|p| quota / 100 * u64::from(p.min(100))),
+    ];
+    let default = quota.min(FIRST) / 10 + quota.saturating_sub(FIRST) / 20;
+    Some(set.into_iter().flatten().min().unwrap_or(default))
+}
+
+/// Whether a file of `len` bytes fits a bin that takes `most`, with a
+/// mebibyte to spare for how Windows rounds what it counts.
+fn fits(len: u64, most: u64) -> bool {
+    len.checked_add(1 << 20).is_some_and(|n| n <= most)
+}
+
+/// How the Recycle Bin of the volume mounted at `mount` is set (see
+/// [`BinSettings`]). A volume with no name to file its bin's settings under
+/// is an error: what they say can't be told.
+fn bin_settings(mount: &[u16]) -> io::Result<BinSettings> {
+    use crate::registry::{machine_number, user_number};
+    const POLICIES: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies";
+    let mut s = BinSettings::default();
+    let explorer = format!(r"{POLICIES}\Explorer");
+    // Documented under Explorer's policies and Network's: either.
+    for key in [explorer.clone(), format!(r"{POLICIES}\Network")] {
+        for n in [
+            user_number(&key, "NoRecycleFiles")?,
+            machine_number(&key, "NoRecycleFiles")?,
+        ] {
+            s.deletes_at_once |= n.is_some_and(|n| n != 0);
+        }
+    }
+    s.policy_percent = [
+        user_number(&explorer, "RecycleBinSize")?,
+        machine_number(&explorer, "RecycleBinSize")?,
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let name = volume_name(mount);
+    let guid = volume_guid(&name).ok_or_else(|| {
+        io::Error::other(
+            "this drive's volume has no name its Recycle Bin's settings go by: it's left as it is",
+        )
+    })?;
+    let key =
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+    s.deletes_at_once |= user_number(&key, "NukeOnDelete")?.is_some_and(|n| n != 0);
+    s.max_mb = user_number(&key, "MaxCapacity")?;
+    Ok(s)
+}
+
+/// The `{…}` of a volume's name (`\\?\Volume{…}\`): what its bin's
+/// settings are filed under.
+fn volume_guid(name: &str) -> Option<&str> {
+    let start = name.find('{')?;
+    let end = start + name[start..].find('}')?;
+    Some(&name[start..=end])
+}
+
+/// An `HRESULT` failure as an error: Windows' own error where it carries
+/// one (`0x8007xxxx`), its number otherwise.
+pub(crate) fn hresult(hr: i32) -> io::Error {
+    let code = hr as u32;
+    if code & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+    } else {
+        io::Error::other(format!("the shell answered 0x{code:08X}"))
+    }
+}
+
+/// How many items the Recycle Bin of the drive whose root is `root` (`C:\`)
+/// holds for this user, as the shell counts them from the bin's index.
+fn recycle_bin_items(root: &[u16]) -> io::Result<i64> {
+    use windows_sys::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+    let mut info = SHQUERYRBINFO {
+        cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `root` is NUL-ended and `info` is sized as the call reads it.
+    let hr = unsafe { SHQueryRecycleBinW(root.as_ptr(), &mut info) };
+    if hr < 0 {
+        return Err(hresult(hr));
+    }
+    Ok(info.i64NumItems)
+}
+
+/// Empties the Recycle Bin of the drive whose root is `root` (`C:\`), for
+/// this user: what's in it is erased, as Explorer's Empty Recycle Bin does,
+/// with no question (the app asked first), no progress window and no sound.
+pub fn empty_recycle_bin(root: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW,
+    };
+    let root = wide(root.as_os_str());
+    // An empty bin is a failure to the call: nothing to do.
+    if recycle_bin_items(&root)? == 0 {
+        return Ok(());
+    }
+    // The shell may reach the bin through COM: this thread joins it for the
+    // call, unless it already has (in another mode, which is left as it is).
+    // SAFETY: plain calls; each successful initialisation is undone below.
+    let com = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
+    if com < 0 && com != RPC_E_CHANGED_MODE {
+        return Err(hresult(com));
+    }
+    // SAFETY: `root` is NUL-ended; no window is passed, so none is shown.
+    let hr = unsafe {
+        SHEmptyRecycleBinW(
+            std::ptr::null_mut(),
+            root.as_ptr(),
+            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
+        )
+    };
+    if com >= 0 {
+        // SAFETY: pairs the successful `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+    }
+    if hr < 0 {
+        return Err(hresult(hr));
+    }
+    Ok(())
 }
 
 /// What the user can use on the volume holding `path`. Windows has nothing
@@ -565,6 +828,274 @@ pub(crate) fn plain(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(test)]
+mod recycle_tests {
+    use super::*;
+
+    #[test]
+    fn last_access_counts_only_where_ntfs_is_told_to_record_it() {
+        for on in [0, 0x8000_0000, 0x8000_0002] {
+            assert!(last_access_on(on), "{on:#x}");
+        }
+        for off in [1, 0x8000_0001, 0x8000_0003, 2, 3, 0xffff_ffff] {
+            assert!(!last_access_on(off), "{off:#x}");
+        }
+        // This PC's, whatever it is: a yes or a no, never an error.
+        let here = std::env::temp_dir();
+        println!("records last access: {:?}", records_last_access(&here));
+        assert!(records_last_access(&here).is_ok());
+    }
+
+    #[test]
+    fn only_a_fixed_drive_mounted_at_its_letter_has_a_recycle_bin() {
+        assert!(has_recycle_bin(3, r"C:\"));
+        assert!(has_recycle_bin(3, "D:/"));
+        for (kind, mount) in [
+            (2, r"E:\"),
+            (4, r"Z:\"),
+            (5, r"F:\"),
+            (6, r"R:\"),
+            (0, r"C:\"),
+            (1, r"C:\"),
+            (3, r"\\server\share\"),
+            (3, r"\\?\Volume{0a1b2c3d-0000-0000-0000-100000000000}\"),
+            // A volume mounted in a folder of another.
+            (3, r"C:\mnt\backup\"),
+            (3, r"relative\"),
+            (3, "C:"),
+        ] {
+            assert!(!has_recycle_bin(kind, mount), "{kind} {mount}");
+        }
+    }
+
+    #[test]
+    fn a_drive_or_a_share_as_a_whole_isnt_moved() {
+        for root in [
+            r"C:\",
+            r"\\server\share",
+            r"\\server\share\",
+            r"\\?\Volume{0a1b2c3d-0000-0000-0000-100000000000}\",
+        ] {
+            assert!(is_root(Path::new(root)), "{root}");
+        }
+        for item in [r"C:\Users", r"C:\big.iso", r"\\server\share\x"] {
+            assert!(!is_root(Path::new(item)), "{item}");
+        }
+    }
+
+    #[test]
+    fn the_bin_takes_what_it_is_set_to_or_windows_default() {
+        const GB: u64 = 1_000_000_000;
+        let none = BinSettings::default();
+        // A tenth of the first 40 GB, a twentieth of the rest.
+        assert_eq!(bin_takes(&none, 30 * GB), Some(3 * GB));
+        assert_eq!(bin_takes(&none, 500 * GB), Some(4 * GB + 23 * GB));
+        assert_eq!(bin_takes(&none, 0), Some(0));
+        // Its Properties, in MiB.
+        let set = BinSettings {
+            max_mb: Some(18_685),
+            ..Default::default()
+        };
+        assert_eq!(bin_takes(&set, 500 * GB), Some(18_685 << 20));
+        // A policy's percentage of the quota, and the least of the two.
+        let policy = BinSettings {
+            max_mb: Some(18_685),
+            policy_percent: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(bin_takes(&policy, 500 * GB), Some(5 * GB));
+        let over = BinSettings {
+            policy_percent: Some(250),
+            ..Default::default()
+        };
+        assert_eq!(bin_takes(&over, 500 * GB), Some(500 * GB));
+        // Set to delete at once: nothing goes.
+        let at_once = BinSettings {
+            deletes_at_once: true,
+            max_mb: Some(18_685),
+            ..Default::default()
+        };
+        assert_eq!(bin_takes(&at_once, 500 * GB), None);
+    }
+
+    #[test]
+    fn a_file_fits_the_bin_with_a_mebibyte_to_spare() {
+        const MB: u64 = 1 << 20;
+        assert!(fits(MB, 2 * MB));
+        assert!(fits(0, MB));
+        assert!(!fits(MB + 1, 2 * MB));
+        assert!(!fits(8 * MB, 4 * MB));
+        assert!(!fits(0, 0));
+        assert!(!fits(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn a_volumes_bin_settings_go_by_its_guid() {
+        assert_eq!(
+            volume_guid(r"\\?\Volume{4c1b02c1-d990-11dc-99ae-806e6f6e6963}\"),
+            Some("{4c1b02c1-d990-11dc-99ae-806e6f6e6963}")
+        );
+        assert_eq!(volume_guid(r"C:\"), None);
+        assert_eq!(volume_guid(""), None);
+        assert_eq!(volume_guid("{unended"), None);
+        // This PC's own drive has one, and its bin's settings read.
+        let here = volume_path(&std::env::temp_dir()).unwrap();
+        println!("this drive's bin: {:?}", bin_settings(&here));
+        assert!(volume_guid(&volume_name(&here)).is_some());
+        assert!(bin_settings(&here).is_ok());
+    }
+
+    /// The tests that use this user's Recycle Bin for real, one at a time:
+    /// one changes how it's set.
+    static BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// For real, on CI's runner (`cargo test -p mdif-windows -- --ignored
+    /// recycle`): a file and a folder go to the runner's Recycle Bin and are
+    /// found there; what Windows would delete for good (a file reached
+    /// through a share) is refused, by the drive check and by the shell's
+    /// own answer, and stays.
+    #[test]
+    #[ignore = "moves files to this user's Recycle Bin: CI runs it"]
+    fn recycle_moves_to_the_bin_and_never_deletes_for_good() {
+        let _one = BIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let in_bin = |to: &Path| {
+            let to = to.to_string_lossy().to_ascii_lowercase();
+            println!("in the bin: {to}");
+            to.get(1..)
+                .is_some_and(|t| t.starts_with(r":\$recycle.bin"))
+        };
+        let file = dir.path().join("mdif-recycle-probe.txt");
+        std::fs::write(&file, b"probe").unwrap();
+        let to = trash(&file).unwrap();
+        assert!(!file.exists(), "still where it was");
+        assert!(to.exists() && in_bin(&to), "{}", to.display());
+        let folder = dir.path().join("mdif-recycle-folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("inside.txt"), b"x").unwrap();
+        let to = trash(&folder).unwrap();
+        assert!(
+            !folder.exists() && to.is_dir() && in_bin(&to),
+            "{}",
+            to.display()
+        );
+        assert!(trash(&dir.path().join("not-there")).is_err());
+        // The same file through the drive's administrative share: no bin.
+        let kept = dir.path().join("mdif-recycle-kept.txt");
+        std::fs::write(&kept, b"keep me").unwrap();
+        let local = plain(std::path::absolute(&kept).unwrap());
+        let local = local.to_string_lossy();
+        let share = PathBuf::from(format!(r"\\localhost\{}${}", &local[..1], &local[2..]));
+        if share.exists() {
+            assert!(trash(&share).is_err());
+            let asked = crate::shell::recycle(&share);
+            println!("the shell, asked anyway: {asked:?}");
+            assert!(asked.is_err());
+            assert!(kept.exists(), "a share's file was deleted for good");
+        } else {
+            println!("no administrative share here: the refusal through one isn't checked");
+        }
+    }
+
+    /// For real, on CI's runner (`--ignored recycle`): with this drive's bin
+    /// set to take 4 MB, a file of 8 MB is refused and stays, and one of 1 MB
+    /// goes; with the bin set to delete at once, nothing goes. How the bin
+    /// was set is put back, even when an assertion fails.
+    #[test]
+    #[ignore = "changes how this user's Recycle Bin is set, for a moment: CI runs it"]
+    fn recycle_refuses_what_the_bin_would_delete_for_good() {
+        use crate::registry::{set_user_number, user_number};
+        let _one = BIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mount = volume_path(&plain(std::path::absolute(dir.path()).unwrap())).unwrap();
+        let name = volume_name(&mount);
+        let key = format!(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{}",
+            volume_guid(&name).unwrap()
+        );
+        struct PutBack(String, Option<u32>, Option<u32>);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                let _ = set_user_number(&self.0, "MaxCapacity", self.1);
+                let _ = set_user_number(&self.0, "NukeOnDelete", self.2);
+            }
+        }
+        let before = (
+            user_number(&key, "MaxCapacity").unwrap(),
+            user_number(&key, "NukeOnDelete").unwrap(),
+        );
+        println!("{key}: MaxCapacity, NukeOnDelete {before:?}");
+        let was = PutBack(key.clone(), before.0, before.1);
+        set_user_number(&key, "MaxCapacity", Some(4)).unwrap();
+        set_user_number(&key, "NukeOnDelete", Some(0)).unwrap();
+
+        let big = dir.path().join("mdif-too-big.bin");
+        std::fs::write(&big, vec![7u8; 8 << 20]).unwrap();
+        let refused = trash(&big).unwrap_err();
+        println!("8 MB, the bin taking 4: {refused}");
+        assert!(refused.to_string().contains("bigger than"), "{refused}");
+        assert!(big.exists(), "a file too big for the bin was deleted");
+
+        let small = dir.path().join("mdif-fits.bin");
+        std::fs::write(&small, vec![7u8; 1 << 20]).unwrap();
+        let to = trash(&small).unwrap();
+        assert!(!small.exists() && to.exists(), "{}", to.display());
+
+        // A folder too big for the bin is left to the shell and the sink:
+        // refused and left whole, or moved whole (a shell that read the
+        // bin's size before it was set), never deleted for good.
+        let folder = dir.path().join("mdif-too-big-folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("inside.bin"), vec![7u8; 8 << 20]).unwrap();
+        match trash(&folder) {
+            Ok(to) => {
+                println!(
+                    "8 MB in a folder, the bin taking 4: moved whole, to {}",
+                    to.display()
+                );
+                assert!(!folder.exists(), "still where it was");
+                // Where the shell said it went, or the bin when it didn't.
+                assert!(
+                    to.join("inside.bin").exists() || to.ends_with("$Recycle.Bin"),
+                    "{}",
+                    to.display()
+                );
+            }
+            Err(e) => {
+                println!("8 MB in a folder, the bin taking 4: {e}");
+                assert!(
+                    folder.join("inside.bin").exists(),
+                    "a folder was deleted for good"
+                );
+            }
+        }
+
+        // The shell, asked anyway: what the check is there for. (Recycled,
+        // refused or deleted for good, it's this test's own file.)
+        let asked = crate::shell::recycle(&big);
+        println!(
+            "the shell, asked anyway for 8 MB: {asked:?}; still where it was: {}",
+            big.exists()
+        );
+
+        set_user_number(&key, "NukeOnDelete", Some(1)).unwrap();
+        let at_once = dir.path().join("mdif-at-once.bin");
+        std::fs::write(&at_once, b"x").unwrap();
+        let refused = trash(&at_once).unwrap_err();
+        println!("the bin set to delete at once: {refused}");
+        assert!(
+            at_once.exists(),
+            "deleted for good by a bin set to delete at once"
+        );
+        drop(was);
+        let after = (
+            user_number(&key, "MaxCapacity").unwrap(),
+            user_number(&key, "NukeOnDelete").unwrap(),
+        );
+        assert_eq!(after, before, "the bin isn't set as it was");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -725,7 +1256,6 @@ mod tests {
     fn what_isnt_written_yet_says_so() {
         let p = Path::new(r"C:\");
         for e in [
-            trash(p).unwrap_err(),
             set_excluded_from_backup(p, true).unwrap_err(),
             excluded_from_backup(p).unwrap_err(),
             has_mark(p, "x").unwrap_err(),

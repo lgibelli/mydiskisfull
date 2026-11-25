@@ -3,8 +3,8 @@
 //!
 //! - [`bulk`]: directory listing with sizes, times and cloud-placeholder
 //!   flags.
-//! - [`changes`]: what changed since a saved position (not read yet: every
-//!   replay is a gap).
+//! - [`changes`]: what changed since a saved position, from the NTFS change
+//!   journal, read without administrator rights.
 //! - [`extents`]: where a file's data physically lives (not on Windows: NTFS
 //!   has no clones).
 //! - [`fs`]: volume statistics, file identity, locks, and the per-process
@@ -29,6 +29,13 @@ pub mod fs;
 pub mod proc;
 pub mod startup;
 pub mod sys;
+
+// Files only their owner may open (`fs::make_private`), moving to the
+// Recycle Bin through the shell's COM interfaces (`fs::trash`), and numbers
+// in the registry (`sys::user_number`: what a tweak changes).
+mod private;
+mod registry;
+mod shell;
 
 use std::io;
 

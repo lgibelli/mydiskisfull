@@ -2,16 +2,9 @@
 //! for it (`StartupApproved`). Windows only; there is no macOS twin (a
 //! LaunchAgent is another thing).
 
-use std::ffi::OsStr;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_EXPAND_SZ,
-    REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
-    RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-};
+use crate::registry::{delete_value, get_binary, get_string, set_string};
 
 /// The programs that start when this user logs in.
 pub const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -19,206 +12,6 @@ pub const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// byte says whether the user turned it off.
 pub const RUN_APPROVED: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-
-fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(Some(0)).collect()
-}
-
-fn check(code: u32) -> io::Result<()> {
-    if code == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(code as i32))
-    }
-}
-
-/// An open key under `HKEY_CURRENT_USER`, closed on drop.
-struct Key(HKEY);
-
-impl Key {
-    /// `None` if the key doesn't exist.
-    fn open(subkey: &str, access: u32) -> io::Result<Option<Key>> {
-        let mut h: HKEY = std::ptr::null_mut();
-        let name = wide(subkey);
-        // SAFETY: `name` is NUL-ended; `h` is written on success only.
-        let code = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, name.as_ptr(), 0, access, &mut h) };
-        if code == ERROR_FILE_NOT_FOUND {
-            return Ok(None);
-        }
-        check(code)?;
-        Ok(Some(Key(h)))
-    }
-
-    /// The key, made if it isn't there.
-    fn create(subkey: &str) -> io::Result<Key> {
-        let mut h: HKEY = std::ptr::null_mut();
-        let name = wide(subkey);
-        // SAFETY: `name` is NUL-ended; `h` is written on success only.
-        let code = unsafe {
-            RegCreateKeyExW(
-                HKEY_CURRENT_USER,
-                name.as_ptr(),
-                0,
-                std::ptr::null(),
-                REG_OPTION_NON_VOLATILE,
-                KEY_SET_VALUE | KEY_QUERY_VALUE,
-                std::ptr::null(),
-                &mut h,
-                std::ptr::null_mut(),
-            )
-        };
-        check(code)?;
-        Ok(Key(h))
-    }
-
-    fn set(&self, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> io::Result<()> {
-        let name = wide(name);
-        // SAFETY: the key is open for writing; `data` is as long as passed.
-        check(unsafe {
-            RegSetValueExW(
-                self.0,
-                name.as_ptr(),
-                0,
-                kind,
-                data.as_ptr(),
-                u32::try_from(data.len()).map_err(io::Error::other)?,
-            )
-        })
-    }
-
-    /// The value's type and bytes, or `None` if there is none.
-    fn get(&self, name: &str) -> io::Result<Option<(REG_VALUE_TYPE, Vec<u8>)>> {
-        let name = wide(name);
-        let mut kind: REG_VALUE_TYPE = 0;
-        let mut len = 0u32;
-        // SAFETY: a null buffer asks only for the size.
-        let code = unsafe {
-            RegQueryValueExW(
-                self.0,
-                name.as_ptr(),
-                std::ptr::null(),
-                &mut kind,
-                std::ptr::null_mut(),
-                &mut len,
-            )
-        };
-        if code == ERROR_FILE_NOT_FOUND {
-            return Ok(None);
-        }
-        check(code)?;
-        // The value can grow between the calls: ask until it fits.
-        loop {
-            let mut buf = vec![0u8; len as usize + 2];
-            let mut got = buf.len() as u32;
-            // SAFETY: `buf` is `got` long.
-            let code = unsafe {
-                RegQueryValueExW(
-                    self.0,
-                    name.as_ptr(),
-                    std::ptr::null(),
-                    &mut kind,
-                    buf.as_mut_ptr(),
-                    &mut got,
-                )
-            };
-            // ERROR_MORE_DATA
-            if code == 234 {
-                len = got;
-                continue;
-            }
-            if code == ERROR_FILE_NOT_FOUND {
-                return Ok(None);
-            }
-            check(code)?;
-            buf.truncate(got as usize);
-            return Ok(Some((kind, buf)));
-        }
-    }
-
-    fn delete(&self, name: &str) -> io::Result<bool> {
-        let name = wide(name);
-        // SAFETY: the key is open for writing.
-        let code = unsafe { RegDeleteValueW(self.0, name.as_ptr()) };
-        if code == ERROR_FILE_NOT_FOUND {
-            return Ok(false);
-        }
-        check(code)?;
-        Ok(true)
-    }
-}
-
-impl Drop for Key {
-    fn drop(&mut self) {
-        // SAFETY: the key is ours, and closed once.
-        unsafe { RegCloseKey(self.0) };
-    }
-}
-
-/// A text value under `subkey` of the current user's registry, if there is one.
-pub fn get_string(subkey: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(key) = Key::open(subkey, KEY_QUERY_VALUE)? else {
-        return Ok(None);
-    };
-    let Some((kind, bytes)) = key.get(name)? else {
-        return Ok(None);
-    };
-    if kind != REG_SZ && kind != REG_EXPAND_SZ {
-        return Ok(None);
-    }
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u16::from_le_bytes(*c))
-        .take_while(|&u| u != 0)
-        .collect();
-    Ok(Some(String::from_utf16_lossy(&units)))
-}
-
-/// Writes a text value, making the key if need be.
-pub fn set_string(subkey: &str, name: &str, value: &str) -> io::Result<()> {
-    let bytes: Vec<u8> = value
-        .encode_utf16()
-        .chain(Some(0))
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    Key::create(subkey)?.set(name, REG_SZ, &bytes)
-}
-
-/// A binary value, if there is one.
-pub fn get_binary(subkey: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
-    let Some(key) = Key::open(subkey, KEY_QUERY_VALUE)? else {
-        return Ok(None);
-    };
-    Ok(key
-        .get(name)?
-        .and_then(|(kind, bytes)| (kind == REG_BINARY).then_some(bytes)))
-}
-
-/// Writes a binary value, making the key if need be.
-pub fn set_binary(subkey: &str, name: &str, value: &[u8]) -> io::Result<()> {
-    Key::create(subkey)?.set(name, REG_BINARY, value)
-}
-
-/// Removes a value; whether there was one.
-pub fn delete_value(subkey: &str, name: &str) -> io::Result<bool> {
-    match Key::open(subkey, KEY_SET_VALUE)? {
-        Some(key) => key.delete(name),
-        None => Ok(false),
-    }
-}
-
-/// Removes a key and everything under it; whether there was one.
-pub fn delete_tree(subkey: &str) -> io::Result<bool> {
-    let name = wide(subkey);
-    // SAFETY: `name` is NUL-ended.
-    let code = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, name.as_ptr()) };
-    if code == ERROR_FILE_NOT_FOUND {
-        return Ok(false);
-    }
-    check(code)?;
-    Ok(true)
-}
 
 /// A program that starts at login, as the user's `Run` key and Task Manager
 /// have it.
@@ -289,16 +82,48 @@ const SHARING_VIOLATION: i32 = 32;
 /// it holds across every sign-in of the same user, not just one session.
 pub fn claim(lock: &std::path::Path) -> io::Result<Option<Instance>> {
     use std::os::windows::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(lock)
-    {
-        Ok(file) => Ok(Some(Instance(file))),
-        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
-        Err(e) => Err(e),
+    // [`is_claimed`] opens the file for a moment, which a claim at that moment
+    // can't tell from a holder: asked again over a tenth of a second.
+    for tries_left in (0..5).rev() {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(lock)
+        {
+            Ok(file) => return Ok(Some(Instance(file))),
+            Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) && tries_left > 0 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// Keeps this process's standard handles (a console, or the pipes its caller
+/// reads its output from) out of the programs it starts from now on. Windows
+/// gives a new process every handle that may be inherited, whatever its own
+/// standard handles are, so a program left running, the watcher, would hold
+/// its caller's pipe open and the caller would wait for it to end.
+pub fn keep_std_handles_to_self() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle takes one of the three constants; the handle it
+        // gives is this process's own, and is only changed when it is one.
+        unsafe {
+            let h = GetStdHandle(which);
+            if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 }
 
@@ -313,14 +138,16 @@ pub fn is_claimed(lock: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{delete_tree, set_binary};
 
     /// A scratch key, removed (with what's under it) when dropped.
     struct Scratch(String);
 
     impl Scratch {
         fn new() -> Scratch {
+            // Right under Software, so removing it leaves nothing behind.
             let id = format!(
-                "Software\\MyDiskIsFullTest\\{}-{:?}",
+                "Software\\MyDiskIsFullTest-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             );

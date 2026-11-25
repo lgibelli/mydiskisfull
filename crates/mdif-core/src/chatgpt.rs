@@ -116,7 +116,7 @@ pub struct Account {
 
 fn load(dir: &Path) -> Saved {
     // A file copied here from elsewhere isn't trusted to be private.
-    if !crate::portable::private_files() {
+    if !trusted(dir) {
         return Saved::default();
     }
     std::fs::read(dir.join(FILE))
@@ -135,6 +135,8 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
     let mut options = OpenOptions::new();
     let mut f =
         crate::portable::with_mode(options.write(true).create_new(true), 0o600).open(&tmp)?;
+    // Before anything is in it (on Windows, its folder's list until now).
+    crate::portable::make_private(&tmp)?;
     f.write_all(&serde_json::to_vec_pretty(s)?)?;
     f.sync_all()?;
     std::fs::rename(&tmp, dir.join(FILE))?;
@@ -161,6 +163,12 @@ pub fn account(dir: &Path) -> Account {
         plan: s.tokens.is_some_and(|t| t.scopes.iter().any(|x| x == PLAN)),
         usage: USAGE,
     }
+}
+
+/// Whether the token file, if there is one, may be read: kept where files
+/// can be private, and still private (on Windows its access list says).
+fn trusted(dir: &Path) -> bool {
+    crate::portable::private_files() && crate::portable::private_to_me(&dir.join(FILE))
 }
 
 /// The tokens are kept in a file only their owner may read; where one can't be
@@ -298,7 +306,9 @@ fn http(url: &str, bearer: Option<&str>, body: Option<(&str, &str)>, secs: u64) 
         set("data-binary", data);
     }
     let mut curl = Command::new(crate::tools::curl());
-    curl.args(["--config", "-"]);
+    // `-q` first: no ~/.curlrc, which could write the tokens to a file, turn
+    // off checking the certificate or print the header with the token.
+    curl.args(["-q", "--config", "-"]);
     let out = crate::space::run_fed(curl, Some(cfg.into_bytes()), Duration::from_secs(secs + 10))
         .ok_or_else(|| anyhow!("OpenAI didn't answer in time"))?;
     if !out.status.success() {
@@ -650,9 +660,9 @@ pub fn sign_in(
 pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
     // A token file that can't be trusted here is neither used nor reported as
     // revoked: say what to do with it.
-    if !crate::portable::private_files() && dir.join(FILE).try_exists()? {
+    if dir.join(FILE).try_exists()? && !trusted(dir) {
         bail!(
-            "{} holds a ChatGPT sign-in that can't be used on this operating system yet. \
+            "{} holds a ChatGPT sign-in that others could read here, so it isn't used. \
              Delete the file, and revoke the sign-in in ChatGPT's settings.",
             dir.join(FILE).display()
         );
@@ -952,30 +962,33 @@ pub fn respond(
 }
 
 #[cfg(test)]
-// The stand-in OpenAI is for the sign-in test, which waits for Windows.
-#[cfg_attr(not(unix), allow(dead_code))]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// A token file that took its folder's access list (copied in, say) is
+    /// neither used nor said to be signed out of; a new sign-in replaces it
+    /// with a private one.
     #[cfg(windows)]
     #[test]
-    fn signing_in_waits_for_files_only_their_owner_can_read() {
+    fn a_token_file_others_could_read_isnt_used() {
         let dir = tempfile::tempdir().unwrap();
-        let opened = std::cell::Cell::new(false);
-        let said = sign_in(
-            dir.path(),
-            &Endpoints::openai(),
-            &|_| {
-                opened.set(true);
-                Ok(())
-            },
-            Duration::from_millis(10),
-        )
-        .unwrap_err();
-        assert!(said.to_string().contains("isn't available"), "{said}");
-        assert!(!opened.get(), "the browser opened");
-        assert!(!dir.path().join(FILE).exists());
+        let d = dir.path();
+        let saved = Saved {
+            client: Some("oaiapp_1".into()),
+            ..Default::default()
+        };
+        save(d, &saved).unwrap();
+        assert!(crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
+        assert_eq!(load(d).client.as_deref(), Some("oaiapp_1"));
+        // The same bytes in a file of the folder's list.
+        let copy = std::fs::read(d.join(FILE)).unwrap();
+        std::fs::remove_file(d.join(FILE)).unwrap();
+        std::fs::write(d.join(FILE), copy).unwrap();
+        assert!(!crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
+        assert!(load(d).client.is_none());
+        let why = sign_out(d, &Endpoints::openai()).unwrap_err().to_string();
+        assert!(why.contains("others could read"), "{why}");
     }
 
     #[test]
@@ -1315,8 +1328,6 @@ mod tests {
         save(dir, &s).unwrap();
     }
 
-    // Not where sign-in is refused: Windows, until its token file can be private.
-    #[cfg(unix)]
     #[test]
     fn signing_in_asking_renewing_and_signing_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -1343,7 +1354,9 @@ mod tests {
                 usage: USAGE
             }
         );
-        // Readable by its owner only, where files have modes.
+        // Readable by its owner only: its access list on Windows.
+        #[cfg(windows)]
+        assert!(crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1430,8 +1443,6 @@ mod tests {
         assert_eq!(s.client.as_deref(), Some("oaiapp_1"));
     }
 
-    // Not where sign-in is refused.
-    #[cfg(unix)]
     #[test]
     fn a_sign_in_nobody_finishes_ends() {
         let dir = tempfile::tempdir().unwrap();

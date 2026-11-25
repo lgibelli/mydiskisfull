@@ -8,7 +8,8 @@
 # undone tweak, a tweak that installs a profile, a tidy-up that ran, alert
 # settings that were changed) comes from app/Tests/*.json; Rust tests in
 # status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs and alerts_cmd.rs hold those
-# fixtures to the real serialization.
+# fixtures to the real serialization. map.json is a made-up Windows drive (the
+# Windows app's window shows it when opened in a browser).
 #
 #   app/build.sh && app/check-contract.sh
 #
@@ -85,4 +86,5 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     tidyrun=app/Tests/tidy-run.json \
     alerts=app/Tests/alerts.json \
     timemachine=app/Tests/timemachine.json \
-    docker=app/Tests/docker.json
+    docker=app/Tests/docker.json \
+    map=app/Tests/map.json

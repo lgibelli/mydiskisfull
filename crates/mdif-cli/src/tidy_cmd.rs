@@ -71,7 +71,8 @@ pub fn set(db: &Path, id: &str, on: bool, json_out: bool) -> Result<()> {
         };
         println!("{how}: {} ({}).", id.title(), id.id());
         if let Some(why) = id.unavailable(&home()).filter(|_| on) {
-            println!("Not on this Mac, though: {why}");
+            let here = if cfg!(windows) { "this PC" } else { "this Mac" };
+            println!("Not on {here}, though: {why}");
         }
         println!();
     }
@@ -94,7 +95,7 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
     let store = Store::open(db)?;
     let ids: Vec<Id> = if ids.is_empty() {
         let mut on = Vec::new();
-        for id in Id::ALL {
+        for &id in Id::ALL {
             if tidy::is_on(&store, id)? {
                 on.push(id);
             }
@@ -148,7 +149,7 @@ pub fn run(db: &Path, ids: &[String], dry_run: bool, json_out: bool) -> Result<(
     if ran.is_empty() {
         println!(
             "No tidy-up is on. `mdif tidy on <id>` turns one on, or name it: `mdif tidy run \
-             caches --dry-run`."
+             incremental --dry-run`."
         );
         return Ok(());
     }
@@ -324,9 +325,10 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../app/Tests/tidy.json")).unwrap();
         let store = Store::open_in_memory().unwrap();
+        // One every system has, with a last run.
         tidy::record(
             &store,
-            Id::Caches,
+            Id::Incremental,
             &tidy::Last {
                 at: 1,
                 freed: 1,
@@ -338,8 +340,8 @@ mod tests {
         .unwrap();
         let real = list_value(&tidy::list(&store, Path::new("/nonexistent")).unwrap());
         assert_eq!(keys(&fixture), keys(&real));
-        // Caches, the one with a last run.
-        let real_tidy = &real["tidies"][Id::ALL.iter().position(|&i| i == Id::Caches).unwrap()];
+        let real_tidy =
+            &real["tidies"][Id::ALL.iter().position(|&i| i == Id::Incremental).unwrap()];
         let mut ids = Vec::new();
         let mut lasts = 0;
         for t in fixture["tidies"].as_array().unwrap() {
@@ -355,7 +357,12 @@ mod tests {
             );
         }
         let real_ids: Vec<&str> = Id::ALL.iter().map(|i| i.id()).collect();
-        assert_eq!(ids, real_ids, "all of them, in order");
+        // The fixture is the Mac app's; Windows has some of them.
+        if cfg!(windows) {
+            assert!(real_ids.iter().all(|id| ids.contains(id)), "{real_ids:?}");
+        } else {
+            assert_eq!(ids, real_ids, "all of them, in order");
+        }
         assert!(lasts > 0, "the fixture shows a last run");
     }
 
