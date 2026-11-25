@@ -65,11 +65,11 @@ jobs:
     runs-on: macos-26
     environment: release # add required reviewers in Settings → Environments
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # actool reads the icon's layers (an .icon) from Xcode 26, and on macOS 15
       # not even then: the app got an .icns that macOS 26 shows in a grey frame
@@ -121,7 +121,7 @@ jobs:
 
       # A signed statement in Sigstore's public log binding these bytes to
       # this workflow, repository and commit.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: |
             build/release/MyDiskIsFull-*.dmg
@@ -149,7 +149,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # rustup is on the runner: no third-party action in a release job, and no
       # cache, which another workflow's run could have written.
       - name: Rust, with the ARM64 target
@@ -169,7 +169,7 @@ jobs:
           mkdir -p build/windows
           cp app-windows/src-tauri/target/*-pc-windows-msvc/release/bundle/nsis/*-setup.exe build/windows/
           cd build/windows && sha256sum *-setup.exe > SHA256SUMS-windows.txt && cat SHA256SUMS-windows.txt
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: build/windows/*-setup.exe
       - name: Put them on the draft release
@@ -191,11 +191,11 @@ jobs:
     runs-on: macos-26
     environment: release
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Use Xcode 26 or later if the runner has it
         run: |
