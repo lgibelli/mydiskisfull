@@ -84,13 +84,12 @@ pub fn avds(home: &Path) -> Result<Vec<Avd>, String> {
 
 /// The emulators in `dir`, their images in `sdk`: each `<id>.ini` and the
 /// folder it names, and folders no `.ini` lists (Device Manager doesn't
-/// show those, but they take their space).
+/// show those, but they take their space). An error when which images they
+/// use can't be told: no `dir` (it may be elsewhere, `ANDROID_AVD_HOME` set
+/// in a shell this process doesn't see), or an emulator kept on a disk
+/// that isn't connected.
 pub fn avds_in(dir: &Path, sdk: &Path) -> Result<Vec<Avd>, String> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut inis = Vec::new();
     let mut folders = Vec::new();
     for e in entries.flatten() {
@@ -108,8 +107,16 @@ pub fn avds_in(dir: &Path, sdk: &Path) -> Result<Vec<Avd>, String> {
         };
         let listed =
             std::fs::read_to_string(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
-        let dir = value(&listed, "path")
-            .map(PathBuf::from)
+        let named = value(&listed, "path").map(PathBuf::from);
+        if let Some(disk) = named.as_deref().and_then(volume_of)
+            && !disk.is_dir()
+        {
+            return Err(format!(
+                "{id} is on {}, which isn't connected",
+                disk.display()
+            ));
+        }
+        let dir = named
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| dir.join(format!("{id}.avd")));
         if !dir.is_dir() {
@@ -146,6 +153,17 @@ fn avd(id: String, dir: PathBuf, ini: Option<PathBuf>, sdk: &Path) -> Result<Avd
         ini,
         image,
     })
+}
+
+/// The disk `path` is on when it isn't the startup disk: `/Volumes/<name>`.
+fn volume_of(path: &Path) -> Option<PathBuf> {
+    let mut parts = path.components();
+    let (Some(std::path::Component::RootDir), Some(v), Some(name)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    (v.as_os_str() == "Volumes").then(|| Path::new("/Volumes").join(name))
 }
 
 /// `key=value` (spaces around `=` allowed), the first line with `key`.
@@ -416,7 +434,18 @@ mod tests {
         let old = avds.iter().find(|a| a.id == "old").unwrap();
         assert_eq!(old.name, "old");
         assert_eq!(old.ini, None);
-        assert!(avds_in(&t.path().join("none"), &sdk).unwrap().is_empty());
+        // No emulators' folder where this process looks (the shell may set
+        // ANDROID_AVD_HOME), or one on a disk that isn't connected: which
+        // images are used isn't known.
+        assert!(avds_in(&t.path().join("none"), &sdk).is_err());
+        write(
+            &dir.join("Travel.ini"),
+            "path=/Volumes/mdif-test-not-connected/avd/Travel.avd\n",
+        );
+        let why = avds_in(&dir, &sdk).unwrap_err();
+        assert!(why.contains("isn't connected"), "{why}");
+        std::fs::remove_file(dir.join("Travel.ini")).unwrap();
+        assert_eq!(avds_in(&dir, &sdk).unwrap().len(), 2);
         // Settings that can't be read: which images are used isn't known.
         std::fs::remove_file(pixel.join("config.ini")).unwrap();
         assert!(avds_in(&dir, &sdk).is_err());

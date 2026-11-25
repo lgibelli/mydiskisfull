@@ -21,6 +21,10 @@ struct DockerReview: View {
     @State private var starting = false
     /// Docker Desktop was started here: it's quit again after.
     @State private var started = false
+    /// The sheet was closed: a start that ends after that quits Docker
+    /// again (a reference, so the start still sees it).
+    @State private var closed = Closed()
+    private final class Closed { var yes = false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -48,7 +52,10 @@ struct DockerReview: View {
         .frame(width: 600)
         .task { await load() }
         // Closed without removing anything: Docker goes back to how it was.
-        .onDisappear { Task { await quitIfStarted() } }
+        .onDisappear {
+            closed.yes = true
+            Task { await quitIfStarted() }
+        }
     }
 
     private func load(start: Bool = false) async {
@@ -59,6 +66,10 @@ struct DockerReview: View {
         do {
             let r = try await Core.json(DockerReport.self, ["docker"] + (start ? ["--start"] : []),
                                         timeout: start ? 300 : 120)
+            if closed.yes {
+                if r.started { _ = try? await Core.run(["docker", "--stop"], timeout: 120) }
+                return
+            }
             started = started || r.started
             report = r
             // What prune would remove, to start; an image once you tick it.

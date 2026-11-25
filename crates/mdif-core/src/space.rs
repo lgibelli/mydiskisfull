@@ -2542,8 +2542,9 @@ fn docker_action() -> Action {
         paths: vec![crate::docker::OLD.into()],
         confirm: Some(
             "Remove what Docker hasn't used in a week? Stopped containers that haven't run for 7 \
-             days, images no tag points to, and build cache no build has used for 7 days. \
-             Volumes, networks and tagged images stay. If Docker isn't running, it's \
+             days, with what was written inside them (not in a volume), images no tag points \
+             to, and build cache no build has used for 7 days. Volumes, networks and tagged \
+             images stay. If Docker isn't running, it's \
              started in the background for this and quit after."
                 .into(),
         ),

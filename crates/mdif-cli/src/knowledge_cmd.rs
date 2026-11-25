@@ -305,7 +305,10 @@ pub fn sign_in(json_out: bool) -> Result<()> {
     let open = |url: &str| -> Result<()> {
         // Not for the app: what's printed is its error message.
         if !json_out {
-            eprintln!("Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{url}");
+            eprintln!(
+                "Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{}",
+                chatgpt::printable_url(url)
+            );
         }
         let opened = std::process::Command::new("/usr/bin/open")
             .arg(url)

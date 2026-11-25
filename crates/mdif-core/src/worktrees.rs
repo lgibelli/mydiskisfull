@@ -330,6 +330,11 @@ impl Git {
                 if now - touched < if agents { QUIET } else { IDLE } {
                     return None;
                 }
+                // A session still open in it (a shell, an agent waiting for
+                // an answer) writes nothing for hours, and is using it.
+                if mdif_macos::proc::working_in(&w.path).is_some() {
+                    return None;
+                }
                 let into = self.merged_into(repo, &objects, &w.head, &defaults)?;
                 self.nothing_to_lose(&w.path, &main.path).then(|| Finished {
                     path: w.path.clone(),
@@ -411,8 +416,22 @@ impl Git {
     }
 
     /// No changes and no untracked files (whatever `status.showUntrackedFiles`
-    /// says), and nothing ignored that couldn't be made again.
+    /// says), and nothing ignored that couldn't be made again. Nor a file
+    /// git was told not to look at (skip-worktree, assume-unchanged): its
+    /// changes don't show, and would go with the worktree.
     fn nothing_to_lose(&self, worktree: &Path, main: &Path) -> bool {
+        // "H path": a file git looks at; `S` skip-worktree, lowercase
+        // assume-unchanged.
+        let Some(tags) = self.out(worktree, &["ls-files", "-v", "-z"]) else {
+            return false;
+        };
+        if tags
+            .split(|&b| b == 0)
+            .filter(|e| !e.is_empty())
+            .any(|e| e[0] == b'S' || e[0].is_ascii_lowercase())
+        {
+            return false;
+        }
         let Some(out) = self.out(
             worktree,
             &[
@@ -852,6 +871,8 @@ mod tests {
             ("shelved", "shelved"),
             ("outer", "outer"),
             ("locked", "locked"),
+            ("hidden", "hidden"),
+            ("busy", "busy"),
         ] {
             let p = wt(name);
             run(
@@ -922,6 +943,15 @@ mod tests {
         );
         put(inner.join("work.txt"), "not committed\n");
         run(&repo, &["worktree", "lock", wt("locked").to_str().unwrap()]);
+        // A change git was told not to look at: status doesn't show it.
+        run(&wt("hidden"), &["update-index", "--skip-worktree", "a.txt"]);
+        put(wt("hidden").join("a.txt"), "edited, hidden\n");
+        // A session still open in it, quiet for hours.
+        let mut session = Command::new("/bin/sleep")
+            .arg("600")
+            .current_dir(wt("busy"))
+            .spawn()
+            .unwrap();
 
         let objects = || {
             std::fs::read_dir(repo.join(".git/objects"))
@@ -966,6 +996,11 @@ mod tests {
         let mut all = agents.to_vec();
         all.insert(0, ("app-editor", false));
         assert_eq!(found(now + IDLE + 60), named(&all));
+
+        session.kill().unwrap();
+        session.wait().unwrap();
+        // Its session ended: the busy one is finished.
+        assert!(found(now + QUIET + 60).contains(&("busy".to_string(), "main".to_string(), true)));
 
         // Checking wrote nothing into the repository.
         assert_eq!(objects(), objects_before);

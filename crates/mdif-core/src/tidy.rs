@@ -14,9 +14,9 @@
 //! - `caches`: app and tool caches of 50 MB or more that nothing has written
 //!   to or read for 30 days, emptied while their app is closed.
 //! - `docker`: what Docker has had no use for in a week (stopped containers
-//!   that haven't run since, images no tag points to, networks no container
-//!   uses, build cache no build has used since), only while Docker is
-//!   running: it's never started for this. Until it runs, it waits.
+//!   that haven't run since, images no tag points to, build cache no build
+//!   has used since; never networks), only while Docker is running: it's
+//!   never started for this. Until it runs, it waits.
 //! - `backups`: folders a build or an install makes again
 //!   ([`timemachine::rebuildable`]) and tools' download caches of 10 MB or
 //!   more ([`timemachine::download_cache`]) kept out of Time Machine's
@@ -147,10 +147,10 @@ impl Id {
                  app is closed; the app makes what it needs again."
             }
             Id::Docker => {
-                "Stopped containers that haven't run for 7 days, images no tag points to, \
-                 networks no container uses, and build cache no build has used for 7 days. \
-                 Only while Docker is running: it's never started for this. Volumes and tagged \
-                 images stay."
+                "Stopped containers that haven't run for 7 days, with what was written inside \
+                 them (not in a volume), images no tag points to, and build cache no build has \
+                 used for 7 days. Only while Docker is running: it's never started for this. \
+                 Volumes, networks and tagged images stay."
             }
             Id::Backups => {
                 "Keeps the folders a build or an install makes again (target, build, \

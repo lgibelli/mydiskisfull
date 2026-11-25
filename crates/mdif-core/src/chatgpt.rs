@@ -323,6 +323,21 @@ fn error_of(body: &str) -> (Option<String>, Option<String>) {
 // ---------------------------------------------------------------------------
 // Signing in.
 
+/// The sign-in address to print, for when the browser doesn't open: without
+/// the hints that say who signs in (the ID token, with the email and the
+/// plan in it, and the email), which a terminal's scrollback or a screenshot
+/// would keep. They only choose the account in advance.
+pub fn printable_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.starts_with("id_token_hint=") && !kv.starts_with("login_hint="))
+        .collect();
+    format!("{base}?{}", kept.join("&"))
+}
+
 fn authorize_url(
     ends: &Endpoints,
     s: &Saved,
@@ -1025,6 +1040,22 @@ mod tests {
         assert_eq!(q["client_id"], "oaiapp_1");
         assert!(!q.contains_key("agent_name_hint"));
         assert_eq!(q["id_token_hint"], "a.b.c");
+        // Printed without who it's for; the rest as it is.
+        let url = authorize_url(
+            &ends,
+            &later,
+            "http://127.0.0.1:9/auth/callback",
+            "s",
+            "n",
+            "c",
+        );
+        let shown = printable_url(&url);
+        assert!(
+            !shown.contains("a.b.c") && !shown.contains("login_hint"),
+            "{shown}"
+        );
+        assert!(!shown.contains("example.com"), "{shown}");
+        assert!(shown.contains("client_id=oaiapp_1") && shown.contains("code_challenge="));
         assert_eq!(q["login_hint"], "me@example.com");
         assert_eq!(q["ext_agent_host_id"], "urn:uuid:h");
         assert!(!q.contains_key("prompt"));

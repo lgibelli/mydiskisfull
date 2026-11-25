@@ -103,6 +103,21 @@ All notable changes to this project are documented here. The format is based on
 - The pointer could stay a hand after the Storage bar it was over went away.
 - Measuring for a macOS update's leftovers, and `mdif timemachine`, could download cloud
   placeholders. No walk does now.
+- A worktree with a session still open in it (a shell, an agent waiting for an answer) counted
+  as finished once it had been quiet for a while, and so did one with changes git was told not
+  to look at (skip-worktree, assume-unchanged). Neither is now.
+- An Android system image was offered for deleting, ticked, when where the emulators are
+  couldn't be seen (`ANDROID_AVD_HOME` set only in your shell) or one of them was on a disk that
+  wasn't connected. Then which images are used isn't known, and they stay.
+- Removing Docker's leftovers quit a Docker Desktop you had just started yourself, left one it
+  started running when it didn't answer in time, and Start Docker then Cancel left it running.
+  The texts now say a stopped container's files go with it (what isn't in a volume).
+- Clean Up's ticked rows say when what they clean is deleted rather than moved to the Trash.
+- `mdif knowledge sign-in` printed the sign-in address with your ID token and email in it: it
+  prints it without them.
+- Folders typed in another case (`/users/me/documents`) slipped past the checks that keep
+  MyDiskIsFull out of protected folders, and Ask AI could have sent such a path with your
+  account's name in it.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.

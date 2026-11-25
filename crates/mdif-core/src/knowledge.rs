@@ -344,8 +344,21 @@ fn generic_name(path: &Path, home: &Path) -> Option<String> {
             .cloned()
             .collect::<Vec<_>>()
     };
-    if let Ok(rel) = path.strip_prefix(home) {
-        let n = names(rel)?;
+    // The home folder whatever the case it's typed in (`/users/jane`): the
+    // disk ignores it, and its name is never said.
+    let in_home = {
+        let (mut p, mut h) = (path.components(), home.components());
+        let same = h.by_ref().zip(p.by_ref()).all(|(a, b)| {
+            a.as_os_str()
+                .to_str()
+                .zip(b.as_os_str().to_str())
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        });
+        (same && home.components().count() <= path.components().count())
+            .then(|| p.as_path().to_path_buf())
+    };
+    if let Some(rel) = in_home {
+        let n = names(&rel)?;
         let keep: Vec<String> = match n.as_slice() {
             [] => return None,
             [lib, kind, app, rest @ ..]
@@ -384,7 +397,11 @@ fn generic_name(path: &Path, home: &Path) -> Option<String> {
         return Some(format!("~/{}", keep.join("/")));
     }
     let n = names(path.strip_prefix("/").ok()?)?;
-    if n.is_empty() || matches!(n[0].as_str(), "Users" | "Volumes") {
+    if n.is_empty()
+        || ["Users", "Volumes"]
+            .iter()
+            .any(|top| n[0].eq_ignore_ascii_case(top))
+    {
         return None;
     }
     Some(format!(
@@ -569,6 +586,16 @@ mod tests {
         );
         assert_eq!(g("Library/CloudStorage/OneDrive-Jane Doe"), None);
         assert_eq!(g("Library/Mail/V10/jane@example.com"), None);
+        // The home folder typed in another case is still yours: its name
+        // is never said, and what's in it as above.
+        let typed = |p: &str| generic(Path::new(p), home);
+        assert_eq!(typed("/users/me/Documents/Taxes"), None);
+        assert_eq!(typed("/USERS/ME"), None);
+        assert_eq!(typed("/users/other/Library"), None);
+        assert_eq!(
+            typed("/users/me/Library/Biome").as_deref(),
+            Some("~/Library/Biome")
+        );
         // A tool's folder, and its own folders in it, not a project's.
         assert_eq!(g(".dartServer").as_deref(), Some("~/.dartServer"));
         assert_eq!(

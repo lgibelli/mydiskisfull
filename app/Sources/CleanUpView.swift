@@ -377,6 +377,11 @@ private struct CleanUpRow: View {
                     if !row.safe, let warn = row.action.confirm {
                         Text(Format.inline(warn)).font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else if row.safe, !["trash", "finder-trash", "restart"].contains(row.action.kind) {
+                        // Ticked to start with: said on the row, not only
+                        // in its tooltip.
+                        Text("Deleted, not moved to the Trash.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     if let app = open, state == nil {
                         HStack(spacing: 8) {
