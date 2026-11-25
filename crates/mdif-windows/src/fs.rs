@@ -1111,6 +1111,367 @@ mod recycle_tests {
         );
         assert_eq!(after, before, "the bin isn't set as it was");
     }
+
+    /// For real, on CI's runner (`--ignored recycle`): a new volume of 50 GB
+    /// (a VHDX with a letter) whose bin was never set. What Windows writes for the
+    /// bin (`MaxCapacity`, once the volume is mounted or its bin used) takes
+    /// at least what Windows' default says; the biggest file the check lets
+    /// through goes to the bin, not deleted for good (a default that said more
+    /// than Windows takes would let the shell delete such a file); and one a
+    /// tenth bigger is refused and stays.
+    #[test]
+    #[ignore = "makes a VHDX with a drive letter (an administrator) and recycles on it: CI runs it"]
+    fn recycle_takes_what_a_never_set_bin_does() {
+        use crate::registry::{delete_tree, set_user_number, user_number, user_subkeys};
+        const VOLUMES: &str =
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume";
+        let _one = BIN.lock().unwrap_or_else(|e| e.into_inner());
+        // The volumes this user's bins have settings for before the new one:
+        // only the new one's are removed after.
+        let known = user_subkeys(VOLUMES).unwrap();
+        let disk = Lettered::attach();
+        disk.verify();
+        let mount = volume_path(&disk.root).unwrap();
+        let name = volume_name(&mount);
+        let guid = volume_guid(&name).unwrap().to_owned();
+        assert!(
+            !known.iter().any(|k| k.eq_ignore_ascii_case(&guid)),
+            "{guid} isn't a new volume"
+        );
+        let key = format!(r"{VOLUMES}\{guid}");
+        struct Forget(String);
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                // The volume is gone with the test: so is what its bin was.
+                let _ = delete_tree(&self.0);
+            }
+        }
+        let _forget = Forget(key.clone());
+        let quota = space_of(&mount).unwrap().total;
+        let default = bin_takes(&BinSettings::default(), quota).unwrap();
+        println!(
+            "{quota} bytes on {}: a bin as Windows leaves it takes {default}",
+            disk.root.display()
+        );
+        let says = |when: &str| {
+            let mb = user_number(&key, "MaxCapacity").unwrap();
+            println!("MaxCapacity {when}: {mb:?} MB");
+            if let Some(mb) = mb {
+                assert!(
+                    (u64::from(mb) + 1) << 20 >= default,
+                    "Windows' bin takes {mb} MB, less than the default's {default} bytes"
+                );
+            }
+        };
+        says("on a new volume");
+        // A size Windows wrote on mounting the volume is its own default,
+        // just checked: removed (from the new volume's settings), so that
+        // what follows goes by the default as a bin never set does.
+        set_user_number(&key, "MaxCapacity", None).unwrap();
+        let set = bin_settings(&mount).unwrap();
+        println!("{key}: {set:?}");
+        assert!(
+            !set.deletes_at_once && set.max_mb.is_none() && set.policy_percent.is_none(),
+            "the bin is set here (by policy?), so its default can't be checked: {set:?}"
+        );
+        let most = bin_takes(&set, quota).unwrap();
+        assert_eq!(most, default);
+
+        // In a folder of the test's own on the disk (a new volume lets any
+        // user change what's made at its top), each file new.
+        disk.verify();
+        let probes = AdminOnly::new(&disk.root);
+        let new_file = |path: &Path, len: u64| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|f| f.set_len(len))
+                .unwrap();
+        };
+        let over = probes.0.join("mdif-over.bin");
+        new_file(&over, most / 10 * 11);
+        let refused = trash(&over).unwrap_err();
+        println!("a tenth over: {refused}");
+        assert!(refused.to_string().contains("bigger than"), "{refused}");
+        assert!(over.exists(), "a file too big for the bin was deleted");
+
+        let edge = probes.0.join("mdif-edge.bin");
+        let len = most - (1 << 20);
+        assert!(fits(len, most));
+        new_file(&edge, len);
+        // The bin's own index, before and after: an item of the file's size
+        // more is what tells it was kept, not deleted for good (where the
+        // shell doesn't say where it put it, `to` is the bin's folder).
+        let bin = wide(disk.root.as_os_str());
+        let before = query_recycle_bin(&bin).unwrap();
+        let to = trash(&edge).unwrap();
+        let after = query_recycle_bin(&bin).unwrap();
+        println!(
+            "the biggest it lets through, {len} bytes: in the bin as {}; the bin \
+             {} items of {} bytes, was {} of {}",
+            to.display(),
+            after.i64NumItems,
+            after.i64Size,
+            before.i64NumItems,
+            before.i64Size
+        );
+        assert!(!edge.exists(), "still where it was");
+        assert!(
+            after.i64NumItems == before.i64NumItems + 1
+                && after.i64Size - before.i64Size >= len as i64,
+            "deleted for good: the bin holds {} items of {} bytes, was {} of {}",
+            after.i64NumItems,
+            after.i64Size,
+            before.i64NumItems,
+            before.i64Size
+        );
+        says("once the bin was used");
+
+        // The shell, asked anyway for the one a tenth over: whether Windows
+        // would have kept it (then the default is careful by that much). On
+        // this test's own volume, recycled or deleted for good alike.
+        let asked = crate::shell::recycle(&over);
+        println!(
+            "the shell, asked anyway for a tenth over: {asked:?}; still where it was: {}",
+            over.exists()
+        );
+        drop(probes);
+        disk.detach();
+    }
+
+    /// A VHDX formatted NTFS with a drive letter, a fixed disk with a
+    /// Recycle Bin of its own; detached on drop. 50 GB, expandable (only
+    /// what's written takes space), so that a bin's default counts both
+    /// the tenth of the first 40 GB and the twentieth of the rest.
+    struct Lettered {
+        /// The disk's file and DiskPart's scripts.
+        admin: AdminOnly,
+        file: PathBuf,
+        root: PathBuf,
+        /// The volume's label, made at random: what tells that the letter
+        /// still names this disk.
+        label: String,
+        /// The scripts run so far, each from a file of its own.
+        runs: u32,
+        /// When the last script ended: DiskPart wants 15 s between two.
+        last: Option<std::time::Instant>,
+        attached: bool,
+    }
+
+    impl Lettered {
+        fn attach() -> Lettered {
+            let used: Vec<char> = mounts()
+                .unwrap()
+                .iter()
+                .filter_map(|(_, m)| m.chars().next())
+                .collect();
+            // Picked here, assigned by DiskPart: two of these tests at once
+            // could pick the same, and one fail at `assign` (only that: the
+            // label tells another disk). Cargo runs test programs one after
+            // another, CI this one and the NTFS e2e in steps of their own.
+            let letter = ('D'..='Z')
+                .rev()
+                .find(|l| !used.contains(l))
+                .expect("a free drive letter");
+            let admin = AdminOnly::new(&crate::sys::system_directory().with_file_name("Temp"));
+            let mut disk = Lettered {
+                file: admin.0.join("bin.vhdx"),
+                admin,
+                root: PathBuf::from(format!(r"{letter}:\")),
+                label: format!("mdif{:08x}", random() as u32),
+                runs: 0,
+                // DiskPart's 15 s are between any two scripts, another
+                // test's too, which may just have ended.
+                last: Some(std::time::Instant::now()),
+                attached: true,
+            };
+            let (file, label) = (disk.file.display().to_string(), disk.label.clone());
+            disk.diskpart(&format!(
+                "create vdisk file=\"{file}\" maximum=51200 type=expandable\n\
+                 select vdisk file=\"{file}\"\n\
+                 attach vdisk\n\
+                 create partition primary\n\
+                 format fs=ntfs quick label={label}\n\
+                 assign letter={letter}\n",
+            ));
+            disk
+        }
+
+        /// Fails unless the letter names this disk still: by its label.
+        fn verify(&self) {
+            let root = wide(self.root.as_os_str());
+            let mut label = [0u16; 64];
+            // SAFETY: `root` is NUL-ended and `label` the length passed; the
+            // outputs not wanted are left out.
+            let ok = unsafe {
+                GetVolumeInformationW(
+                    root.as_ptr(),
+                    label.as_mut_ptr(),
+                    label.len() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            assert_ne!(
+                ok,
+                0,
+                "{}: {}",
+                self.root.display(),
+                io::Error::last_os_error()
+            );
+            let n = label.iter().position(|&c| c == 0).unwrap_or(label.len());
+            let label = String::from_utf16_lossy(&label[..n]);
+            assert_eq!(
+                label,
+                self.label,
+                "{} isn't the test's disk",
+                self.root.display()
+            );
+        }
+
+        /// Runs `script` with DiskPart (System32's), 15 s after the last
+        /// one ended, as DiskPart asks, from a new file in the folder only
+        /// administrators may change.
+        fn diskpart(&mut self, script: &str) {
+            use std::io::Write;
+            if let Some(last) = self.last {
+                let since = last.elapsed();
+                std::thread::sleep(std::time::Duration::from_secs(15).saturating_sub(since));
+            }
+            self.runs += 1;
+            let file = self.admin.0.join(format!("script-{}.txt", self.runs));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&file)
+                .and_then(|mut f| f.write_all(script.as_bytes()))
+                .unwrap();
+            let out =
+                std::process::Command::new(crate::sys::system_directory().join("diskpart.exe"))
+                    .arg("/s")
+                    .arg(&file)
+                    .output();
+            self.last = Some(std::time::Instant::now());
+            let _ = std::fs::remove_file(&file);
+            let out = out.unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            println!("{text}");
+            if text.contains("is already detached") {
+                return;
+            }
+            assert!(
+                out.status.success() && !text.contains("DiskPart has encountered an error"),
+                "diskpart failed ({}): {text}",
+                out.status
+            );
+        }
+
+        /// Detaches it, three times at most: a volume just used may take a
+        /// moment to let go. The last failure, if none worked.
+        fn try_detach(&mut self) -> std::thread::Result<()> {
+            let script = format!(
+                "select vdisk file=\"{}\"\ndetach vdisk\n",
+                self.file.display()
+            );
+            let mut tried = Ok(());
+            for _ in 0..3 {
+                tried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.diskpart(&script)
+                }));
+                if tried.is_ok() {
+                    break;
+                }
+            }
+            tried
+        }
+
+        /// Detaches it, and fails if it can't: a test that passed shouldn't
+        /// leave a disk attached.
+        fn detach(mut self) {
+            self.attached = false;
+            if let Err(e) = self.try_detach() {
+                std::panic::resume_unwind(e);
+            }
+        }
+    }
+
+    impl Drop for Lettered {
+        fn drop(&mut self) {
+            // Only while unwinding from a failure: as hard, but the failure
+            // already says what went wrong. The folder goes after (a field).
+            if self.attached {
+                let _ = self.try_detach();
+            }
+        }
+    }
+
+    /// A new folder in `parent`, named at random and made at once to let
+    /// only administrators and the system change it (its owner, if that's
+    /// this user, may only read): no program of this user's that isn't
+    /// elevated can change what's in it. In Windows' own temporary folder,
+    /// where DiskPart (an administrator) runs scripts from it and makes a
+    /// disk's file in it, nor rename the folder or find it: users may make
+    /// things there, not list, rename or delete what others made. Removed
+    /// with what's in it when dropped.
+    struct AdminOnly(PathBuf);
+
+    impl AdminOnly {
+        fn new(parent: &Path) -> AdminOnly {
+            use windows_sys::Win32::Foundation::LocalFree;
+            use windows_sys::Win32::Security::Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            };
+            use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+            use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+            // Owned by the administrators, nothing inherited: they and the
+            // system may do anything, the owner (OW) only read.
+            let sddl = wide("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;OW)".as_ref());
+            let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            // SAFETY: `sddl` is NUL-ended; the descriptor is freed below.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            let path = parent.join(format!("mdif-{:016x}", random()));
+            // SAFETY: the path is NUL-ended; `attributes` and the descriptor
+            // it points to live across the call.
+            let made = unsafe { CreateDirectoryW(wide(path.as_os_str()).as_ptr(), &attributes) };
+            let error = io::Error::last_os_error();
+            // SAFETY: made by the conversion above, freed once.
+            unsafe { LocalFree(descriptor) };
+            assert_ne!(made, 0, "{}: {error}", path.display());
+            AdminOnly(path)
+        }
+    }
+
+    impl Drop for AdminOnly {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A number nobody else can tell: the keys the system makes at random
+    /// for each hasher.
+    fn random() -> u64 {
+        use std::hash::{BuildHasher, Hasher};
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    }
 }
 
 #[cfg(test)]

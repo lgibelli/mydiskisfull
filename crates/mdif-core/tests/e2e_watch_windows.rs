@@ -61,45 +61,68 @@ fn detect() -> Detect {
 
 /// A VHDX attached and formatted NTFS, mounted at a folder; detached on drop.
 struct Disk {
+    /// The disk's file, the folder it's mounted at, and DiskPart's scripts.
+    admin: AdminOnly,
     file: PathBuf,
     mount: PathBuf,
+    /// The scripts run so far, each from a file of its own.
+    runs: u32,
+    /// When the last script ended: DiskPart wants 15 s between two.
+    last: Option<Instant>,
     attached: bool,
 }
 
 impl Disk {
-    fn attach(dir: &Path) -> Disk {
-        let file = dir.join("e2e.vhdx");
-        let mount = dir.join("mnt");
+    fn attach() -> Disk {
+        let admin = AdminOnly::new();
+        let file = admin.0.join("e2e.vhdx");
+        let mount = admin.0.join("mnt");
         fs::create_dir(&mount).unwrap();
         // Armed before anything runs: a disk that is attached and then fails to
         // format is still detached.
-        let disk = Disk {
+        let mut disk = Disk {
+            admin,
             file,
             mount,
+            runs: 0,
+            // DiskPart's 15 s are between any two scripts, another test's too,
+            // which may just have ended.
+            last: Some(Instant::now()),
             attached: true,
         };
         // It has a letter for a moment: `fsutil` takes one, and a new volume has
         // no change journal until something makes one (Windows makes one on the
         // system drive, and a program may on others). Then only the folder is left,
         // which is what a volume with no letter looks like.
-        // A letter nothing else uses.
+        // A letter nothing else uses: picked here, assigned by DiskPart, so two of
+        // these tests at once could pick the same, and one fail at `assign` (only
+        // that: the label tells another disk). Cargo runs test programs one after
+        // another, CI this one and the Recycle Bin's in steps of their own.
         let letter = ('D'..='Z')
             .rev()
             .find(|l| !logical_drives().contains(l))
             .expect("a free drive letter");
-        diskpart(&format!(
+        // A label of its own, made at random: what tells that the letter names
+        // this disk when it's used.
+        let label = format!("mdif{:08x}", random() as u32);
+        disk.diskpart(&format!(
             "create vdisk file=\"{}\" maximum=1536 type=expandable\n\
              select vdisk file=\"{}\"\n\
              attach vdisk\n\
              create partition primary\n\
-             format fs=ntfs quick label=mdife2e\n\
+             format fs=ntfs quick label={label}\n\
              assign letter={letter}\n\
              assign mount=\"{}\"\n",
             disk.file.display(),
             disk.file.display(),
             disk.mount.display()
         ));
-        let out = Command::new("fsutil")
+        let root = format!(r"{letter}:\");
+        assert_eq!(label_of(&root), label, "{root} isn't the test's disk");
+        // System32's own programs, by their path: an administrator's search
+        // would look in this test's folder first.
+        let system = mdif_core::os::sys::system_directory();
+        let out = Command::new(system.join("fsutil.exe"))
             .args(["usn", "createjournal", "m=33554432", "a=4194304"])
             .arg(format!("{letter}:"))
             .output()
@@ -112,7 +135,7 @@ impl Disk {
         );
         // `mountvol` and not a second DiskPart script, which wants a pause after
         // the first.
-        let out = Command::new("mountvol")
+        let out = Command::new(system.join("mountvol.exe"))
             .arg(format!("{letter}:"))
             .arg("/D")
             .output()
@@ -121,41 +144,203 @@ impl Disk {
         disk
     }
 
-    /// Detaches it, and says so if that fails (a test that passed shouldn't leave
-    /// a disk attached).
-    fn detach(mut self) {
-        self.attached = false;
-        // A volume that was just in use may take a moment to let go.
+    /// Runs `script` with DiskPart (System32's), 15 s after the last one ended,
+    /// as DiskPart asks, from a new file in the folder only administrators may
+    /// change.
+    fn diskpart(&mut self, script: &str) {
+        if let Some(last) = self.last {
+            std::thread::sleep(Duration::from_secs(15).saturating_sub(last.elapsed()));
+        }
+        self.runs += 1;
+        let file = self.admin.0.join(format!("script-{}.txt", self.runs));
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+            .and_then(|mut f| f.write_all(script.as_bytes()))
+            .unwrap();
+        let out = Command::new(mdif_core::os::sys::system_directory().join("diskpart.exe"))
+            .arg("/s")
+            .arg(&file)
+            .output();
+        self.last = Some(Instant::now());
+        let _ = fs::remove_file(&file);
+        let out = out.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        eprintln!("{text}");
+        // Detaching what is already detached is what was wanted.
+        if text.contains("is already detached") {
+            return;
+        }
+        assert!(
+            out.status.success() && !text.contains("DiskPart has encountered an error"),
+            "diskpart failed ({}): {text} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Detaches it, three times at most: a volume that was just in use may take
+    /// a moment to let go. The last failure, if none worked.
+    fn try_detach(&mut self) -> std::thread::Result<()> {
         let script = format!(
             "select vdisk file=\"{}\"\ndetach vdisk\n",
             self.file.display()
         );
-        let mut last = None;
-        for attempt in 0..3 {
-            // The test took long enough before the first; 15 s between scripts after.
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_secs(15));
-            }
-            match std::panic::catch_unwind(|| diskpart(&script)) {
-                Ok(()) => return,
-                Err(e) => last = Some(e),
+        let mut tried = Ok(());
+        for _ in 0..3 {
+            tried =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.diskpart(&script)));
+            if tried.is_ok() {
+                break;
             }
         }
-        std::panic::resume_unwind(last.unwrap());
+        tried
+    }
+
+    /// Detaches it, and says so if that fails (a test that passed shouldn't leave
+    /// a disk attached).
+    fn detach(mut self) {
+        self.attached = false;
+        if let Err(e) = self.try_detach() {
+            std::panic::resume_unwind(e);
+        }
     }
 }
 
 impl Drop for Disk {
     fn drop(&mut self) {
-        // Only while unwinding from a failure: best effort.
+        // Only while unwinding from a failure: as hard, but the failure already
+        // says what went wrong. The folder goes after (a field).
         if self.attached {
-            let script = format!(
-                "select vdisk file=\"{}\"\ndetach vdisk\n",
-                self.file.display()
-            );
-            let _ = std::panic::catch_unwind(|| diskpart(&script));
+            let _ = self.try_detach();
         }
     }
+}
+
+/// A new folder in Windows' own temporary one, named at random and made at
+/// once to let only administrators and the system change it (its owner, if
+/// that's this user, may only read): DiskPart, an administrator, runs scripts
+/// from it, makes the disk's file in it and mounts the volume in it, and no
+/// program of this user's that isn't elevated can change those, nor rename the
+/// folder, nor find it (Windows' temporary folder lets users make things in it,
+/// not list, rename or delete what others made). mdif-windows' bin test has the
+/// same. Removed with what's in it when dropped.
+struct AdminOnly(PathBuf);
+
+impl AdminOnly {
+    fn new() -> AdminOnly {
+        use std::ffi::{OsStr, c_void};
+        use std::os::windows::ffi::OsStrExt;
+        #[repr(C)]
+        struct SecurityAttributes {
+            length: u32,
+            descriptor: *mut c_void,
+            inherit_handle: i32,
+        }
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl: *const u16,
+                revision: u32,
+                descriptor: *mut *mut c_void,
+                size: *mut u32,
+            ) -> i32;
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateDirectoryW(path: *const u16, attributes: *const SecurityAttributes) -> i32;
+            fn LocalFree(memory: *mut c_void) -> *mut c_void;
+        }
+        let wide = |s: &OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        // Owned by the administrators, nothing inherited: they and the system
+        // may do anything, the owner (OW) only read.
+        let sddl = wide(OsStr::new(
+            "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;OW)",
+        ));
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `sddl` is NUL-ended; the descriptor is freed below.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1, // SDDL_REVISION_1
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+        let attributes = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor,
+            inherit_handle: 0,
+        };
+        let path = mdif_core::os::sys::system_directory()
+            .with_file_name("Temp")
+            .join(format!("mdif-{:016x}", random()));
+        // SAFETY: the path is NUL-ended; `attributes` and the descriptor it
+        // points to live across the call.
+        let made = unsafe { CreateDirectoryW(wide(path.as_os_str()).as_ptr(), &attributes) };
+        let error = std::io::Error::last_os_error();
+        // SAFETY: made by the conversion above, freed once.
+        unsafe { LocalFree(descriptor) };
+        assert_ne!(made, 0, "{}: {error}", path.display());
+        AdminOnly(path)
+    }
+}
+
+impl Drop for AdminOnly {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A number nobody else can tell: the keys the system makes at random for each
+/// hasher.
+fn random() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+}
+
+/// The label of the volume `root` (`Z:\`) names now.
+fn label_of(root: &str) -> String {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetVolumeInformationW(
+            root: *const u16,
+            label: *mut u16,
+            label_len: u32,
+            serial: *mut u32,
+            max_component: *mut u32,
+            flags: *mut u32,
+            file_system: *mut u16,
+            file_system_len: u32,
+        ) -> i32;
+    }
+    let path: Vec<u16> = std::ffi::OsStr::new(root)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut label = [0u16; 64];
+    // SAFETY: `path` is NUL-ended and `label` the length passed; the outputs not
+    // wanted are left out.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            path.as_ptr(),
+            label.as_mut_ptr(),
+            label.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_ne!(ok, 0, "{root}: {}", std::io::Error::last_os_error());
+    let n = label.iter().position(|&c| c == 0).unwrap_or(label.len());
+    String::from_utf16_lossy(&label[..n])
 }
 
 /// The letters in use, from Windows's list of logical drives (which doesn't depend
@@ -172,29 +357,6 @@ fn logical_drives() -> Vec<char> {
     ('A'..='Z')
         .filter(|l| mask & (1 << (*l as u8 - b'A')) != 0)
         .collect()
-}
-
-fn diskpart(script: &str) {
-    let file = std::env::temp_dir().join(format!("mdif-e2e-{}.diskpart", std::process::id()));
-    fs::write(&file, script).unwrap();
-    let out = Command::new("diskpart")
-        .arg("/s")
-        .arg(&file)
-        .output()
-        .unwrap();
-    let _ = fs::remove_file(&file);
-    let text = String::from_utf8_lossy(&out.stdout);
-    eprintln!("{text}");
-    // Detaching what is already detached is what was wanted.
-    if text.contains("is already detached") {
-        return;
-    }
-    assert!(
-        out.status.success() && !text.contains("DiskPart has encountered an error"),
-        "diskpart failed ({}): {text} {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn write_synced(path: &Path, len: u64) {
@@ -219,7 +381,7 @@ fn write_synced(path: &Path, len: u64) {
 #[ignore = "creates and mounts a VHDX with diskpart (an administrator); run with --ignored"]
 fn detects_a_filler_and_a_cleanup_on_a_real_ntfs_volume() {
     let tmp = tempfile::tempdir().unwrap();
-    let disk = Disk::attach(tmp.path());
+    let disk = Disk::attach();
     let vol = disk.mount.clone();
     for d in ["fill", "seed"] {
         fs::create_dir(vol.join(d)).unwrap();

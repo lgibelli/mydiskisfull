@@ -133,9 +133,11 @@ never the user's real settings.
 ## Open in Phase 2 (known gaps, all listed in `docs/WINDOWS.md`)
 
 - Moving to the Recycle Bin (`fs::trash`, `shell.rs`): run on a real runner (CI's `--ignored
-  recycle`), the too-big refusal included, with the bin set to take 4 MB. Still unchecked: a bin
-  never yet set has no `MaxCapacity`, and its size is then taken as Windows' documented default,
-  from 2014.
+  recycle`), the too-big refusal included, with the bin set to take 4 MB. A bin never yet set has
+  no `MaxCapacity`, and its size is then taken as Windows' documented default, from 2014: CI
+  checks it on a new volume of 50 GB (a VHDX with a letter: past 40 GB, so both parts count;
+  `recycle_takes_what_a_never_set_bin_does`): what Windows writes for that bin, the biggest file
+  the default lets through recycled, one a tenth bigger refused.
 - Empty Trash / Empty Recycle Bin is refused while you keep something in it (`clean::plan`), but
   both apps still offer the button by its size alone: a click asks, then says why it's refused.
   The report would need to say it can't be emptied (`comes_back`), and both apps to read that.

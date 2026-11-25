@@ -265,7 +265,10 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   goes item by item, each marked, which the sink refuses. CI moves a file and a folder to the
   runner's bin, checks a share's file is refused, and with the bin set to take 4 MB for a moment
   that a file of 8 MB stays (and that one of 1 MB goes), then with it set to delete at once that
-  nothing goes. **Old Files** uses it: the report's `old_files` are big files of yours
+  nothing goes. On a new volume of 50 GB (a VHDX with a letter: past 40 GB, so both parts of the
+  default count) whose bin was never set, it checks the default: what Windows writes for that bin
+  takes at least as much, the biggest file the default lets through is recycled, and one a tenth
+  bigger is refused and stays. **Old Files** uses it: the report's `old_files` are big files of yours
   (`clean::yours`, with `space::windows::own_file` on Windows: in the profile, in no folder
   sorted as apps' data, apps, a cloud folder (deleting there deletes online: OneDrive's,
   Dropbox's, iCloud's, Creative Cloud's by how their names begin, and the plain-file services'
