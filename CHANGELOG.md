@@ -196,7 +196,9 @@ All notable changes to this project are documented here. The format is based on
   twice and what's in use outside any folder shown.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
-  could be built with a beta Xcode; CI didn't run on release branches.
+  could be built with a beta Xcode; CI didn't run on release branches. The contract check
+  now also decodes a clean-up done, a folder kept out of Time Machine, a backup started and a
+  sign-out, from fixtures held to what `mdif` prints.
 
 ## [0.1.5] - 2026-11-10
 

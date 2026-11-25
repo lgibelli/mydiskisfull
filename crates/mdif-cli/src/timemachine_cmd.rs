@@ -71,11 +71,7 @@ pub fn set(db: &Path, paths: &[PathBuf], exclude: bool, json_out: bool) -> Resul
         }
     }
     if json_out {
-        let out = json!({
-            "done": done.iter().filter(|(_, r)| r.is_ok()).map(|(p, _)| p).collect::<Vec<_>>(),
-            "refused": done.iter().filter_map(|(p, r)| r.as_ref().err().map(|why| json!({"path": p, "why": why}))).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&exclusion_value(&done))?);
         return Ok(());
     }
     for (p, r) in &done {
@@ -89,16 +85,27 @@ pub fn set(db: &Path, paths: &[PathBuf], exclude: bool, json_out: bool) -> Resul
     Ok(())
 }
 
+/// What `mdif timemachine exclude|include --json` prints (the app's
+/// `BackupExclusion`).
+fn exclusion_value(done: &[(PathBuf, Result<(), String>)]) -> serde_json::Value {
+    json!({
+        "done": done.iter().filter(|(_, r)| r.is_ok()).map(|(p, _)| p).collect::<Vec<_>>(),
+        "refused": done.iter().filter_map(|(p, r)| r.as_ref().err().map(|why| json!({"path": p, "why": why}))).collect::<Vec<_>>(),
+    })
+}
+
+/// What `mdif timemachine back-up --json` prints (`BackupStarted`).
+fn started_value(r: &Result<(), String>) -> serde_json::Value {
+    json!({
+        "started": r.is_ok(),
+        "why": r.as_ref().err(),
+    })
+}
+
 pub fn back_up(json_out: bool) -> Result<()> {
     let r = timemachine::back_up_now();
     if json_out {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "started": r.is_ok(),
-                "why": r.as_ref().err(),
-            }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&started_value(&r))?);
         return Ok(());
     }
     match r {
@@ -293,5 +300,37 @@ fn print(r: &Report) {
         for p in &r.skipped {
             println!("  {}", printable(&tilde(p)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// The fixtures the app's contract check decodes for what a fresh
+    /// history can't show: a folder kept out, and a backup started.
+    #[test]
+    fn the_apps_time_machine_fixtures_have_the_shape_printed() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../app/Tests/exclude.json")).unwrap();
+        let real = exclusion_value(&[
+            (PathBuf::from("/x"), Ok(())),
+            (PathBuf::from("/y"), Err(String::new())),
+        ]);
+        assert_eq!(keys(&fixture), keys(&real));
+        assert!(!fixture["done"].as_array().unwrap().is_empty());
+        for r in fixture["refused"].as_array().unwrap() {
+            assert_eq!(keys(r), keys(&real["refused"][0]));
+        }
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../app/Tests/back-up.json")).unwrap();
+        assert_eq!(keys(&fixture), keys(&started_value(&Err(String::new()))));
+        assert_eq!(keys(&fixture), keys(&started_value(&Ok(()))));
     }
 }

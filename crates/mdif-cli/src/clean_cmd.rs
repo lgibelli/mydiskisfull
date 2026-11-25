@@ -211,18 +211,7 @@ pub fn clean(
     let in_trash: u64 = done.iter().filter_map(|(_, s)| *s).sum();
 
     if json_out {
-        let out = json!({
-            "done": done.iter().map(|(d, size)| json!({
-                "path": d.path,
-                "how": d.how,
-                "to": d.to,
-                "size": size,
-                "note": d.note,
-            })).collect::<Vec<_>>(),
-            "failed": failed.iter().map(|(p, why)| json!({"path": p, "why": why})).collect::<Vec<_>>(),
-            "freed": freed,
-            "in_trash": in_trash,
-        });
+        let out = cleaned_value(&done, &failed, freed, in_trash);
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         for (d, size) in &done {
@@ -303,4 +292,65 @@ fn churning(db: &Path) -> Vec<String> {
         .filter(|e| e.live(now) && e.incident.kind == mdif_core::incidents::Kind::Churn)
         .map(|e| e.incident.subject)
         .collect()
+}
+
+/// What `mdif clean --json` prints (the app's `Cleaned`).
+fn cleaned_value(
+    done: &[(Done, Option<u64>)],
+    failed: &[(PathBuf, String)],
+    freed: u64,
+    in_trash: u64,
+) -> serde_json::Value {
+    json!({
+        "done": done.iter().map(|(d, size)| json!({
+            "path": d.path,
+            "how": d.how,
+            "to": d.to,
+            "size": size,
+            "note": d.note,
+        })).collect::<Vec<_>>(),
+        "failed": failed.iter().map(|(p, why)| json!({"path": p, "why": why})).collect::<Vec<_>>(),
+        "freed": freed,
+        "in_trash": in_trash,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// The fixture the app's contract check decodes (app/Tests/clean.json),
+    /// with every field a clean-up prints: a fresh history has nothing to
+    /// clean, so the check couldn't see a done item otherwise.
+    #[test]
+    fn the_apps_clean_fixture_has_the_shape_a_clean_up_prints() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../app/Tests/clean.json")).unwrap();
+        let done = Done {
+            path: PathBuf::from("/x"),
+            how: "trashed",
+            to: Some(PathBuf::from("/t")),
+            note: Some(String::new()),
+        };
+        let real = cleaned_value(
+            &[(done, Some(1))],
+            &[(PathBuf::from("/y"), String::new())],
+            1,
+            1,
+        );
+        assert_eq!(keys(&fixture), keys(&real));
+        for d in fixture["done"].as_array().unwrap() {
+            assert_eq!(keys(d), keys(&real["done"][0]));
+        }
+        for f in fixture["failed"].as_array().unwrap() {
+            assert_eq!(keys(f), keys(&real["failed"][0]));
+        }
+        assert!(!fixture["done"].as_array().unwrap().is_empty());
+    }
 }

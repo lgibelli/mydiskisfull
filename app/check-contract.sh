@@ -6,9 +6,11 @@
 #
 # What a fresh history can't show (open incidents, every kind of fix, an
 # undone tweak, a tweak that installs a profile, a tidy-up that ran, alert
-# settings that were changed) comes from app/Tests/*.json; Rust tests in
-# status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs and alerts_cmd.rs hold those
-# fixtures to the real serialization.
+# settings that were changed, a clean-up done, a folder kept out of Time
+# Machine, a backup started, a sign-out) comes from app/Tests/*.json; Rust
+# tests beside each command (status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs,
+# alerts_cmd.rs, clean_cmd.rs, timemachine_cmd.rs, knowledge_cmd.rs) hold
+# those fixtures to the real serialization.
 #
 #   app/build.sh && app/check-contract.sh
 #
@@ -85,4 +87,8 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     tidyrun=app/Tests/tidy-run.json \
     alerts=app/Tests/alerts.json \
     timemachine=app/Tests/timemachine.json \
-    docker=app/Tests/docker.json
+    docker=app/Tests/docker.json \
+    clean=app/Tests/clean.json \
+    exclusion=app/Tests/exclude.json \
+    started=app/Tests/back-up.json \
+    signedout=app/Tests/sign-out.json
