@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Added
+- When the daily tidy-up keeps folders out of Time Machine by itself, a notification says which
+  ones (up to three by name), and opens the Time Machine page, where one is backed up again.
+
 ### Fixed
 - Where a variable set in `.zshrc` or `.bash_profile` says a tool keeps its files elsewhere
   (`GRADLE_USER_HOME`, `ANDROID_HOME` or `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `XDG_CONFIG_HOME`

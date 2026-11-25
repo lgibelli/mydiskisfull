@@ -155,6 +155,15 @@ final class Monitor: ObservableObject {
         } catch {
             statusError = error.localizedDescription
         }
+        #if !APP_STORE
+        // What the backups tidy kept out by itself since: read while it's on
+        // (or not known yet), and only when it can be said.
+        if settings.notificationsEnabled, notificationsAllowed,
+           tidies?.first(where: { $0.id == "backups" })?.on ?? true {
+            await loadTidies()
+            announceKeptOut()
+        }
+        #endif
         lastRefresh = Date()
         watcher.refresh()
         #if !APP_STORE
@@ -500,6 +509,11 @@ final class Monitor: ObservableObject {
                 Notices.shared.post(ok: false, "Nothing was tidied", error.localizedDescription)
                 return
             }
+            // Said here, so not announced again as news.
+            if id == "backups" {
+                UserDefaults.standard.set(NSNumber(value: Int64(Date().timeIntervalSince1970)),
+                                          forKey: Keys.keptOut)
+            }
             var lines: [String] = []
             if id == "backups" {
                 // Nothing is freed: folders are kept out of the backups.
@@ -773,11 +787,31 @@ final class Monitor: ObservableObject {
         d.set(Array(undoneNow), forKey: Keys.undone)
     }
 
+    #if !APP_STORE
+    /// A run of the backups tidy that kept folders out of Time Machine by
+    /// itself, said once. It goes every 6 hours, and keeps out only what
+    /// wasn't out yet: a folder of yours named like a cache would otherwise
+    /// drop out of the backups with nobody told.
+    private func announceKeptOut() {
+        guard let t = tidies?.first(where: { $0.id == "backups" }), t.on,
+              let last = t.last, last.done > 0 else { return }
+        let d = UserDefaults.standard
+        let seen = (d.object(forKey: Keys.keptOut) as? NSNumber)?.int64Value ?? 0
+        guard last.at > seen else { return }
+        d.set(NSNumber(value: last.at), forKey: Keys.keptOut)
+        // Old news isn't: a run from before this version, say.
+        guard Date().timeIntervalSince1970 - Double(last.at) < 86_400 else { return }
+        Notifier.keptOut(count: last.done, paths: last.paths ?? [])
+    }
+    #endif
+
     private enum Keys {
         static let incidents = "notified.incidents"
         static let level = "notified.alertLevel"
         static let lowerSince = "notified.alertLowerSince"
         static let undone = "notified.undone"
+        /// When the backups tidy run last announced was (Unix seconds).
+        static let keptOut = "notified.keptOut"
     }
 
     // MARK: - Acting on a fix

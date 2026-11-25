@@ -796,6 +796,8 @@ struct Tidy: Decodable, Identifiable {
         let failed: Int
         /// "Emptied 4 caches", "Nothing to tidy".
         let note: String?
+        /// What it was done to, the first 20 (none in older records).
+        let paths: [String]?
     }
 }
 

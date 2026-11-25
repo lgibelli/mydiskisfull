@@ -349,6 +349,7 @@ mod tests {
                 done: 1,
                 failed: 0,
                 note: Some(String::new()),
+                paths: vec![PathBuf::from("/x")],
             },
         )
         .unwrap();

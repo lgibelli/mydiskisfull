@@ -331,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let tweak = info["tweak"] as? String
         #endif
         let command = info["command"] as? String
+        let pane = (info["pane"] as? String).flatMap(Pane.init(rawValue:))
         Task { @MainActor in
             defer { done() }
             switch action {
@@ -344,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             case Notifier.Action.copyCommand.rawValue:
                 if let command { AppDelegate.monitor?.copy(command) }
             default:
-                AppDelegate.show(.overview)
+                AppDelegate.show(pane ?? .overview)
             }
         }
     }
