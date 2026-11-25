@@ -89,6 +89,8 @@ final class MapModel: ObservableObject {
         await loadGrowth()
         do {
             var args = ["map", "--depth", "6", "--min-mb", "200", "--json"]
+            // Nobody asked: no privacy prompt, which nobody would answer.
+            if automatic { args.append("--unattended") }
             #if APP_STORE
             // A folder rather than the disk: map that.
             if let root = AppDelegate.monitor?.access.mapRoot { args += ["--root", root] }

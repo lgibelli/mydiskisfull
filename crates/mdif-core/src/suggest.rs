@@ -205,6 +205,7 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
         return Fix::Steps(WORKTREE.into());
     }
     if ARTIFACTS.contains(&name.as_str())
+        && clean::in_a_project(owner, home)
         && let Some(project) = owner.parent()
     {
         return artifact(&name, project);
@@ -477,7 +478,8 @@ fn measure_folders(
             continue;
         };
         let kind = s.action.as_ref().map(|a| a.kind);
-        let build = kind.is_none() && clean::build_output(&path);
+        let build =
+            kind.is_none() && clean::in_a_project(&path, home) && clean::build_output(&path);
         let trash = kind == Some("trash");
         if !(s.measured.followed || build || trash) {
             continue;
@@ -695,6 +697,8 @@ fn from_tweaks(
             continue;
         };
         let check = store.and_then(|s| t.check(home, s, now).ok().flatten());
+        // Applied here: judged by what it recorded ([`tweaks::Tweak::check`]).
+        let status = check.as_ref().map_or(status, |c| c.status);
         let size = check
             .as_ref()
             .and_then(|c| c.size_now())
@@ -1396,10 +1400,11 @@ mod tests {
     #[test]
     fn build_output_fixes_know_the_toolchain() {
         let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("it's a project");
-        std::fs::create_dir(&proj).unwrap();
+        let h = dir.path();
+        let proj = h.join("devel/it's a project");
+        std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("Cargo.toml"), "").unwrap();
-        let Fix::Run { command, .. } = for_folder(&proj.join("target"), Path::new(HOME)) else {
+        let Fix::Run { command, .. } = for_folder(&proj.join("target"), h) else {
             panic!()
         };
         // Quoted for the shell, apostrophe included.
@@ -1413,10 +1418,21 @@ mod tests {
         );
         // Without a manifest, `target` is just build output.
         std::fs::remove_file(proj.join("Cargo.toml")).unwrap();
-        assert!(matches!(
-            for_folder(&proj.join("target"), Path::new(HOME)),
-            Fix::Steps(_)
-        ));
+        let Fix::Steps(s) = for_folder(&proj.join("target"), h) else {
+            panic!()
+        };
+        assert!(s.contains("safe to delete"), "{s}");
+
+        // Not in a project in a code folder: a folder of yours that has the
+        // name, not build output.
+        std::fs::write(h.join("package.json"), "{}").unwrap();
+        for mine in ["build", "dist", "devel/build"] {
+            std::fs::create_dir_all(h.join(mine)).unwrap();
+            let Fix::Steps(s) = for_folder(&h.join(mine), h) else {
+                panic!()
+            };
+            assert!(!s.contains("safe to delete"), "{mine}: {s}");
+        }
     }
 
     #[test]

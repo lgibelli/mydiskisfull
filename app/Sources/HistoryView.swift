@@ -35,6 +35,12 @@ struct HistoryPage: View {
                 case .writes:
                     WritesView(detail: monitor.detail, total: s.total)
                 }
+            } else if let e = monitor.statusError {
+                ContentUnavailableView {
+                    Label("Can't read the watcher's history", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(e)
+                }
             } else {
                 ProgressView()
             }
@@ -393,9 +399,13 @@ private struct FreeSpaceSection: View {
         let ahead = (span.seconds ?? 14 * 86_400) / 3
         let secs = min(ahead, (f.fullIn?.days ?? .infinity) * 86_400)
         let start = Date(timeIntervalSince1970: TimeInterval(f.at))
-        let avail = Double(f.avail)
+        // The room the headline counts: free, and what macOS frees by itself
+        // as the disk fills. Used up, the disk is full, on the headline's day.
+        let room = Double(f.avail + (f.purgeable ?? 0))
+        let now = used(f.avail)
         func at(_ t: Double, _ rate: Double) -> Point {
-            Point(date: start.addingTimeInterval(t), pct: used(Int64(max(0, avail - rate * t / 86_400))))
+            let share = room > 0 ? min(1, rate * t / 86_400 / room) : 1
+            return Point(date: start.addingTimeInterval(t), pct: now + (100 - now) * share)
         }
         let ts = stride(from: 0.0, through: secs, by: max(secs / 12, 1)).map { $0 }
         return (ts.map { at($0, r.perDay) }, ts.map { at($0, max(r.high, r.perDay)) }, ts.map { at($0, max(0, r.low)) })

@@ -88,6 +88,38 @@ pub const CODE_ROOTS: &[&str] = &[
     "work",
 ];
 
+/// Whether `name`, a folder in the home folder, is a code folder
+/// ([`CODE_ROOTS`]), whatever its case: where the disk ignores case,
+/// `~/Work` is `~/work`.
+pub fn is_code_root(name: &str) -> bool {
+    CODE_ROOTS.iter().any(|r| r.eq_ignore_ascii_case(name))
+}
+
+/// The folders projects are in: what the home folder holds under a name
+/// [`CODE_ROOTS`] has, whatever the case, as the disk spells it (where it
+/// ignores case, "Code" and "code" are one folder, to be looked at once).
+/// Folders, or links (the caller says whether it follows one), that may be
+/// opened: a link, where it leads too (`~/devel` linked to a folder in
+/// Documents).
+pub fn code_folders(home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()))
+        .filter(|e| e.file_name().to_str().is_some_and(is_code_root))
+        .map(|e| e.path())
+        .collect();
+    out.retain(|r| {
+        privacy::may_open(r)
+            && std::fs::read_link(r)
+                .map(|to| crate::keep::resolved(&home.join(to)))
+                .map_or(true, |to| privacy::may_open(&to))
+    });
+    out.sort();
+    out
+}
+
 /// Owner growth is reported once it adds up to this much, either way; the
 /// rest is carried to later periods so slow growth isn't lost.
 pub const MIN_GROWTH: i64 = 1_000_000;
@@ -195,6 +227,15 @@ impl Rules {
     fn set(&mut self, prefix: PathBuf, depth: Depth) {
         self.rules.retain(|(p, _)| *p != prefix);
         self.rules.push((prefix, depth));
+    }
+
+    /// Whether `owner` is a prefix whose folders own themselves: then it
+    /// owns only the files directly in it (`~/Movies`, the home folder), and
+    /// its growth is theirs alone.
+    pub fn owns_only_its_files(&self, owner: &Path) -> bool {
+        self.rules
+            .iter()
+            .any(|(p, d)| p == owner && *d != Depth::Fixed(0))
     }
 
     pub fn owner_of(&self, path: &Path) -> PathBuf {
@@ -483,7 +524,8 @@ impl Tracker {
                     let (mut own, mut created) = (0u64, 0u64);
                     for e in &entries {
                         if e.kind == Kind::Dir {
-                            if recursive && !e.is_dataless() && *budget > 0 {
+                            // Never into another volume mounted here.
+                            if recursive && !e.is_dataless() && !e.mount_point && *budget > 0 {
                                 *budget -= 1;
                                 stack.push(dir.join(&e.name));
                             }
@@ -664,6 +706,21 @@ mod tests {
 
     fn owner(p: &str) -> String {
         rules().owner_of(Path::new(p)).display().to_string()
+    }
+
+    #[test]
+    fn a_prefix_owns_only_the_files_directly_in_it() {
+        let r = rules();
+        for p in ["/Users/me", "/Users/me/Movies", "/Users/me/devel"] {
+            assert!(r.owns_only_its_files(Path::new(p)), "{p}");
+            // The files listed in it are its own; a folder in it owns itself.
+            assert_eq!(owner(p), p);
+            assert_ne!(owner(&format!("{p}/Project/x")), p);
+        }
+        // An owner below a prefix owns all of it; the Trash, all of it too.
+        for p in ["/Users/me/Movies/Project", "/Users/me/.Trash"] {
+            assert!(!r.owns_only_its_files(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

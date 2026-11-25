@@ -45,7 +45,8 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
                 Some(s) => t.check(&home, s, now)?,
                 None => None,
             };
-            Ok((st, check))
+            // Applied here: judged by what it recorded.
+            Ok((check.as_ref().map_or(st, |c| c.status), check))
         }) {
             Ok(x) => x,
             Err(e) => {
@@ -313,6 +314,7 @@ pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
                 setting: s.setting.clone(),
                 from: s.to.clone(),
                 to: s.from.clone(),
+                at_most: false,
             })
         })
         .collect();

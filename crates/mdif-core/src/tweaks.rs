@@ -61,6 +61,9 @@ pub enum After {
 pub struct Change {
     pub setting: Setting,
     pub to: Option<Value>,
+    /// A number of days kept, at most: one kept for fewer holds too
+    /// ([`holds`]).
+    pub at_most: bool,
 }
 
 /// A change as made: what was there before, and what the tweak put there.
@@ -69,6 +72,22 @@ pub struct Step {
     pub setting: Setting,
     pub from: Option<Value>,
     pub to: Option<Value>,
+    /// As its change says ([`Change::at_most`]); none in older records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub at_most: bool,
+}
+
+/// Whether `now` holds what a change wants, `to`: that value, or when it
+/// is a most (`at_most`), any number of days from 1 up to it. Keeping 3
+/// days' transcripts where the tweak keeps 14 is as tight, not undone.
+pub fn holds(now: &Option<Value>, to: &Option<Value>, at_most: bool) -> bool {
+    let days = |v: &Option<Value>| match v {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    now == to
+        || (at_most && matches!((days(now), days(to)), (Some(a), Some(b)) if a >= 1.0 && a <= b))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +228,7 @@ pub const CATALOGUE: &[Tweak] = &[
                     path: gradle_home(h).join("init.d/mydiskisfull-caches.gradle"),
                 },
                 to: Some(Value::String(GRADLE_INIT.into())),
+                at_most: false,
             }])
         },
         absent: |h| (!gradle_home(h).is_dir()).then_some("Gradle isn't used here"),
@@ -231,6 +251,7 @@ pub const CATALOGUE: &[Tweak] = &[
                     key: "cleanupPeriodDays".into(),
                 },
                 to: Some(json!(14)),
+                at_most: true,
             }])
         },
         absent: |h| (!h.join(".claude").is_dir()).then_some("Claude Code isn't used here"),
@@ -252,6 +273,7 @@ pub const CATALOGUE: &[Tweak] = &[
                     key: "HOMEBREW_CLEANUP_MAX_AGE_DAYS".into(),
                 },
                 to: Some(json!("30")),
+                at_most: true,
             }])
         },
         absent: |_| {
@@ -278,6 +300,7 @@ pub const CATALOGUE: &[Tweak] = &[
                     key: "FXRemoveOldTrashItems".into(),
                 },
                 to: Some(json!(true)),
+                at_most: false,
             }])
         },
         absent: |_| None,
@@ -318,7 +341,7 @@ impl Tweak {
         let mut held = 0;
         let mut pending = false;
         for c in &changes {
-            if c.setting.read()? == c.to {
+            if holds(&c.setting.read()?, &c.to, c.at_most) {
                 held += 1;
             } else if let Setting::Profile { profile, dir } = &c.setting {
                 pending |= profile.downloaded(dir);
@@ -345,7 +368,7 @@ impl Tweak {
         let mut held = 0;
         let mut pending = false;
         for s in &steps {
-            if s.setting.read()? == s.to {
+            if holds(&s.setting.read()?, &s.to, s.at_most) {
                 held += 1;
             } else if let Setting::Profile { profile, dir } = &s.setting {
                 pending |= profile.downloaded(dir);
@@ -367,11 +390,12 @@ impl Tweak {
         let mut steps = Vec::new();
         for c in (self.changes)(home)? {
             let from = c.setting.read()?;
-            if from != c.to {
+            if !holds(&from, &c.to, c.at_most) {
                 steps.push(Step {
                     setting: c.setting,
                     from,
                     to: c.to,
+                    at_most: c.at_most,
                 });
             }
         }
@@ -471,9 +495,16 @@ impl Tweak {
             .collect::<Vec<_>>();
         let restart_pending = self.after == After::Restart
             && mdif_macos::sys::boot_time().is_ok_and(|b| b < latest.applied);
+        // By the settings it recorded, not where this process's environment
+        // would look (the app's has no XDG_CONFIG_HOME): unless its tool is
+        // gone.
+        let status = match self.status(home)? {
+            gone @ Status::Absent(_) => gone,
+            _ => self.record_status(latest)?,
+        };
         Ok(Some(Check {
             applied: first.applied,
-            status: self.status(home)?,
+            status,
             restart_pending,
             trend: trend(store, home, &sizes, first.applied, now)?,
             sizes,
@@ -555,6 +586,7 @@ fn ai_changes(_: &Path) -> Result<Vec<Change>> {
                 key,
             },
             to: Some(Value::Bool(false)),
+            at_most: false,
         })
         .collect())
 }
@@ -611,6 +643,7 @@ fn chrome_policy(
             dir: profiles_dir(home),
         },
         to: Some(Value::Bool(true)),
+        at_most: false,
     }
 }
 
@@ -670,12 +703,14 @@ mod tests {
                             key: "days".into(),
                         },
                         to: Some(json!(14)),
+                        at_most: true,
                     },
                     Change {
                         setting: Setting::File {
                             path: h.join("init.d/x"),
                         },
                         to: Some(json!("on\n")),
+                        at_most: false,
                     },
                 ])
             },
@@ -740,6 +775,9 @@ mod tests {
         // reads as not applied; its record knows where it went.
         assert_eq!(t.status(elsewhere.path()).unwrap(), Status::NotApplied);
         assert_eq!(t.record_status(&record).unwrap(), Status::Applied);
+        // What lists and suggestions use goes by the record too.
+        let check = t.check(elsewhere.path(), &store, 2000).unwrap().unwrap();
+        assert_eq!(check.status, Status::Applied);
         Setting::File {
             path: h.join("init.d/x"),
         }
@@ -760,12 +798,45 @@ mod tests {
             file: h.join("settings.json"),
             key: "days".into(),
         };
-        days.write(Some(&json!(7))).unwrap();
+        days.write(Some(&json!(30))).unwrap();
         assert_eq!(t.status(h).unwrap(), Status::Partial);
         let r = t.revert(&store, 2000).unwrap();
-        assert_eq!(r.kept, [(days.clone(), Some(json!(7)))]);
+        assert_eq!(r.kept, [(days.clone(), Some(json!(30)))]);
         assert_eq!(r.restored.len(), 1);
-        assert_eq!(days.read().unwrap(), Some(json!(7)));
+        assert_eq!(days.read().unwrap(), Some(json!(30)));
+    }
+
+    /// Days kept at most: fewer is as tight. Lowered from 14 to 7 by hand,
+    /// it isn't undone; already at 3, it isn't offered (nothing to apply).
+    #[test]
+    fn keeping_fewer_days_than_a_tweak_isnt_undoing_it() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let store = Store::open_in_memory().unwrap();
+        let t = files_tweak();
+        let days = Setting::Json {
+            file: h.join("settings.json"),
+            key: "days".into(),
+        };
+        t.apply(h, &store, 1000).unwrap();
+        days.write(Some(&json!(7))).unwrap();
+        assert_eq!(t.status(h).unwrap(), Status::Applied);
+        let record = store.open_tweaks(t.id).unwrap().remove(0);
+        assert_eq!(t.record_status(&record).unwrap(), Status::Applied);
+        // Fresh, at 3: only the other change is left to make.
+        let fresh = tempfile::tempdir().unwrap();
+        let days = Setting::Json {
+            file: fresh.path().join("settings.json"),
+            key: "days".into(),
+        };
+        days.write(Some(&json!(3))).unwrap();
+        let plan = t.plan(fresh.path()).unwrap();
+        assert!(plan.iter().all(|s| s.setting != days), "{plan:?}");
+        // Not 0 (which may mean "never"), nor what isn't a number.
+        assert!(!holds(&Some(json!(0)), &Some(json!(14)), true));
+        assert!(!holds(&Some(json!("soon")), &Some(json!("30")), true));
+        assert!(holds(&Some(json!("7")), &Some(json!("30")), true));
+        assert!(!holds(&Some(json!(7)), &Some(json!(14)), false));
     }
 
     #[test]
@@ -856,6 +927,7 @@ mod tests {
             },
             from: None,
             to: Some(json!(true)),
+            at_most: false,
         };
         let store = Store::open_in_memory().unwrap();
         let t = Tweak {

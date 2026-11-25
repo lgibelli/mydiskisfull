@@ -131,6 +131,8 @@ struct MapExplorer: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+        // A new measurement is a new tree (its nodes are new objects).
+        .onChange(of: ObjectIdentifier(map.scan.root)) { refind() }
     }
 
     private var breadcrumb: some View {
@@ -170,7 +172,10 @@ struct MapExplorer: View {
         // Zoom through the folders between, so the breadcrumb stays whole.
         var chain: [Node] = []
         var level = focus
-        while level !== node, let next = level.children?.first(where: { node.path.hasPrefix($0.path) }) {
+        // By whole names: "Code" isn't on the way to "Code - Insiders".
+        while level !== node, let next = level.children?.first(where: {
+            node.path == $0.path || node.path.hasPrefix($0.path + "/")
+        }) {
             chain.append(next)
             level = next
         }
@@ -180,6 +185,21 @@ struct MapExplorer: View {
 
     private func back() {
         if !trail.isEmpty { trail.removeLast() }
+        hovered = nil
+    }
+
+    /// Measured again: the same folders zoomed into, from the new tree, as
+    /// far down as they still are, not the old tree's figures under the new
+    /// caption.
+    private func refind() {
+        var found: [Node] = []
+        var level = map.scan.root
+        for old in trail {
+            guard let next = level.children?.first(where: { $0.path == old.path }) else { break }
+            found.append(next)
+            level = next
+        }
+        trail = found
         hovered = nil
     }
 }

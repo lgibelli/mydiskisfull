@@ -17,3 +17,6 @@ clap.workspace = true
 serde_json.workspace = true
 mdif-core.workspace = true
 mdif-macos.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

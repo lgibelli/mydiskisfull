@@ -23,13 +23,18 @@ pub fn clean(
 ) -> Result<()> {
     let home = home();
     let keep = crate::keep_cmd::load(db)?;
-    // A local snapshot and Docker's items go by their names, not paths.
+    // A local snapshot and Docker's items go by their names, not paths. A
+    // path is made whole and rebuilt from its parts: a trailing `/` would
+    // make a link to a folder count as the folder.
     let paths: Vec<PathBuf> = paths
         .iter()
         .map(|p| match clean::snapshot_date(p) {
             _ if docker::is_item(p) => p.clone(),
             Some(_) => p.clone(),
-            None => std::path::absolute(p).unwrap_or_else(|_| p.clone()),
+            None => std::path::absolute(p)
+                .unwrap_or_else(|_| p.clone())
+                .components()
+                .collect(),
         })
         .collect();
     // Docker, asked once, right before: only what's still as shown goes.
@@ -146,7 +151,7 @@ pub fn clean(
     for s in &steps {
         // What goes to the Trash still takes its space there.
         let size = matches!(s, Step::Trash { .. })
-            .then(|| scan::size_of(s.path()))
+            .then(|| scan::freed_by(s.path()))
             .flatten();
         match clean::run(s, &home) {
             Ok(d) => {

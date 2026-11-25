@@ -199,6 +199,12 @@ struct RailBar: View {
                     hovering = on
                     if on { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
+                // Gone under the pointer (another page, the list measured
+                // again): the hand it pushed goes with it.
+                .onDisappear {
+                    if hovering { NSCursor.pop() }
+                    hovering = false
+                }
                 .onTapGesture { select(stop) }
                 .help(stop.id == nil ? "\(stop.title): \(Format.bytes(stop.bytes))"
                       : "\(stop.title): \(Format.bytes(stop.bytes)). Click to see what's in it.")

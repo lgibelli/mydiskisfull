@@ -287,8 +287,10 @@ fn http(url: &str, bearer: Option<&str>, body: Option<(&str, &str)>, secs: u64) 
         set("header", &format!("Content-Type: {kind}"));
         set("data-binary", data);
     }
+    // `-q` first: not the user's `~/.curlrc`, whose `verbose` or
+    // `trace-ascii` would write the token out, and `insecure` trust anyone.
     let mut curl = Command::new("/usr/bin/curl");
-    curl.args(["--config", "-"]);
+    curl.args(["-q", "--config", "-"]);
     let out = crate::space::run_fed(curl, Some(cfg.into_bytes()), Duration::from_secs(secs + 10))
         .ok_or_else(|| anyhow!("OpenAI didn't answer in time"))?;
     if !out.status.success() {
@@ -587,6 +589,19 @@ pub fn sign_in(
     )?;
     if r.status != 200 {
         let (code, _) = error_of(&r.body);
+        if code.as_deref() == Some("invalid_client") && saved.client.is_some() {
+            // This registration isn't OpenAI's any more: forgotten, as a
+            // renewal does, or every try would fail the same way.
+            locked(dir, || {
+                let mut s = load(dir);
+                s.client = None;
+                s.sub = None;
+                s.id_token = None;
+                s.tokens = None;
+                save(dir, &s)
+            })?;
+            bail!("OpenAI no longer knows this Mac's sign-in: sign in again for a new one");
+        }
         bail!(
             "OpenAI didn't finish the sign-in ({}): try again",
             code.unwrap_or_else(|| r.status.to_string())
@@ -632,19 +647,23 @@ pub fn sign_in(
     })
 }
 
-/// Signs out: the refresh token revoked at OpenAI, then the tokens
-/// forgotten here (the registration and the host id stay, for the next
-/// sign-in). False when OpenAI didn't confirm the revocation.
+/// Signs out: the tokens forgotten here first (the registration and the
+/// host id stay, for the next sign-in), so that a revocation that stalls
+/// and is stopped leaves none behind; then the refresh token revoked at
+/// OpenAI. False when OpenAI didn't confirm the revocation.
 pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
     locked(dir, || {
         let mut s = load(dir);
         let Some(t) = s.tokens.take() else {
             return Ok(true);
         };
-        let revoked = revoke(ends, &t.refresh, s.client.as_deref().unwrap_or_default());
         s.id_token = None;
         save(dir, &s)?;
-        Ok(revoked)
+        Ok(revoke(
+            ends,
+            &t.refresh,
+            s.client.as_deref().unwrap_or_default(),
+        ))
     })
 }
 
@@ -1087,6 +1106,51 @@ mod tests {
         assert!(claims("nonsense", "https://i", "c", "n", 1000).is_err());
     }
 
+    #[test]
+    fn signing_out_forgets_the_tokens_before_asking_openai() {
+        // OpenAI, asked to end the session, finds them gone here already:
+        // a sign-out stopped while it waits for OpenAI leaves none behind.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        let tokens = Tokens {
+            access: "a".into(),
+            refresh: "r".into(),
+            expires: unix_now() + 3600,
+            earliest_refresh: 0,
+            scopes: Vec::new(),
+        };
+        let s = Saved {
+            host: "h".into(),
+            client: Some("oaiapp_1".into()),
+            tokens: Some(tokens),
+            id_token: Some("id".into()),
+            ..Saved::default()
+        };
+        save(&d, &s).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(None));
+        let (seen2, d2) = (seen.clone(), d.clone());
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let mut buf = [0; 4096];
+                let _ = stream.read(&mut buf);
+                let left = load(&d2);
+                *seen2.lock().unwrap() = Some(left.tokens.is_none() && left.id_token.is_none());
+                reply(&mut stream, 500, "text/plain", "down");
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let ends = Endpoints {
+            auth: base.clone(),
+            api: format!("{base}/v1"),
+        };
+        assert!(!sign_out(&d, &ends).unwrap(), "not confirmed");
+        assert_eq!(*seen.lock().unwrap(), Some(true));
+        assert!(load(&d).tokens.is_none());
+        assert_eq!(load(&d).client.as_deref(), Some("oaiapp_1"));
+    }
+
     /// What the stand-in for OpenAI was asked, and how it answers.
     #[derive(Default)]
     struct World {
@@ -1094,6 +1158,8 @@ mod tests {
         /// Refreshes asked for, with the refresh token each sent.
         refreshes: Vec<String>,
         refresh_error: Option<&'static str>,
+        /// What the sign-in's code exchange answers instead of tokens.
+        exchange_error: Option<&'static str>,
         responses: Vec<Value>,
         respond_error: Option<(u16, Value)>,
         revoked: Vec<String>,
@@ -1163,8 +1229,13 @@ mod tests {
                         assert_eq!(f["client_id"], "oaiapp_1");
                         assert_eq!(f["code"], "code-1");
                         assert!(f["code_verifier"].len() >= 43);
-                        let t = token(1, &w);
-                        reply(&mut stream, 200, "application/json", &t);
+                        if let Some(e) = w.exchange_error.take() {
+                            let body = json!({"error": e}).to_string();
+                            reply(&mut stream, 401, "application/json", &body);
+                        } else {
+                            let t = token(1, &w);
+                            reply(&mut stream, 200, "application/json", &t);
+                        }
                     }
                     "/api/accounts/oauth/token" => {
                         assert_eq!(f["grant_type"], "refresh_token");
@@ -1367,6 +1438,17 @@ mod tests {
         let s = load(d);
         assert!(s.tokens.is_none());
         assert_eq!(s.client.as_deref(), Some("oaiapp_1"));
+
+        // OpenAI dropped the registration: the sign-in forgets it, and the
+        // next one registers afresh instead of failing the same way.
+        world.lock().unwrap().exchange_error = Some("invalid_client");
+        let e = sign_in(d, &ends, &browser(world.clone()), Duration::from_secs(20)).unwrap_err();
+        assert!(e.to_string().contains("sign in again"), "{e}");
+        let s = load(d);
+        assert!(s.client.is_none() && s.tokens.is_none() && s.sub.is_none());
+        assert_eq!(s.host, host);
+        sign_in(d, &ends, &browser(world.clone()), Duration::from_secs(20)).unwrap();
+        assert_eq!(load(d).client.as_deref(), Some("oaiapp_1"));
     }
 
     #[test]

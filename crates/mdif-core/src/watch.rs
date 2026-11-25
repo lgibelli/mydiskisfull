@@ -298,10 +298,23 @@ impl Watcher {
                 .meta(&format!("owners.{}.{k}", self.key))?
                 .and_then(|v| v.parse().ok()))
         };
+        // An ID only means something in the history it was saved from, and
+        // never ahead of where it is now (its history purged, the Mac
+        // migrated): else from now, as on a first run.
+        let history = fs::dev_of(&self.volume).ok().and_then(fsevents::history_id);
+        let same = self
+            .store
+            .meta(&format!("owners.{}.history", self.key))?
+            .is_none_or(|h| Some(h) == history);
+        let now_id = fsevents::current_event_id();
         let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
-            (Some(id), Some(wall)) => (id as u64, wall),
-            _ => (fsevents::current_event_id(), unix_now()),
+            (Some(id), Some(wall)) if resumable(id as u64, now_id, same) => (id as u64, wall),
+            _ => (now_id, unix_now()),
         };
+        if let Some(h) = &history {
+            self.store
+                .set_meta(&format!("owners.{}.history", self.key), h)?;
+        }
         // The boot volume's paths are reported through its firmlinks
         // (`/Users`, `/private`, ...), so watch from the root.
         let root = if self.key == DATA_ROOT {
@@ -439,8 +452,11 @@ impl Watcher {
             self.last_compact = now;
         }
         let before = proc::own_usage().0;
+        // The room the forecast counts: free, and what macOS frees by itself
+        // before the disk is full (snapshots, purgeable caches).
+        let room = point.avail + crate::space::purgeable(&self.volume, point.avail);
         let (incidents, opened) = match (&self.owners, period) {
-            (Some(o), Some(_)) => self.detect(now, point.avail, 2 * o.every)?,
+            (Some(o), Some(_)) => self.detect(now, room, 2 * o.every)?,
             _ => (Vec::new(), Vec::new()),
         };
 
@@ -476,6 +492,7 @@ impl Watcher {
     ) -> Result<(Vec<Incident>, Vec<Incident>)> {
         let Detect { growth, churn } = &self.detect.with_user(&self.user);
         let series = self.store.growth_series(now - growth.sustain - HOUR)?;
+        let rules = self.owners.as_ref().map(|o| o.tracker.rules().clone());
         let sizes = &mut self.sizes;
         let mut found = incidents::growth(
             &series,
@@ -492,14 +509,35 @@ impl Watcher {
                         .unwrap_or(0);
                     return size.map(|s| (s as i64 + since).max(0) as u64);
                 }
-                let opts = scan::Options {
-                    max_depth: 0,
-                    min_node: u64::MAX,
-                    big_files: None,
-                };
-                let size = scan::scan(Path::new(owner), &opts)
+                // A prefix (`~/Movies`) owns only the files directly in it:
+                // its growth is set against those, not against all below it
+                // (a recording growing next to a 400 GB library).
+                let size = if rules
+                    .as_ref()
+                    .is_some_and(|r| r.owns_only_its_files(Path::new(owner)))
+                {
+                    mdif_macos::bulk::read_dir_with(
+                        Path::new(owner),
+                        mdif_macos::bulk::Detail::Sizes,
+                    )
                     .ok()
-                    .map(|s| s.root.totals.allocated);
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter(|e| e.kind != mdif_macos::bulk::Kind::Dir)
+                            .map(crate::owners::entry_size)
+                            .sum()
+                    })
+                } else {
+                    let opts = scan::Options {
+                        max_depth: 0,
+                        min_node: u64::MAX,
+                        big_files: None,
+                    };
+                    scan::scan(Path::new(owner), &opts)
+                        .ok()
+                        .map(|s| s.root.totals.allocated)
+                };
                 sizes.insert(owner.to_string(), (now, size));
                 size
             },
@@ -635,6 +673,14 @@ impl Owners {
             .collect();
         Ok((growth, period))
     }
+}
+
+/// Whether replaying from the saved event ID `saved` finds what happened
+/// since: in the same history (`same`), and not ahead of the system's
+/// `now` (a purged history starts again from low IDs, and replaying from a
+/// later one would deliver nothing, without a word).
+fn resumable(saved: u64, now: u64, same: bool) -> bool {
+    same && saved <= now
 }
 
 const ACCESS_KEY: &str = "watch.full_disk_access";
@@ -850,7 +896,26 @@ mod tests {
     }
 
     #[test]
+    fn the_journal_is_resumed_only_where_it_can_be() {
+        assert!(resumable(100, 200, true));
+        assert!(resumable(200, 200, true));
+        // Ahead of now: the history was purged, or this is another Mac's.
+        assert!(!resumable(300, 200, true));
+        // Another history altogether.
+        assert!(!resumable(100, 200, false));
+        // This Mac's volume has one, and it is read the same twice.
+        let dev = mdif_macos::fs::dev_of(Path::new("/")).unwrap();
+        let id = fsevents::history_id(dev);
+        assert!(id.as_ref().is_some_and(|h| h.len() == 32), "{id:?}");
+        assert_eq!(fsevents::history_id(dev), id);
+    }
+
+    #[test]
     fn full_disk_access_is_recorded_at_every_sample() {
+        // A sample without access switches prompts off for the process.
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("TCC.db");
         let mut w = Watcher::new(Store::open_in_memory().unwrap(), dir.path())

@@ -154,6 +154,8 @@ pub fn entry(path: &str, home: &Path) -> io::Result<String> {
     } else {
         std::path::absolute(path)?
     };
+    // `../game/build` from `~/devel/app` is `~/devel/game/build`.
+    let abs = resolved(&abs);
     let abs = abs
         .strip_prefix(DATA_ROOT)
         .map_or(abs.clone(), |rest| Path::new("/").join(rest));
@@ -216,10 +218,28 @@ pub fn expand(entry: &str, home: &Path) -> PathBuf {
     }
 }
 
+/// `path` with each `..` taking off the name before it, by name: what the
+/// entry was meant to name, and what the paths it's compared with spell.
+pub(crate) fn resolved(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The names in `path`, lowercased, as seen from `/` (the Data volume's own
-/// mount point left out).
+/// mount point left out), each `..` resolved ([`resolved`]): an entry saved
+/// with one before keeps what it names.
 fn names(path: &Path) -> Vec<String> {
-    let path = path.strip_prefix(DATA_ROOT).unwrap_or(path);
+    let path = resolved(path);
+    let path = path.strip_prefix(DATA_ROOT).unwrap_or(&path);
     path.components()
         .filter_map(|c| match c {
             Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
@@ -303,6 +323,25 @@ mod tests {
                 .is_none()
         );
         assert!(k.covering(Path::new("/Volumes/Archive2")).is_none());
+    }
+
+    #[test]
+    fn an_entry_with_dot_dot_keeps_what_it_names() {
+        let home = Path::new(HOME);
+        // Given from `~/devel/app` as `../game/build`.
+        assert_eq!(
+            entry("/Users/me/devel/app/../game/./build", home).unwrap(),
+            "~/devel/game/build"
+        );
+        // One saved with it before still keeps that, not another.
+        let k = keep("~/devel/app/../game/build\n");
+        let build = Path::new("/Users/me/devel/game/build");
+        assert!(k.covering(build).is_some());
+        assert!(k.touches(Path::new("/Users/me/devel/game")));
+        assert!(
+            k.covering(Path::new("/Users/me/devel/app/game/build"))
+                .is_none()
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ use super::{
     one_off_arrivals, recurs, runs, step_rule, theil_sen, within,
 };
 use crate::store::{Cleanup, SpacePoint};
+use std::ops::Range;
 
 /// Free space as consumption per clock hour.
 #[derive(Debug, Clone)]
@@ -107,16 +108,25 @@ impl Hourly {
         let threshold = (p.step_min as f64).max(p.step_noise_factor * noise);
         let is_step = |consumed: f64| -consumed >= threshold;
         // Steps recur when there are enough of them and the disk refills
-        // what they free (see `recurs`).
-        let (mut n, mut freed, mut refilled) = (0, 0.0, 0.0);
-        for d in deltas.iter().filter(|d| !d.3) {
-            if is_step(d.2) {
-                n += 1;
-                freed -= d.2;
-            } else {
-                refilled += d.2;
-            }
-        }
+        // what they free (see `recurs`): steps in consecutive hours are one
+        // clean-up, and what's refilled is what the disk consumed between
+        // the first and the last, not over the weeks around them.
+        let steps: Vec<usize> = (0..deltas.len())
+            .filter(|&i| !deltas[i].3 && is_step(deltas[i].2))
+            .collect();
+        let n = steps
+            .iter()
+            .enumerate()
+            .filter(|&(k, &i)| k == 0 || steps[k - 1] + 1 != i || deltas[i].1 != 1)
+            .count();
+        let freed: f64 = steps.iter().map(|&i| -deltas[i].2).sum();
+        let refilled: f64 = match (steps.first(), steps.last()) {
+            (Some(&a), Some(&b)) => (a + 1..b)
+                .filter(|&i| !deltas[i].3 && !is_step(deltas[i].2))
+                .map(|i| deltas[i].2)
+                .sum(),
+            _ => 0.0,
+        };
         let removed = !recurs(n, freed, refilled, p);
         // Arrivals too.
         let came = arrivals(deltas.len(), |i| deltas[i].2, |i| deltas[i].3, threshold);
@@ -279,38 +289,39 @@ pub(crate) struct Outcome {
 }
 
 impl Pool {
-    /// The pool, leaving out day `exclude` if given; `None` with fewer than
-    /// `min_hours` known hours to draw from.
-    pub fn new(h: &Hourly, p: &Params, exclude: Option<usize>, min_hours: usize) -> Option<Pool> {
+    /// The pool, leaving out the hours `exclude` if given (a day, for the
+    /// jackknife); `None` with fewer than `min_hours` known hours to draw
+    /// from.
+    pub fn new(
+        h: &Hourly,
+        p: &Params,
+        exclude: Option<Range<usize>>,
+        min_hours: usize,
+    ) -> Option<Pool> {
         let n = h.x.len();
         let block = p.block_hours.clamp(1, 24);
         let block = (1..=block).rev().find(|b| 24 % b == 0).unwrap_or(1);
         let ndays = n.div_ceil(24);
         let day_of = |j: usize| (n - 1 - j) / 24;
-        let recency = |k: usize| {
-            if Some(k) == exclude {
-                0.0
-            } else {
-                0.5f64.powf(k as f64 / p.half_life_days.max(1e-3))
-            }
-        };
-        // The share of `len` hours before `hi` that are known.
+        let out = |j: usize| exclude.as_ref().is_some_and(|r| r.contains(&j));
+        let recency = |k: usize| 0.5f64.powf(k as f64 / p.half_life_days.max(1e-3));
+        // The share of `len` hours before `hi` that are known, and not left
+        // out.
         let cover = |hi: usize, len: usize| {
             let lo = hi.saturating_sub(len);
-            h.x[lo..hi].iter().filter(|v| v.is_some()).count() as f64 / len as f64
+            (lo..hi).filter(|&j| h.x[j].is_some() && !out(j)).count() as f64 / len as f64
         };
         let days: Vec<f64> = (0..ndays)
             .map(|k| recency(k) * cover(n - 24 * k, 24))
             .collect();
         // Days of data, counting partial ones by their share.
         let kdays = ((0..ndays)
-            .filter(|&k| Some(k) != exclude)
             .map(|k| cover(n - 24 * k, 24))
             .sum::<f64>()
             .floor() as usize)
             .max(1);
         let usable = (0..n)
-            .filter(|&j| h.x[j].is_some() && days[day_of(j)] > 0.0)
+            .filter(|&j| h.x[j].is_some() && !out(j) && days[day_of(j)] > 0.0)
             .count();
         if usable < min_hours.max(1) {
             return None;
@@ -331,7 +342,9 @@ impl Pool {
         // Per-hour mean, for a block of the day nothing matches.
         let (mut num, mut den) = (0.0, 0.0);
         for (j, v) in h.x.iter().enumerate() {
-            if let Some(v) = v {
+            if let Some(v) = v
+                && !out(j)
+            {
                 num += w[unit_of(j)] * v;
                 den += w[unit_of(j)];
             }
@@ -354,7 +367,9 @@ impl Pool {
                     }
                     let j0 = j0 as usize;
                     let u = unit_of(j0);
-                    if w[u] == 0.0 || days[day_of(j0)] == 0.0 {
+                    // Never an hour left out, even in a block that starts
+                    // before them.
+                    if w[u] == 0.0 || days[day_of(j0)] == 0.0 || (j0..j0 + block).any(out) {
                         continue;
                     }
                     let hours = &h.x[j0..j0 + block];

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mdif_core::store::Store;
 use mdif_core::text::printable;
 use mdif_core::timemachine::{self, Folder, Report};
@@ -19,6 +19,10 @@ use crate::watch_cmd::{home, local, tilde};
 
 /// `quick`: the backups and the snapshots only, without the folders.
 pub fn show(db: &Path, quick: bool, json_out: bool) -> Result<()> {
+    // Its walks (what changed, what's rebuildable) never download a cloud
+    // placeholder.
+    mdif_macos::fs::forbid_dataless_materialization()
+        .context("disabling cloud downloads for this process")?;
     let r = if quick {
         timemachine::glance(&home(), unix_now())
     } else {
@@ -92,7 +96,14 @@ pub fn back_up(json_out: bool) -> Result<()> {
 
 fn print(r: &Report) {
     if !r.set_up {
-        println!("Time Machine has no backup disk.");
+        println!(
+            "{}",
+            if r.unreadable {
+                "Time Machine's settings can't be read without Full Disk Access."
+            } else {
+                "Time Machine has no backup disk."
+            }
+        );
         return;
     }
     for d in &r.destinations {
@@ -134,19 +145,31 @@ fn print(r: &Report) {
         );
     }
     if let Some(b) = &r.backlog {
+        let since = b.since.map_or("never".into(), |t| {
+            local(t).format("%b %-d %H:%M").to_string()
+        });
+        let held = if b.held > 0 {
+            format!(": up to {}", bytes(b.held))
+        } else {
+            String::new()
+        };
+        // Overdue (the Mac was closed, the disk not plugged in) isn't failing.
+        let to =
+            b.to.as_deref()
+                .map_or(String::new(), |d| format!(" to \"{}\"", printable(d)));
+        let what = if b.failed >= 2 || b.since.is_none() {
+            format!(
+                "Backups{to} are failing: {} tr{} since the last good one ({since}) didn't \
+                 finish.",
+                b.failed,
+                if b.failed == 1 { "y" } else { "ies" },
+            )
+        } else {
+            format!("No backup{to} has finished since {since}.")
+        };
         println!(
-            "\nBackups are failing: {} tr{} since the last good one ({}) didn't finish. Until one \
-             does, its snapshot keeps everything deleted or rewritten since{}.",
-            b.failed,
-            if b.failed == 1 { "y" } else { "ies" },
-            b.since.map_or("never".into(), |t| local(t)
-                .format("%b %-d %H:%M")
-                .to_string()),
-            if b.held > 0 {
-                format!(": up to {}", bytes(b.held))
-            } else {
-                String::new()
-            }
+            "\n{what} Until one does, its snapshot keeps everything deleted or rewritten \
+             since{held}."
         );
     }
     if !r.tries.is_empty() {

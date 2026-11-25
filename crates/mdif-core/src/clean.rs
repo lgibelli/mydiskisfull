@@ -65,8 +65,8 @@ pub struct Action {
     /// ticked to start with in the app's Clean Up. What isn't is offered
     /// there unticked, with `confirm` beside it.
     pub safe: bool,
-    /// The app to quit first (a bundle id, or a name): while it's open,
-    /// it's refused.
+    /// The app to quit first (a bundle id, a bundle id prefix ending in `.`
+    /// for every app of a vendor, or a name): while it's open, it's refused.
     pub quit: Option<String>,
     /// What goes, in a line, when the item it's offered with doesn't say:
     /// "Not used since September: iPhone 17, iPad Air".
@@ -221,14 +221,14 @@ pub fn plan(
             })
             .ok_or_else(|| format!("{shown}: none of its helpers keeps rewriting the disk now."));
     }
-    if path == home.join(".Trash") {
-        return deletable(path, home).map(|()| Step::EmptyTrash(path.to_path_buf()));
-    }
     if let Some(entry) = keep.covering(path).or_else(|| keep.inside(path)) {
         return Err(format!(
             "{shown}: you keep {}, so it isn't touched.",
             crate::text::printable(entry)
         ));
+    }
+    if path == home.join(".Trash") {
+        return deletable(path, home).map(|()| Step::EmptyTrash(path.to_path_buf()));
     }
     if relocated(path, Path::new(SHARED)) {
         return Ok(Step::FinderTrash(path.to_path_buf()));
@@ -269,7 +269,14 @@ pub fn plan(
         ));
     }
     if build_output(path) || incremental_caches(path) || dependencies(path) {
-        return deletable(path, home).map(|()| Step::Delete(path.to_path_buf()));
+        deletable(path, home)?;
+        if !in_a_project(path, home) {
+            return Err(format!(
+                "{shown} isn't in a project in your code folders (such as ~/devel/<project>): \
+                 only there is a folder named like build output taken for it."
+            ));
+        }
+        return Ok(Step::Delete(path.to_path_buf()));
     }
     if let Some(owner) = emptied_for(path, home) {
         return deletable(path, home).map(|()| Step::Empty {
@@ -353,6 +360,14 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
         Step::Delete(path) => {
             // As checked: a symlink put in its place since isn't followed.
             deletable(path, home)?;
+            // A tool run from `target/release` (a login item, a server left
+            // running) reads nothing more from it: unused, but not unneeded.
+            if let Some(name) = running_from(path) {
+                return Err(format!(
+                    "Quit {name} first: it runs from {}.",
+                    display(path, home)
+                ));
+            }
             if path.file_name() == Some(INCREMENTAL.as_ref()) && !incremental_caches(path) {
                 return Err(format!(
                     "{} isn't a Rust build's incremental caches now.",
@@ -376,7 +391,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
         }
         Step::EmptyTrash(path) => {
             deletable(path, home)?;
-            empty(path)
+            empty(path, &[])
                 .map(|()| Done {
                     path: path.clone(),
                     how: "erased",
@@ -405,7 +420,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
             if let Some(name) = running_from(path) {
                 return Err(format!("Quit {name} first: it runs from {shown}."));
             }
-            empty(path)
+            empty(path, not_cache(owner))
                 .map(|()| Done {
                     path: path.clone(),
                     how: "emptied",
@@ -911,6 +926,94 @@ pub fn cache_of(dir: &Path, home: &Path) -> Option<String> {
     (!apple && !owner.starts_with('.')).then(|| owner.to_string())
 }
 
+/// Tool caches whose tool doesn't fill them again by itself (Playwright's
+/// and Puppeteer's browsers, LM Studio's models), or only by fetching
+/// gigabytes when a program asks (Hugging Face's models and datasets), and
+/// what emptying one costs: emptied only when you choose to, never ticked to
+/// start with in Clean Up nor emptied by the daily tidy-up.
+const NOT_REFILLED: &[(&str, &str)] = &[
+    (
+        "ms-playwright",
+        "Playwright's tests fail until `npx playwright install` downloads its browsers again.",
+    ),
+    (
+        "puppeteer",
+        "Puppeteer can't start Chrome until `npx puppeteer browsers install chrome` downloads \
+         it again.",
+    ),
+    (
+        "lm-studio",
+        "LM Studio's models have to be downloaded again in LM Studio.",
+    ),
+    (
+        "huggingface",
+        "the models and datasets in it are downloaded again, gigabytes at a time, the next time \
+         a program asks for them. Your Hugging Face sign-in stays.",
+    ),
+    (
+        "Cypress",
+        "Cypress can't run until `npx cypress install` downloads it again.",
+    ),
+    (
+        "llama.cpp",
+        "the models in it are downloaded again, gigabytes at a time, the next time llama.cpp \
+         asks for them.",
+    ),
+    (
+        "torch",
+        "PyTorch's models are downloaded again, gigabytes at a time, the next time a program \
+         asks for them.",
+    ),
+    (
+        "whisper",
+        "Whisper's models are downloaded again, gigabytes at a time, the next time it runs.",
+    ),
+];
+
+/// What emptying `owner`'s cache costs, when its tool doesn't fill it again
+/// by itself ([`NOT_REFILLED`]); none when it comes back as its app runs.
+pub fn not_refilled(owner: &str) -> Option<&'static str> {
+    NOT_REFILLED
+        .iter()
+        .find(|(o, _)| *o == owner)
+        .map(|(_, why)| *why)
+}
+
+/// What a tool keeps in its cache folder that isn't a cache, left when the
+/// folder is emptied: Hugging Face's sign-in and `accelerate` settings, the
+/// JetBrains IDEs' local history of your edits. Names below the folder,
+/// `/` between them, `*` for any one name.
+const NOT_CACHE: &[(&str, &[&str])] = &[
+    ("huggingface", &["token", "stored_tokens", "accelerate"]),
+    ("JetBrains", &["*/LocalHistory"]),
+];
+
+/// What emptying `owner`'s cache leaves ([`NOT_CACHE`]).
+fn not_cache(owner: &str) -> &'static [&'static str] {
+    NOT_CACHE
+        .iter()
+        .find(|(o, _)| *o == owner)
+        .map_or(&[], |(_, left)| left)
+}
+
+/// The app that uses a cache named for its vendor or its tool rather than
+/// for the app: a bundle id prefix (every JetBrains IDE, every Google app)
+/// or the app's name.
+const CACHE_APPS: &[(&str, &str)] = &[
+    ("JetBrains", "com.jetbrains."),
+    ("Google", "com.google."),
+    ("lm-studio", "LM Studio"),
+];
+
+/// Which app emptying `owner`'s cache waits for, as [`Action::quit`] says
+/// it: a bundle id, a bundle id prefix ending in `.`, or an app's name.
+pub fn app_of(owner: &str) -> &str {
+    CACHE_APPS
+        .iter()
+        .find(|(o, _)| *o == owner)
+        .map_or(owner, |(_, app)| app)
+}
+
 /// Whose folder `dir` is, when emptying it is a clean-up: an app's cache
 /// ([`cache_of`]), or what Xcode makes again ([`xcode::rebuilt`]), emptied
 /// while Xcode is closed.
@@ -921,19 +1024,49 @@ pub fn emptied_for(dir: &Path, home: &Path) -> Option<String> {
         .or_else(|| crate::xcode::rebuilt(dir, home).then(|| crate::xcode::XCODE.to_string()))
 }
 
-/// The name of the open app `owner` names (a bundle id, or an app's name),
-/// as Launch Services knows it.
+/// The name of the open app whose cache `owner`'s is ([`app_of`]: a bundle
+/// id, a bundle id prefix, or an app's name), as Launch Services knows it.
 fn open_app(owner: &str) -> Option<String> {
-    let bundle_id = owner.contains('.') && owner.starts_with(|c: char| c.is_ascii_lowercase());
+    let app = app_of(owner);
+    if app.ends_with('.') {
+        let out = std::process::Command::new("/usr/bin/lsappinfo")
+            .arg("list")
+            .output()
+            .ok()?;
+        return app_in_list(&String::from_utf8_lossy(&out.stdout), app);
+    }
+    let bundle_id = app.contains('.') && app.starts_with(|c: char| c.is_ascii_lowercase());
     let key = if bundle_id { "bundleid" } else { "name" };
     let out = std::process::Command::new("/usr/bin/lsappinfo")
-        .args(["find", &format!("{key}={owner}")])
+        .args(["find", &format!("{key}={app}")])
         .output()
         .ok()?;
     // `ASN:0x0-0x11011-"Safari":`, or nothing.
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().find(|l| l.starts_with("ASN:"))?;
-    Some(line.split('"').nth(1).unwrap_or(owner).to_string())
+    Some(line.split('"').nth(1).unwrap_or(app).to_string())
+}
+
+/// In `lsappinfo list`'s answer, the name of an app whose bundle id starts
+/// with `prefix`: each app is a line ` 12) "IntelliJ IDEA" ASN:…`, then its
+/// details, `bundleID="com.jetbrains.intellij"` among them.
+fn app_in_list(text: &str, prefix: &str) -> Option<String> {
+    let mut name = None;
+    for line in text.lines() {
+        let line = line.trim_start();
+        if let Some((n, rest)) = line.split_once(") \"")
+            && n.chars().all(|c| c.is_ascii_digit())
+        {
+            name = rest.split('"').next().map(str::to_string);
+        } else if let Some(id) = line
+            .strip_prefix("bundleID=\"")
+            .and_then(|r| r.split('"').next())
+            && id.starts_with(prefix)
+        {
+            return name;
+        }
+    }
+    None
 }
 
 /// A process of yours whose program is in `dir` (a tool's runtime kept in
@@ -947,14 +1080,34 @@ fn running_from(dir: &Path) -> Option<String> {
 
 /// Deletes what's in `dir`, not `dir`: apps expect their cache folder to be
 /// there. Links are removed, not followed. What can't be deleted (a file
-/// only its app may touch) stays; an error only if nothing could be.
-fn empty(dir: &Path) -> std::io::Result<()> {
+/// only its app may touch) stays; an error only if nothing could be. What
+/// `leave` names ([`NOT_CACHE`]: names below `dir`, `/` between them, `*`
+/// for any one name) stays too.
+fn empty(dir: &Path, leave: &[&str]) -> std::io::Result<()> {
+    let leave: Vec<Vec<&str>> = leave.iter().map(|l| l.split('/').collect()).collect();
+    empty_leaving(dir, &leave)
+}
+
+fn empty_leaving(dir: &Path, leave: &[Vec<&str>]) -> std::io::Result<()> {
     let mut first_error = None;
     let mut any = false;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let gone = if entry.file_type()?.is_dir() {
+        let name = entry.file_name();
+        let named = |l: &str| l == "*" || name.to_string_lossy().eq_ignore_ascii_case(l);
+        if leave.iter().any(|l| l.len() == 1 && named(l[0])) {
+            continue;
+        }
+        let below: Vec<Vec<&str>> = leave
+            .iter()
+            .filter(|l| l.len() > 1 && named(l[0]))
+            .map(|l| l[1..].to_vec())
+            .collect();
+        let is_dir = entry.file_type()?.is_dir();
+        let gone = if is_dir && !below.is_empty() {
+            empty_leaving(&path, &below)
+        } else if is_dir {
             std::fs::remove_dir_all(&path)
         } else {
             std::fs::remove_file(&path)
@@ -1039,11 +1192,28 @@ pub fn dependencies(dir: &Path) -> bool {
         && worktrees::tracks_files_in(dir) != Some(true)
 }
 
+/// Whether `dir` is in a project in your code folders
+/// ([`CODE_ROOTS`](crate::owners::CODE_ROOTS)), as Storage lists build
+/// output: `~/devel/app/target`, not `~/devel/target` nor `~/build`. A
+/// folder of yours elsewhere may have the name and a `package.json` beside
+/// it (an `npm install` in the home folder leaves one) without being made
+/// by a build.
+pub fn in_a_project(dir: &Path, home: &Path) -> bool {
+    let Ok(rel) = dir.strip_prefix(home) else {
+        return false;
+    };
+    let parts: Vec<Component> = rel.components().collect();
+    parts.len() >= 3
+        && matches!(parts[0], Component::Normal(root)
+            if root.to_str().is_some_and(crate::owners::is_code_root))
+}
+
 /// Whether `dir` is a project's build output, which its next build makes
 /// again: a folder named in [`ARTIFACTS`](crate::owners::ARTIFACTS) next to
 /// the file its toolchain builds from, with nothing in it that git tracks.
 /// Not `node_modules`, a virtualenv or `Pods`: those come back only by
-/// downloading them again.
+/// downloading them again. Where it is isn't checked here
+/// ([`in_a_project`]).
 pub fn build_output(dir: &Path) -> bool {
     const GRADLE: &[&str] = &[
         "build.gradle",
@@ -1060,22 +1230,33 @@ pub fn build_output(dir: &Path) -> bool {
         ".dart_tool" => &["pubspec.yaml"],
         "build" => &[
             "pubspec.yaml",
-            "package.json",
             "build.gradle",
             "build.gradle.kts",
             "settings.gradle",
             "settings.gradle.kts",
         ],
         ".gradle" => GRADLE,
-        ".next" | ".turbo" | "dist" => &["package.json"],
+        ".next" | ".turbo" => &["package.json"],
         ".build" => &["Package.swift"],
+        "dist" => &[],
         _ => return false,
     };
     debug_assert!(crate::owners::ARTIFACTS.contains(&name));
-    crate::privacy::may_open(project)
-        && markers.iter().any(|m| project.join(m).is_file())
-        && dir.is_dir()
-        && worktrees::tracks_files_in(dir) != Some(true)
+    if !(crate::privacy::may_open(project) && dir.is_dir()) {
+        return false;
+    }
+    if markers.iter().any(|m| project.join(m).is_file()) {
+        return worktrees::tracks_files_in(dir) != Some(true);
+    }
+    // A `dist` or a `build` beside `package.json` may be the project's own:
+    // electron-builder keeps its icons and entitlements in `build`, and a
+    // package downloaded as published has its `dist` and no sources to make
+    // it from. Build output only when git ignores it, not when there's no
+    // repository to ask.
+    matches!(name, "build" | "dist")
+        && project.join("package.json").is_file()
+        && worktrees::ignores(dir) == Some(true)
+        && worktrees::tracks_files_in(dir) == Some(false)
 }
 
 const INCREMENTAL: &str = "incremental";
@@ -1110,13 +1291,16 @@ pub fn incremental_caches(dir: &Path) -> bool {
 /// a symlink to one), in the home folder, on its volume.
 pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
     let shown = display(dir, home);
-    // `..` would make "in the home folder" and what you keep mean nothing.
+    // `..` would make "in the home folder" and what you keep mean nothing,
+    // and a trailing `/` or `/.` would make a link to a folder count as the
+    // folder: only a path as its parts spell it.
     if dir.components().any(|c| {
         !matches!(
             c,
             std::path::Component::RootDir | std::path::Component::Normal(_)
         )
-    }) {
+    }) || dir.components().collect::<PathBuf>().as_os_str() != dir.as_os_str()
+    {
         return Err(format!("{shown}: give the folder's full path."));
     }
     let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{shown}: {e}"))?;
@@ -1142,7 +1326,38 @@ pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
+    // Nor with another volume mounted in it (a share, a disk image), which
+    // deleting it would empty too.
+    let mounts: Vec<PathBuf> = mdif_macos::fs::mounts()
+        .map_err(|e| format!("{shown}: the volumes mounted can't be listed ({e})."))?
+        .into_iter()
+        .map(|(_, on)| PathBuf::from(on))
+        .collect();
+    if let Some(on) = mounted_in(dir, &mounts) {
+        return Err(format!(
+            "{shown} has another volume mounted in it ({}).",
+            display(on, home)
+        ));
+    }
     Ok(())
+}
+
+/// The first of `mounts` (where volumes are mounted) inside `dir`, by its
+/// path or by the Data volume's (`/System/Volumes/Data/Users/…`).
+fn mounted_in<'m>(dir: &Path, mounts: &'m [PathBuf]) -> Option<&'m Path> {
+    let on_data = dir
+        .strip_prefix("/")
+        .ok()
+        .map(|rel| Path::new(crate::map::DATA_ROOT).join(rel));
+    mounts
+        .iter()
+        .find(|on| {
+            [Some(dir), on_data.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|d| on.as_path() != d && on.starts_with(d))
+        })
+        .map(PathBuf::as_path)
 }
 
 /// The first folder between `home` and `path` that is a link, if one is
@@ -1158,13 +1373,29 @@ fn link_on_the_way<'p>(path: &'p Path, home: &Path) -> Option<&'p Path> {
 }
 
 /// The app a process named `name` works for when it is an app's helper,
-/// not the app: of those running, the one that wrote the most.
+/// not the app. When those running under the name work for different apps
+/// (Safari's and Mail's `com.apple.WebKit.Networking`), or one isn't a
+/// helper, the name can't say which is meant: none, rather than the
+/// wrong app restarted ([`one_app`]).
 pub fn helper(name: &str) -> Option<mdif_macos::proc::App> {
-    let top = mdif_macos::proc::own_processes()
+    let apps: Vec<Option<mdif_macos::proc::App>> = mdif_macos::proc::own_processes()
         .into_iter()
         .filter(|p| p.name == name)
-        .max_by_key(|p| p.bytes_written)?;
-    mdif_macos::proc::responsible_app(top.pid).filter(|a| a.pid != top.pid && a.name != name)
+        .map(|p| {
+            mdif_macos::proc::responsible_app(p.pid).filter(|a| a.pid != p.pid && a.name != name)
+        })
+        .collect();
+    one_app(apps)
+}
+
+/// The app all of `apps` are (each a process's, `None` when it isn't a
+/// helper), when they are one.
+fn one_app(apps: Vec<Option<mdif_macos::proc::App>>) -> Option<mdif_macos::proc::App> {
+    let apps: Vec<mdif_macos::proc::App> = apps.into_iter().collect::<Option<_>>()?;
+    let first = apps.first()?;
+    apps.iter()
+        .all(|a| a.bundle == first.bundle)
+        .then(|| first.clone())
 }
 
 /// Whether all of `pids` ended within `wait`.
@@ -1327,6 +1558,13 @@ mod tests {
         std::fs::write(trash.join("a.zip"), "x").unwrap();
         let step = plan(&trash, h, &Keep::default(), &[], &[]).unwrap();
         assert!(matches!(step, Step::EmptyTrash(_)));
+        // Kept (Storage offers Keep on its row): left alone.
+        let kept = Keep::parse("~/.Trash\n", h);
+        assert!(
+            plan(&trash, h, &kept, &[], &[])
+                .unwrap_err()
+                .contains("you keep")
+        );
         assert_eq!(run(&step, h).unwrap().how, "erased");
         assert!(trash.is_dir() && std::fs::read_dir(&trash).unwrap().count() == 0);
     }
@@ -1489,6 +1727,32 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_with_a_volume_mounted_in_it_isnt_deleted() {
+        let mounts: Vec<PathBuf> = [
+            "/",
+            "/System/Volumes/Data",
+            "/Volumes/USB",
+            "/Users/me/devel/app/build/share",
+            "/System/Volumes/Data/Users/me/devel/web/dist/image",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let inside = |d: &str| mounted_in(Path::new(d), &mounts).map(Path::to_path_buf);
+        assert_eq!(
+            inside("/Users/me/devel/app/build"),
+            Some(PathBuf::from("/Users/me/devel/app/build/share"))
+        );
+        // Mounted under the Data volume's own path.
+        assert!(inside("/Users/me/devel/web/dist").is_some());
+        // Nothing mounted in it; a volume mounted on it is "on another
+        // volume", said apart.
+        assert_eq!(inside("/Users/me/devel/app/target"), None);
+        assert_eq!(inside("/Users/me/devel/app/build/share"), None);
+        assert_eq!(inside("/Users/me/devel/app/buil"), None);
+    }
+
+    #[test]
     fn only_time_machines_own_snapshots_still_there_are_deleted() {
         let vol = Path::new(crate::map::DATA_ROOT);
         let name = Path::new("com.apple.TimeMachine.2026-10-18-204720.local");
@@ -1609,7 +1873,82 @@ mod tests {
         std::os::unix::fs::symlink(at("Documents"), &linked).unwrap();
         let err = plan(&linked, h, &none, &[], &[]).unwrap_err();
         assert!(err.contains("isn't a folder"), "{err}");
+        // Nor with a `/` or `/.` after it, which would follow it.
+        for end in ["/", "/."] {
+            let follows = PathBuf::from(format!("{}{end}", linked.display()));
+            let err = plan(&follows, h, &none, &[], &[]).unwrap_err();
+            assert!(err.contains("full path"), "{end}: {err}");
+        }
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn a_helper_is_an_apps_only_when_the_name_says_which() {
+        use mdif_macos::proc::App;
+        let app = |pid, name: &str| App {
+            pid,
+            name: name.into(),
+            bundle: format!("/Applications/{name}.app").into(),
+        };
+        // Two of Safari's: Safari.
+        let two = vec![Some(app(10, "Safari")), Some(app(10, "Safari"))];
+        assert_eq!(one_app(two).map(|a| a.name), Some("Safari".into()));
+        // Safari's quiet one and Mail's churning one: which is meant can't
+        // be told from the name, so neither is restarted.
+        assert_eq!(
+            one_app(vec![Some(app(10, "Safari")), Some(app(20, "Mail"))]),
+            None
+        );
+        // One isn't a helper at all.
+        assert_eq!(one_app(vec![Some(app(10, "Safari")), None]), None);
+        assert_eq!(one_app(vec![]), None);
+    }
+
+    #[test]
+    fn a_tools_cache_keeps_what_isnt_cache_and_waits_for_its_vendors_apps() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        // What its tool doesn't download again by itself is said, not ticked.
+        assert!(not_refilled("huggingface").is_some());
+        assert!(not_refilled("ms-playwright").is_some());
+        for model_cache in ["Cypress", "llama.cpp", "torch", "whisper"] {
+            assert!(not_refilled(model_cache).is_some(), "{model_cache}");
+        }
+        assert_eq!(not_refilled("com.example.chat"), None);
+
+        // Hugging Face's sign-in and settings stay; its models go.
+        let hf = h.join(".cache/huggingface");
+        std::fs::create_dir_all(hf.join("hub/models--x")).unwrap();
+        std::fs::create_dir_all(hf.join("accelerate")).unwrap();
+        std::fs::write(hf.join("token"), "hf_x").unwrap();
+        std::fs::write(hf.join("accelerate/default_config.yaml"), "x").unwrap();
+        empty(&hf, not_cache("huggingface")).unwrap();
+        assert!(hf.join("token").is_file());
+        assert!(hf.join("accelerate/default_config.yaml").is_file());
+        assert!(!hf.join("hub").exists());
+
+        // An IDE's local history of your edits stays; its caches go.
+        let jb = h.join("Library/Caches/JetBrains/IntelliJIdea2026.2");
+        for d in ["LocalHistory", "caches", "index"] {
+            std::fs::create_dir_all(jb.join(d)).unwrap();
+            std::fs::write(jb.join(d).join("f"), "x").unwrap();
+        }
+        empty(&h.join("Library/Caches/JetBrains"), not_cache("JetBrains")).unwrap();
+        assert!(jb.join("LocalHistory/f").is_file());
+        assert!(!jb.join("caches").exists());
+        assert!(!jb.join("index").exists());
+
+        // Named for a vendor: any of its apps open counts.
+        assert_eq!(app_of("JetBrains"), "com.jetbrains.");
+        assert_eq!(app_of("com.example.chat"), "com.example.chat");
+        let list = " 1) \"loginwindow\" ASN:0x0-0x2d02d:\n    \
+                    bundleID=\"com.apple.loginwindow\"\n 2) \"IntelliJ IDEA\" \
+                    ASN:0x0-0x5f05f:\n    bundleID=\"com.jetbrains.intellij\"\n";
+        assert_eq!(
+            app_in_list(list, "com.jetbrains.").as_deref(),
+            Some("IntelliJ IDEA")
+        );
+        assert_eq!(app_in_list(list, "com.google."), None);
     }
 
     #[test]
@@ -1712,6 +2051,29 @@ mod tests {
     }
 
     #[test]
+    fn build_output_a_program_runs_from_stays() {
+        let home = tempfile::tempdir().unwrap();
+        // As the kernel names the program: /private/var, not /var.
+        let h = &home.path().canonicalize().unwrap();
+        let target = h.join("devel/tool/target");
+        std::fs::create_dir_all(target.join("release")).unwrap();
+        std::fs::write(h.join("devel/tool/Cargo.toml"), "").unwrap();
+        let tool = target.join("release/tool");
+        std::fs::copy("/bin/sleep", &tool).unwrap();
+        let mut running = std::process::Command::new(&tool).arg("30").spawn().unwrap();
+        let step = plan(&target, h, &Keep::default(), &[], &[]).unwrap();
+        assert!(matches!(step, Step::Delete(_)));
+        // `spawn` returns once the program has started, its path known.
+        let why = run(&step, h).unwrap_err();
+        assert!(why.contains("runs from"), "{why}");
+        assert!(tool.is_file());
+        running.kill().unwrap();
+        running.wait().unwrap();
+        assert_eq!(run(&step, h).unwrap().how, "deleted");
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn build_output_is_deleted_and_nothing_that_only_looks_like_it() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
@@ -1744,6 +2106,24 @@ mod tests {
         let modules = project("devel/web", "package.json", "node_modules");
         assert!(refused(&modules, &none).contains("only cleans what it suggests"));
         assert!(refused(&h.join("devel/app"), &none).contains("only cleans what it suggests"));
+
+        // Named like build output but not in a project in a code folder:
+        // the home folder's own, or a code folder's.
+        let home_target = project("", "Cargo.toml", "target");
+        assert!(refused(&home_target, &none).contains("isn't in a project"));
+        let root_target = project("devel", "Cargo.toml", "target");
+        assert!(refused(&root_target, &none).contains("isn't in a project"));
+        let mine = project("", "package.json", "build");
+        assert!(refused(&mine, &none).contains("only cleans what it suggests"));
+        assert!(!in_a_project(&h.join("Documents/app/target"), h));
+        assert!(in_a_project(&target, h));
+        // A `build` or a `dist` beside `package.json` with no repository to
+        // say it's ignored: electron-builder's icons, a package's own files.
+        let electron = project("devel/desktop", "package.json", "build");
+        assert!(refused(&electron, &none).contains("only cleans what it suggests"));
+        let published = project("devel/lib", "package.json", "dist");
+        assert!(refused(&published, &none).contains("only cleans what it suggests"));
+        assert!(electron.is_dir() && published.is_dir() && home_target.is_dir());
 
         // What you keep, in it or around it.
         let keep = Keep::parse("~/devel/app/target/debug\n", h);

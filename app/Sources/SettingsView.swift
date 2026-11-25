@@ -238,7 +238,8 @@ struct SettingsView: View {
     private func summary(_ p: SettingsPage) -> String {
         switch p {
         case .watching:
-            var t = [watcher.isOn ? (Edition.appStore ? "Watching while open" : "Watching in the background") : "Not watching"]
+            var t = [watcher.isOn ? (Edition.appStore ? "Watching while open" : "Watching in the background")
+                     : watcher.hasCommandLineAgent ? "Watching with mdif agent" : "Not watching"]
             if atLogin { t.append("opens at login") }
             if !inDock { t.append("out of the Dock") }
             return t.joined(separator: ", ")
@@ -263,7 +264,7 @@ struct SettingsView: View {
     /// A dot on the row when something there needs doing.
     private func attention(_ p: SettingsPage) -> Bool {
         switch p {
-        case .watching: watcher.problem != nil || loginError != nil || !watcher.isOn
+        case .watching: watcher.problem != nil || loginError != nil || !(watcher.isOn || watcher.hasCommandLineAgent)
         case .notifications: notify && Notifier.authorizationProblem != nil
         case .access: monitor.lacksFullDiskAccess
         default: false

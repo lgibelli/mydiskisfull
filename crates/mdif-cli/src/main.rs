@@ -33,6 +33,11 @@ use mdif_core::scan::Options;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Nobody asked for this run (the app's, when a window comes forward or
+    /// a page opens): without Full Disk Access, what would show a privacy
+    /// prompt is left alone, since nobody is there to answer it
+    #[arg(long, global = true, hide = true)]
+    unattended: bool,
 }
 
 #[derive(Subcommand)]
@@ -408,7 +413,12 @@ fn main() -> Result<()> {
     watch_cmd::mark_started();
     mdif_core::knowledge::init(&knowledge_cmd::dir());
     mdif_core::ask::init(&knowledge_cmd::dir());
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    if cli.unattended {
+        let probes = mdif_macos::sys::access_probes(&watch_cmd::home());
+        mdif_core::privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+    }
+    match cli.cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
         Cmd::Forecast {
             json,

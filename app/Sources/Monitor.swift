@@ -17,7 +17,7 @@ final class Monitor: ObservableObject {
     @Published private(set) var statusError: String?
     /// The free-space series and what grew and wrote in the last day.
     @Published private(set) var detail: ForecastDetail?
-    @Published private(set) var suggestions: [Suggestion]?
+    @Published private(set) var suggestions: [Suggestion]? { didSet { placed = nil } }
     @Published private(set) var tweaks: [TweakInfo]?
     /// What is never suggested for deleting, cleaning or moving.
     @Published private(set) var kept: [Kept]?
@@ -37,7 +37,7 @@ final class Monitor: ObservableObject {
     /// Being switched or run, by id.
     @Published private(set) var tidyBusy: Set<String> = []
     /// Where the space goes, from a whole-disk scan `mdif` caches.
-    @Published private(set) var space: SpaceReport?
+    @Published private(set) var space: SpaceReport? { didSet { placed = nil } }
     @Published private(set) var spaceMeasuring = false
     @Published private(set) var spaceError: String?
     #if !APP_STORE
@@ -220,20 +220,25 @@ final class Monitor: ObservableObject {
         measuring = true
         defer { measuring = false }
         var behind = automatic && suggestions != nil
+        // Nobody asked: no privacy prompt, which nobody would answer. Run
+        // again, it was asked for.
+        var unattended = automatic
         repeat {
             measureAgain = false
             let qos: QualityOfService = behind ? .background : .userInitiated
             let timeout: TimeInterval = behind ? 900 : 120
+            let quiet = unattended ? ["--unattended"] : []
             behind = false
+            unattended = false
             #if APP_STORE
             // Its tweaks are only advice: no need to read other apps' settings.
-            if let sg = try? await Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos) {
+            if let sg = try? await Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos) {
                 suggestions = notKept(sg)
             }
             #else
             let started = Date()
-            async let t = try? Core.json([TweakInfo].self, ["tweaks"], timeout: timeout, qos: qos)
-            async let s = try? Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos)
+            async let t = try? Core.json([TweakInfo].self, ["tweaks"] + quiet, timeout: timeout, qos: qos)
+            async let s = try? Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos)
             let (tw, sg) = await (t, s)
             // Read before a tweak changed, it would put back the old state.
             if let tw, started > tweakChanged {
@@ -256,10 +261,35 @@ final class Monitor: ObservableObject {
     /// and if it's old it's measured again behind it at background priority:
     /// nobody is waiting for that one, so it waits for whatever the Mac is
     /// doing, on the efficiency cores.
+    ///
+    /// Run in a task of its own, which a page that opened it can't cancel:
+    /// leaving the page would stop the measure (Core.run stops a command
+    /// whose task is cancelled), and the next visit start it from nothing.
     func loadSpace(refresh: Bool = false) async {
-        guard !spaceMeasuring, spaceReadable else { return }
+        await Task { await measureSpace(refresh: refresh) }.value
+    }
+
+    private func measureSpace(refresh: Bool) async {
+        guard spaceReadable else { return }
+        // Asked for while one runs (a clean-up patched the kept one): read
+        // again once that one is done, which kept it with the clean-up in.
+        guard !spaceMeasuring else {
+            spaceAgain = true
+            return
+        }
         spaceMeasuring = true
         defer { spaceMeasuring = false }
+        await readSpace(refresh: refresh)
+        while spaceAgain {
+            spaceAgain = false
+            await readSpace(refresh: false)
+        }
+    }
+
+    /// Read again once the measure under way is done.
+    private var spaceAgain = false
+
+    private func readSpace(refresh: Bool) async {
         do {
             if refresh {
                 space = try await Core.json(SpaceReport.self, ["space", "--refresh"], timeout: 900, qos: .userInitiated)
@@ -268,8 +298,16 @@ final class Monitor: ObservableObject {
                 let last = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Int32.max)"],
                                                timeout: 900, qos: .userInitiated)
                 space = last
-                if Int64(Date().timeIntervalSince1970) - last.measured > Int64(Self.spaceMaxAge) {
-                    space = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Self.spaceMaxAge)"],
+                // Measured again behind it: nobody is waiting, nor there to
+                // answer a privacy prompt.
+                // Or partly: a clean-up in a folder too big to measure again
+                // in a moment.
+                if last.partial == true {
+                    space = try await Core.json(SpaceReport.self, ["space", "--refresh", "--unattended"],
+                                                timeout: 3600, qos: .background)
+                } else if Int64(Date().timeIntervalSince1970) - last.measured > Int64(Self.spaceMaxAge) {
+                    space = try await Core.json(SpaceReport.self,
+                                                ["space", "--max-age", "\(Self.spaceMaxAge)", "--unattended"],
                                                 timeout: 3600, qos: .background)
                 }
             }
@@ -294,11 +332,19 @@ final class Monitor: ObservableObject {
 
     /// `quick`: the backups and the snapshots only, in a second; the
     /// folders keep what the last full look found.
+    /// In a task of its own, as `loadSpace` is: leaving the page doesn't
+    /// stop the full look.
     func loadTimeMachine(quick: Bool = false) async {
+        await Task { await lookAtTimeMachine(quick: quick) }.value
+    }
+
+    private func lookAtTimeMachine(quick: Bool) async {
         guard !timeMachineLoading else { return }
         timeMachineLoading = true
         defer { timeMachineLoading = false }
-        let args = ["timemachine"] + (quick ? ["--quick"] : [])
+        // The quick look runs when a window comes forward: nobody there to
+        // answer a privacy prompt.
+        let args = ["timemachine"] + (quick ? ["--quick", "--unattended"] : [])
         guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
         if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
             timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
@@ -417,8 +463,20 @@ final class Monitor: ObservableObject {
     }
 
     /// Each suggestion goes with the first item it's about (its folder, or
-    /// one in it or around it), biggest kinds first, and shows there.
+    /// one in it or around it), biggest kinds first, and shows there. Worked
+    /// out once for each `space` and `suggestions`, not for every row on
+    /// every redraw.
     var placements: [String: Suggestion] {
+        if let placed { return placed }
+        let out = place()
+        placed = out
+        return out
+    }
+
+    /// `placements` as last worked out; `nil` once either changes.
+    private var placed: [String: Suggestion]?
+
+    private func place() -> [String: Suggestion] {
         guard let r = space, let list = suggestions else { return [:] }
         var out: [String: Suggestion] = [:]
         var placed = Set<String>()
@@ -490,6 +548,9 @@ final class Monitor: ObservableObject {
             } catch {
                 keptNow.removeAll { paths.contains($0) }
                 log.error("keep: \(error.localizedDescription, privacy: .public)")
+                // Said, not only logged: it shows again, and may be ticked
+                // in Clean Up, as it isn't kept.
+                Notices.shared.post(ok: false, "Not kept", error.localizedDescription)
             }
             measuredAt = nil
             await measure()
@@ -524,7 +585,9 @@ final class Monitor: ObservableObject {
     var watcherProblem: String? {
         if !watcher.isOn && !watcher.hasCommandLineAgent { return "The watcher is off" }
         let settled = Date().timeIntervalSince(wokeAt) > 2 * Double(max(status?.history.intervalSecs ?? 300, 60))
-        if let s = status, watcher.isOn, settled, s.history.samples > 0, s.watcherStale() {
+        // The command-line one may have stopped too (turned off in Login
+        // Items, or its mdif gone): it says so by not sampling.
+        if let s = status, watcher.isOn || watcher.hasCommandLineAgent, settled, s.history.samples > 0, s.watcherStale() {
             return "The watcher hasn't sampled for \(Format.duration(Int64(Date().timeIntervalSince1970) - (s.history.last ?? 0)))"
         }
         return nil

@@ -46,10 +46,9 @@ pub fn may_open(path: &Path) -> bool {
 /// network volumes prompt; an internal one under /Volumes can't be told
 /// apart by its path).
 pub fn prompts(path: &Path) -> bool {
+    // What the Data volume's prefix is taken off leaves the same names,
+    // without the root: told apart by names.
     let path = path.strip_prefix(DATA_ROOT).map_or(path, |rest| rest);
-    if path.starts_with("/Volumes") && path.components().count() > 2 {
-        return true;
-    }
     let names: Vec<&OsStr> = path
         .components()
         .filter_map(|c| match c {
@@ -57,6 +56,12 @@ pub fn prompts(path: &Path) -> bool {
             _ => None,
         })
         .collect();
+    // Another disk: removable and network volumes prompt.
+    if let [volumes, _, ..] = names.as_slice()
+        && *volumes == "Volumes"
+    {
+        return true;
+    }
     // /Users/<name>/...
     let [users, _, rest @ ..] = names.as_slice() else {
         return false;
@@ -101,6 +106,7 @@ mod tests {
             "/Users/me/Library/Group Containers/group.x/Library",
             "/System/Volumes/Data/Users/me/Documents/a",
             "/Volumes/Backup/Users",
+            "/System/Volumes/Data/Volumes/Backup",
         ] {
             assert!(prompts(Path::new(p)), "{p}");
         }

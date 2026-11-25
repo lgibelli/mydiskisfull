@@ -102,7 +102,7 @@ pub fn about(paths: &[PathBuf], json_out: bool) -> Result<()> {
         return Ok(());
     }
     for a in &found {
-        let shown = a.path.replacen(&*home.to_string_lossy(), "~", 1);
+        let shown = crate::watch_cmd::tilde(&a.path);
         match &a.name {
             Some(n) => println!("{}: {}", printable(n), printable(&shown)),
             None => println!("{}", printable(&shown)),
