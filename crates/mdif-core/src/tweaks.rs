@@ -439,9 +439,10 @@ impl Tweak {
     }
 
     /// Whether what `record` set still holds, judged by the settings it
-    /// recorded rather than by where they would be looked for now: the app
-    /// runs without the shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME`, so
-    /// [`Tweak::status`] could look in the wrong place and see it undone.
+    /// recorded rather than by where they would be looked for now: your
+    /// shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME` may have changed since,
+    /// or be out of reach ([`crate::shell_env`]), so [`Tweak::status`] could
+    /// look in the wrong place and see it undone.
     pub fn record_status(&self, record: &TweakRecord) -> Result<Status> {
         self.records_status(std::slice::from_ref(record))
     }
@@ -591,9 +592,8 @@ impl Tweak {
             .collect::<Vec<_>>();
         let restart_pending = self.after == After::Restart
             && crate::os::sys::boot_time().is_ok_and(|b| b < latest.applied);
-        // By the settings it recorded, not where this process's environment
-        // would look (the app's has no XDG_CONFIG_HOME): unless its tool is
-        // gone.
+        // By the settings it recorded, not where they'd be looked for now
+        // (see `record_status`): unless its tool is gone.
         let status = match self.status(home)? {
             gone @ Status::Absent(_) => gone,
             _ => self.records_status(&records)?,
@@ -965,16 +965,17 @@ fn recycle_bin(home: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Gradle's home, as your shell tells Gradle ([`crate::shell_env`]: the app
+/// and the watcher aren't started from one).
 fn gradle_home(home: &Path) -> PathBuf {
-    std::env::var_os("GRADLE_USER_HOME")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| home.join(".gradle"), PathBuf::from)
+    crate::shell_env::var("GRADLE_USER_HOME").map_or_else(|| home.join(".gradle"), PathBuf::from)
 }
 
-/// Homebrew's user `brew.env`, found the way `brew` itself finds it.
+/// Homebrew's user `brew.env`, found the way `brew` itself finds it, with
+/// your shell's variables.
 #[cfg(not(windows))]
 fn brew_env(home: &Path) -> PathBuf {
-    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
+    let var = crate::shell_env::var;
     match var("XDG_CONFIG_HOME").or_else(|| var("HOMEBREW_XDG_CONFIG_HOME")) {
         Some(x) => PathBuf::from(x).join("homebrew/brew.env"),
         None => home.join(".homebrew/brew.env"),

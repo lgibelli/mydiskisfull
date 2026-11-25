@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.8] - 2026-11-25
+
+### Added
+- When the daily tidy-up keeps folders out of Time Machine by itself, a notification says which
+  ones (up to three by name), and opens the Time Machine page, where one is backed up again.
+
+### Fixed
+- Where a variable set in `.zshrc` or `.bash_profile` says a tool keeps its files elsewhere
+  (`GRADLE_USER_HOME`, `ANDROID_HOME` or `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `XDG_CONFIG_HOME`
+  for Homebrew's `brew.env`), the app and the watcher looked, and wrote, where the tool never
+  reads: started by macOS, not from a shell, they don't see it. They now ask your login shell
+  once, as an interactive one, with nothing to read and at most 5 seconds to answer;
+  `MDIF_RESOLVING_ENVIRONMENT=1` is set, so a startup file can skip slow work. (The watcher asks
+  only with Full Disk Access: a startup file may open a folder that asks for permission.)
+- Deleting build output with a git repository somewhere inside it (a dependency checked out
+  in `node_modules`, a clone a script made in `dist`) lost what was only in it. It's deleted only
+  when the repository holds nothing its remotes don't: no commit of its own, no change, stash or
+  file git doesn't know, and a remote to fetch it from again. Otherwise it's left, and says why.
+- A `dist`, `Pods` or `build` folder git keeps files in (CocoaPods' `Pods` committed, a
+  library's `dist`) was labelled build output in what the disk is made of. It's part of the
+  project.
+- `mdif map` on a Mac showed "not measured" below zero when it counted more than the disk uses
+  (clones whose shared blocks couldn't be told apart, files that grew while it ran). It says how
+  much was counted twice, as on Windows.
+- What each folder grows: a folder moved or renamed counted as freed where it was and as new
+  where it went when its new place was listed first, or when where it went couldn't be asked (as
+  when nothing may show a privacy prompt). It's found by its number at its new place now. A
+  folder moved out of another that was deleted after no longer took the deleted one's size
+  along, and files moved into a folder seen for the first time count there (a Mac records when
+  each was put there; a moved file keeps when it was made).
+- After FSEvents dropped events, the folders it asked to have listed again were listed in one
+  period, up to 20,000 of them, whatever it cost. A rescan now stops when the period's share is
+  spent and goes on in the next, counting what was made since it began.
+
 ## [0.1.7] - 2026-11-25
 
 ### Fixed
@@ -792,6 +826,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.8]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.8
 [0.1.7]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.7
 [0.1.6]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.6
 [0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5

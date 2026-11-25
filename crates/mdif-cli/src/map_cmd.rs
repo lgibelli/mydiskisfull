@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use mdif_core::map::{self, DiskMap};
 use mdif_core::scan::Node;
 use mdif_core::text::printable;
-use mdif_core::units::{bytes, signed};
+use mdif_core::units::bytes;
 
 pub fn print_map(m: &DiskMap, depth: usize) {
     let c = &m.container;
@@ -86,18 +86,27 @@ pub fn print_map(m: &DiskMap, depth: usize) {
     }
     if whole_volume {
         let unmeasured = m.unmeasured();
-        if unmeasured < 0 && !mac {
-            // Found more than is in use: what a file under 1 MiB with several
-            // names (Windows keeps thousands, in WinSxS) adds once per name.
+        if unmeasured < 0 {
+            // Found more than is in use: not a remainder below zero, but what
+            // was counted more than once. On Windows, a file under 1 MiB with
+            // several names (thousands, in WinSxS) adds once per name; on a
+            // Mac, clones whose layout couldn't be read, or files that grew
+            // while the scan ran.
             println!(
-                "  counted twice  {:>9}   at least: small files with several names (hard links, as in \
-                 Windows' component store) are counted once per name",
-                bytes(unmeasured.unsigned_abs())
+                "  counted twice  {:>9}   at least: {}",
+                bytes(unmeasured.unsigned_abs()),
+                if mac {
+                    "possibly cloned files whose shared blocks couldn't be told apart, or files \
+                     written to while the scan ran"
+                } else {
+                    "small files with several names (hard links, as in Windows' component store) \
+                     are counted once per name"
+                }
             );
         } else {
             println!(
                 "  not measured   {:>9}   {}",
-                signed(unmeasured),
+                bytes(unmeasured.unsigned_abs()),
                 if mac {
                     "root-only files, file-system metadata, snapshot-only blocks"
                 } else {

@@ -51,26 +51,19 @@ pub struct Avd {
     pub last_used: Option<i64>,
 }
 
-/// Where the emulators are.
+/// Where the emulators are, as your shell tells the Android tools
+/// ([`crate::shell_env`]).
 pub fn avd_home(home: &Path) -> PathBuf {
-    let var = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
+    let var = |k: &str| crate::shell_env::var(k).map(PathBuf::from);
     var("ANDROID_AVD_HOME")
         .or_else(|| var("ANDROID_USER_HOME").map(|d| d.join("avd")))
         .or_else(|| var("ANDROID_EMULATOR_HOME").map(|d| d.join("avd")))
         .unwrap_or_else(|| home.join(AVDS))
 }
 
-/// Where the SDK is.
+/// Where the SDK is, as your shell tells the Android tools.
 pub fn sdk(home: &Path) -> PathBuf {
-    let var = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
+    let var = |k: &str| crate::shell_env::var(k).map(PathBuf::from);
     var("ANDROID_HOME")
         .or_else(|| var("ANDROID_SDK_ROOT"))
         .unwrap_or_else(|| home.join(SDK))

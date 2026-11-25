@@ -39,7 +39,11 @@
         "freed": 3200000000,
         "done": 2,
         "failed": 0,
-        "note": "Deleted the old incremental caches of 2 Rust projects"
+        "note": "Deleted the old incremental caches of 2 Rust projects",
+        "paths": [
+          "/Users/me/devel/app/target/debug/incremental",
+          "/Users/me/devel/tool/target/release/incremental"
+        ]
       }
     },
     {
@@ -54,7 +58,8 @@
         "freed": 0,
         "done": 0,
         "failed": 1,
-        "note": null
+        "note": null,
+        "paths": []
       }
     },
     {
@@ -78,7 +83,13 @@
         "freed": 0,
         "done": 4,
         "failed": 0,
-        "note": "Kept 4 folders out of Time Machine"
+        "note": "Kept 4 folders out of Time Machine",
+        "paths": [
+          "/Users/me/devel/app/target",
+          "/Users/me/devel/app/node_modules",
+          "/Users/me/devel/site/.next",
+          "/Users/me/.cargo/registry/cache"
+        ]
       }
     }
   ]

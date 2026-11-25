@@ -231,7 +231,15 @@ pub struct Last {
     pub failed: usize,
     /// "Deleted the iOS 26.0 Simulator", "Emptied 4 caches", "Nothing to tidy".
     pub note: Option<String>,
+    /// What it was done to, the first [`PATHS_KEPT`]: folders, and Docker's
+    /// containers and images by name. The app names the folders kept out of
+    /// Time Machine by themselves. (Older records have none.)
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
 }
+
+/// The most of a run's [`Done`] paths its record keeps.
+pub const PATHS_KEPT: usize = 20;
 
 /// A tidy-up as `mdif tidy --json` lists it.
 #[derive(Debug, Clone, Serialize)]
@@ -351,6 +359,12 @@ impl Outcome {
             done: self.done.len(),
             failed: self.failed.len(),
             note: self.note.clone(),
+            paths: self
+                .done
+                .iter()
+                .take(PATHS_KEPT)
+                .map(|d| d.path.clone())
+                .collect(),
         }
     }
 
@@ -1762,6 +1776,13 @@ mod tests {
         let last = o.last(NOW);
         assert_eq!((last.done, last.failed), (2, 0));
         assert_eq!(last.freed, o.freed());
+        // What it was done to, for the app to name.
+        let done: Vec<&Path> = o.done.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(
+            last.paths.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            done
+        );
+        assert!(done.contains(&old.as_path()), "{done:?}");
 
         let again = run(Id::Incremental, h, &keep, NOW, false);
         assert!(again.done.is_empty());
@@ -2032,6 +2053,7 @@ mod tests {
             done: 2,
             failed: 1,
             note: Some("Emptied 2 caches; 1 more couldn't be emptied".into()),
+            paths: vec![PathBuf::from("/Users/me/Library/Caches/a")],
         };
         record(&store, Id::Caches, &last).unwrap();
         assert_eq!(super::last(&store, Id::Caches).unwrap(), Some(last));

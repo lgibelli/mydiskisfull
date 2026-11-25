@@ -73,6 +73,9 @@ pub struct Entry {
     pub crtime: i64,
     pub mtime: i64,
     pub atime: i64,
+    /// When it was put in its folder: 0, Windows doesn't record it (a file
+    /// moved in is told only by its creation time, which it keeps).
+    pub added: i64,
     /// `FILE_ATTRIBUTE_*`.
     pub flags: u32,
     /// The file's number on its volume (0 until it is read).
@@ -338,6 +341,7 @@ fn entry(dir: &Path, dev: i32, name: OsString, e: &FILE_ID_EXTD_DIR_INFO) -> Ent
         crtime: unix_seconds(e.CreationTime),
         mtime: unix_seconds(e.LastWriteTime),
         atime: unix_seconds(e.LastAccessTime),
+        added: 0,
         flags: attributes,
         inode,
         nlink,
@@ -556,6 +560,7 @@ mod tests {
             crtime: 0,
             mtime: 0,
             atime: 0,
+            added: 0,
             flags: 0,
             inode: 0,
             nlink: 1,
