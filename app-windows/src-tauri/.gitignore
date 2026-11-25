@@ -1,0 +1,4 @@
+# Made by tauri-build on every build (the capabilities schema).
+/gen/
+# mdif.exe and mdif-watch.exe for the installer (build.sh copies them here).
+/binaries/
