@@ -519,10 +519,13 @@ struct BinSettings {
 
 /// The most a file may be and still go to the bin set as `s`, on a volume
 /// where the user may have `quota` bytes; `None` when nothing goes there.
-/// With nothing set, Windows' default: a tenth of the first 40 GB of the
-/// quota and a twentieth of the rest. With more than one set, the least.
+/// With nothing set, Windows' default: a tenth of the first 40 GiB of the
+/// quota and a twentieth of the rest, in whole MiB (what it writes as
+/// `MaxCapacity` once the bin is used: 4607 MB on CI's 50 GB volume, which
+/// `recycle_takes_what_a_never_set_bin_does` checks). With more than one
+/// set, the least.
 fn bin_takes(s: &BinSettings, quota: u64) -> Option<u64> {
-    const FIRST: u64 = 40_000_000_000;
+    const FIRST: u64 = 40 << 30;
     if s.deletes_at_once {
         return None;
     }
@@ -531,7 +534,7 @@ fn bin_takes(s: &BinSettings, quota: u64) -> Option<u64> {
         s.policy_percent
             .map(|p| quota / 100 * u64::from(p.min(100))),
     ];
-    let default = quota.min(FIRST) / 10 + quota.saturating_sub(FIRST) / 20;
+    let default = (quota.min(FIRST) / 10 + quota.saturating_sub(FIRST) / 20) >> 20 << 20;
     Some(set.into_iter().flatten().min().unwrap_or(default))
 }
 
@@ -898,11 +901,15 @@ mod recycle_tests {
     #[test]
     fn the_bin_takes_what_it_is_set_to_or_windows_default() {
         const GB: u64 = 1_000_000_000;
+        const GIB: u64 = 1 << 30;
         let none = BinSettings::default();
-        // A tenth of the first 40 GB, a twentieth of the rest.
-        assert_eq!(bin_takes(&none, 30 * GB), Some(3 * GB));
-        assert_eq!(bin_takes(&none, 500 * GB), Some(4 * GB + 23 * GB));
+        // A tenth of the first 40 GiB, a twentieth of the rest, in whole MiB.
+        assert_eq!(bin_takes(&none, 30 * GIB), Some(3 * GIB));
+        assert_eq!(bin_takes(&none, 500 * GIB), Some(4 * GIB + 23 * GIB));
         assert_eq!(bin_takes(&none, 0), Some(0));
+        assert_eq!(bin_takes(&none, (1 << 20) * 10 - 1), Some(0), "under a MiB");
+        // CI's 50 GB volume, whose bin Windows then set to 4607 MB.
+        assert_eq!(bin_takes(&none, 53_684_989_952), Some(4607 << 20));
         // Its Properties, in MiB.
         let set = BinSettings {
             max_mb: Some(18_685),
@@ -1164,9 +1171,17 @@ mod recycle_tests {
             let mb = user_number(&key, "MaxCapacity").unwrap();
             println!("MaxCapacity {when}: {mb:?} MB");
             if let Some(mb) = mb {
+                let windows = u64::from(mb) << 20;
+                // Never more than Windows takes: what's bigger than its bin
+                // is deleted for good.
                 assert!(
-                    (u64::from(mb) + 1) << 20 >= default,
+                    windows + (1 << 20) >= default,
                     "Windows' bin takes {mb} MB, less than the default's {default} bytes"
+                );
+                // And not much less, or files the bin would take are refused.
+                assert!(
+                    default + windows / 100 >= windows,
+                    "Windows' bin takes {mb} MB, over a hundredth more than the default's {default} bytes"
                 );
             }
         };
@@ -1250,7 +1265,7 @@ mod recycle_tests {
     /// A VHDX formatted NTFS with a drive letter, a fixed disk with a
     /// Recycle Bin of its own; detached on drop. 50 GB, expandable (only
     /// what's written takes space), so that a bin's default counts both
-    /// the tenth of the first 40 GB and the twentieth of the rest.
+    /// the tenth of the first 40 GiB and the twentieth of the rest.
     struct Lettered {
         /// The disk's file and DiskPart's scripts.
         admin: AdminOnly,
