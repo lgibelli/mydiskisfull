@@ -2076,17 +2076,19 @@ mod tests {
         let up = tr.apply(std::slice::from_ref(&rescan), 0, 1);
         // `p` (four entries) and one folder, then the period's entries are
         // spent: the other three wait, which is no gap.
-        assert_eq!((up.listed, up.deferred, up.gaps), (2, 3, 0), "{up:?}");
+        assert_eq!((up.listed, up.gaps, tr.rescans.len()), (2, 0, 3), "{up:?}");
         let mut grew = growth(&up, &p);
+        // Two more of the rescan's folders, before anything else. (On
+        // Windows the folders seen first are listed again too, after.)
         let up = tr.apply(&[], i64::MAX, 2);
-        assert_eq!((up.listed, up.deferred, up.gaps), (2, 1, 0), "{up:?}");
+        assert_eq!((up.gaps, tr.rescans.len()), (0, 1), "{up:?}");
+        assert!(up.listed >= 2, "{up:?}");
         grew += growth(&up, &p);
         // The files made before the next period count, as they would have.
         let up = tr.apply(&[], i64::MAX, 3);
-        assert_eq!((up.listed, up.deferred, up.gaps), (1, 0, 0), "{up:?}");
+        assert_eq!((up.gaps, tr.rescans.len()), (0, 0), "{up:?}");
         grew += growth(&up, &p);
         assert!(grew >= 12 * MB as i64, "{grew}");
-        assert!(tr.rescans.is_empty());
     }
 
     #[test]
