@@ -24,15 +24,23 @@ fetch_sparkle() {
         local tarball="$ROOT/build/vendor/Sparkle-$SPARKLE_VERSION.tar.xz"
         mkdir -p "$SPARKLE_VENDOR"
         if [ ! -f "$tarball" ]; then
-            curl -sSL --fail -o "$tarball" \
+            # Under another name until it's whole: an interrupted download
+            # isn't taken for the tarball by the next build.
+            rm -f "$tarball.part"
+            curl -sSL --fail -o "$tarball.part" \
                 "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" \
                 || die "could not download Sparkle $SPARKLE_VERSION"
+            mv "$tarball.part" "$tarball"
         fi
         local got
         got=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
-        [ "$got" = "$SPARKLE_SHA256" ] || die "Sparkle $SPARKLE_VERSION tarball has the wrong hash.
+        if [ "$got" != "$SPARKLE_SHA256" ]; then
+            # Not kept: the next build downloads it again.
+            rm -f "$tarball"
+            die "Sparkle $SPARKLE_VERSION tarball has the wrong hash (deleted).
        expected $SPARKLE_SHA256
        got      $got"
+        fi
         # Only what ships and what signs. The distribution also has a test app,
         # which LaunchServices would register from build/.
         tar -xf "$tarball" -C "$SPARKLE_VENDOR" \

@@ -179,8 +179,11 @@ say "Signing as: $IDENTITY"
 STAMP=(--timestamp)
 [ "$IDENTITY" = "-" ] && STAMP=(--timestamp=none)
 sign() { codesign --force --options runtime "${STAMP[@]}" --sign "$IDENTITY" "$@"; }
-ENTITLEMENTS=()
-MDIF_ENTITLEMENTS=()
+# The full edition asks Finder to move what's in /Users/Shared to the Trash
+# (an Apple event, which you allow once): under the hardened runtime that
+# needs this entitlement, or macOS refuses the event without asking.
+ENTITLEMENTS=(--entitlements app/Resources/Full.entitlements)
+MDIF_ENTITLEMENTS=(--entitlements app/Resources/Full.entitlements)
 if [ "$EDITION" != full ]; then
     # The App Sandbox, and read access to what someone picks in an Open
     # dialog, kept as a bookmark: the disk, so it can tell what fills it.
@@ -204,6 +207,8 @@ if [ "$EDITION" = full ]; then
 <plist version="1.0">
 <dict>
     <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
     <true/>
 </dict>
 </plist>
