@@ -103,8 +103,9 @@ never the user's real settings.
   system (`tidy::portable_tests`) and a CI step on the runner (not run yet: needs a push).
 - **`tweaks`**: written. `Setting::Registry` (numbers under `HKCU`, through
   `mdif-windows/src/registry.rs`, which `startup` uses too); the Windows catalogue is the Recycle
-  Bin's clean-up by Storage Sense plus Gradle and Claude Code. Still open: whether Storage Sense
-  then empties the bin, seen on a PC; more tweaks (Chrome/Edge model policies need
+  Bin's clean-up by Storage Sense plus Gradle and Claude Code. Storage Sense, the tweak applied,
+  empties a file binned 40 days ago and keeps one binned today (`windows-live.yml`, Windows 11
+  runner, run from Settings: a runner can't sign out). Still open: more tweaks (Chrome/Edge model policies need
   `HKCU\Software\Policies`, which a user can't write; WSL's sparse VHD; Recall).
 - **`suggest`**: **runs** (`from_tweaks`, `from_system` and `from_leftovers` are the Mac's alone;
   `suggest::windows_tests`, and a CI step that checks it says nothing of a Mac's). Still open:
@@ -222,9 +223,12 @@ on the author's Mac (login keychain, beside Sparkle's), the public half in `taur
 the first release. 0.1.6 (2026-11-25) is the first release with it: the key is in the `release`
 environment, `release.yml`'s `windows` job built, signed, attested and uploaded both installers
 and `latest.json`, and the x64 one installed on a Windows 11 PC, its watcher sampling at sign-in.
-The site's page has a Windows download. Still open: an update installed by the app on a real PC
-(it needs a release after 0.1.6), a click-through of the app on that PC, and Storage Sense
-emptying the bin (only where the user turns it on). A Microsoft Store (MSIX) edition is out of
+The site's page has a Windows download. `windows-live.yml` (after each release) updates the
+release before to the latest through the app's own Check Now and Install and Restart, on x64 and
+ARM64, after a look at each page (none says it couldn't; screenshots kept): 0.1.7 → 0.1.8 passed.
+Install and Restart is refused while the first measurement of the disk runs, minutes on a runner.
+Still open: a click-through by a person on a real PC (the runners show what's drawn, not how it
+feels). A Microsoft Store (MSIX) edition is out of
 scope for the first release.
 
 ## How to work on it
