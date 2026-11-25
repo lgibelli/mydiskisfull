@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "mdif-windows"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "chrono",
  "windows-sys 0.61.2",
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "mydiskisfull-app"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64 0.23.1",
  "mdif-windows",

@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.7] - 2026-11-25
+
+### Fixed
+- `mdif tweaks` lines up each tweak's title past its id however long the id is: on Windows,
+  `recycle-bin-auto-empty` ran into its title.
+
 ## [0.1.6] - 2026-11-25
 
 ### Added
@@ -786,6 +792,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.7]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.7
 [0.1.6]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.6
 [0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5
 [0.1.4]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.4
