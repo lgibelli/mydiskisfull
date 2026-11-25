@@ -31,8 +31,11 @@ All notable changes to this project are documented here. The format is based on
   deleted.
 - The backups tidy-up kept your own folders out of Time Machine when they were named like a
   cache. Only a tool's folders (a dot-folder in the home folder, or one with a cache's
-  `CACHEDIR.TAG`) are kept out now, never one that holds something you keep; and a folder kept
-  out can be let back in once it no longer looks like one.
+  `CACHEDIR.TAG`) are kept out now, never one that holds something you keep.
+- A folder kept out of Time Machine, then renamed or moved to keep it (a `dist` renamed
+  `release-1.0`), took its exclusion along, vanished from the Time Machine page and couldn't be
+  let back in. MyDiskIsFull notes what it keeps out: the page still lists such a folder where it
+  is now, with Back Up, and `mdif timemachine include` lets it back in.
 - The simulators tidy-up erased every unavailable simulator; only those whose runtime is gone
   are now, and none when simctl lists none.
 - Switching pages stopped a measurement under way (Storage, Time Machine): it finishes now.
@@ -54,7 +57,9 @@ All notable changes to this project are documented here. The format is based on
   that grew. Two downloads in a day no longer raise it.
 - The growth incident and the History chart read free space without what macOS can purge,
   while the forecast counted it: all three count it now.
-- "Keeps rewriting the disk" was raised while free space went up, by a clean-up for example.
+- "Keeps rewriting the disk" could be said of something that kept what it wrote, when a
+  clean-up in the same hour gave the space back: what the disk kept is the free space it lost,
+  sample to sample, now.
 - A file growing out of control directly in a folder like `~/Library` never counted as that
   folder's growth.
 - `~/Code` and `~/code` (and `~/Projects`, `~/projects`) were walked twice, so each finished

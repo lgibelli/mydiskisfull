@@ -101,7 +101,7 @@ nothing to warn about it.
   each kind notifies are the user's to set (`mdif alerts`, kept in the history's `meta`); the
   clauses below are not. Like Idlewild, each episode alerts once. A horizon warns when the disk is
   more likely than not full within it, with a day and a half of history at least, and still so
-  with any one day of the history left out (a jackknife, days counted back from now and from half a day before): one heavy day never raises a warning.
+  with any one day of the history left out (a jackknife over 36-hour spans, one every 12 hours back from now, so any 24 hours are whole in one): one heavy day never raises a warning, whatever hour it started.
 
 ### 2. Runaway fillers
 Two kinds, each with its own clauses.

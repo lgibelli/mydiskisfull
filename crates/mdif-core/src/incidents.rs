@@ -17,8 +17,9 @@
 //! **Churn**: a process writes far more than the disk keeps, like a stuck
 //! sync client rewriting logs. Over the last hour it wrote at least 1 GB,
 //! steadily (in at least 3 of its 4 quarters), while the volume kept less
-//! than 10% of that (and no space came back meanwhile, which would hide
-//! what it kept), and its name is not on the allowlist.
+//! than 10% of that (the free space lost sample to sample: space that came
+//! back meanwhile, a clean-up, doesn't hide what it kept), and its name is
+//! not on the allowlist.
 //!
 //! The sizes (1 GB grown, 1 GB written in an hour) are the defaults of what
 //! the user may set (`mdif alerts`, see [`crate::alerts`]); the clauses that
@@ -315,20 +316,16 @@ pub fn churn(
         .iter()
         .filter(|s| s.ts >= since && s.ts <= now)
         .collect();
-    let consumed = match (in_window.first(), in_window.last()) {
-        (Some(a), Some(b)) => (a.avail as i64 - b.avail as i64).max(0) as u64,
-        _ => return Vec::new(),
-    };
-    // Space that came back meanwhile (the Trash emptied, a clean-up, macOS
-    // purging) would hide what the disk kept of the writes: then what was
-    // kept can't be told, and no one is said to churn.
-    let hidden = (p.max_kept * p.min_written as f64) as u64;
-    if in_window
-        .windows(2)
-        .any(|w| w[1].avail > w[0].avail + hidden)
-    {
+    if in_window.is_empty() {
         return Vec::new();
     }
+    // What the disk kept: free space lost, sample to sample. Space that
+    // came back meanwhile (the Trash emptied, a clean-up, macOS purging)
+    // isn't taken off it, or it would hide a writer that kept what it wrote.
+    let consumed: u64 = in_window
+        .windows(2)
+        .map(|w| w[0].avail.saturating_sub(w[1].avail))
+        .sum();
     let mut out = Vec::new();
     let mut names: Vec<&String> = writes.keys().collect();
     names.sort();
@@ -639,5 +636,22 @@ mod tests {
             at(NOW, 100 * GB),
         ];
         assert!(churn(&writes, &space, NOW, &ChurnParams::default()).is_empty());
+        // A sync stuck rewriting the same 3 GB while the Trash is emptied:
+        // still rewriting, and said once, not closed by the clean-up.
+        let writes = HashMap::from([(
+            "stuck-sync".to_string(),
+            (1..=12)
+                .map(|i| (NOW - HOUR + i * 300, 250_000_000))
+                .collect(),
+        )]);
+        let space = [
+            at(NOW - HOUR, 100 * GB),
+            at(NOW - HOUR / 2, 100 * GB - 50_000_000),
+            at(NOW - HOUR / 2 + 300, 102 * GB),
+            at(NOW, 102 * GB - 50_000_000),
+        ];
+        let found = churn(&writes, &space, NOW, &ChurnParams::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].subject, "stuck-sync");
     }
 }

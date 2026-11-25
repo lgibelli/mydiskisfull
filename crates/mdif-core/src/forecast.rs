@@ -356,14 +356,12 @@ fn simulate(h: &sim::Hourly, room: u64, at: i64, p: &Params) -> Option<Outlook> 
             return full_by;
         }
         // Leave each day out in turn: an alert must not rest on one day.
-        // Days as counted back from now, and from half a day before: a heavy
-        // day that straddles one count's boundary is whole in the other's.
+        // A day and a half at a time, every half day back from now: any 24
+        // hours, wherever they start, are whole in one of them.
         let n = h.x.len();
-        let days = [0, 12].into_iter().flat_map(|shift| {
-            (0..n.div_ceil(24)).filter_map(move |k| {
-                let hi = n.checked_sub(24 * k + shift).filter(|&hi| hi > 0)?;
-                Some(hi.saturating_sub(24)..hi)
-            })
+        let days = (0..n.div_ceil(12)).filter_map(|k| {
+            let hi = n.checked_sub(12 * k).filter(|&hi| hi > 0)?;
+            Some(hi.saturating_sub(36)..hi)
         });
         let mut least = full_by;
         for (k, day) in days.enumerate() {
@@ -435,9 +433,9 @@ pub const ALERT_PROBABILITY: f64 = 0.5;
 /// - with a day and a half of history at least (the simulation needs a day;
 ///   alerts need more than one day to compare), and
 /// - with any one day of the history left out in turn (a jackknife over
-///   days, counted back from now and from half a day before, so anything
-///   heavy for up to 12 hours is left out whole by one of them, every hour
-///   of it): an alert never rests on a single day. An afternoon of builds,
+///   36-hour spans, one every 12 hours back from now, so any 24 hours,
+///   whatever hour they start, are left out whole by one of them): an alert
+///   never rests on a single day. An afternoon of builds,
 ///   or one big download, makes one day heavy; left out, the rest of the
 ///   history doesn't support the alert, so none is raised. A runaway filler
 ///   is an incident instead, and space actually running out is the floor's.
@@ -1250,6 +1248,18 @@ mod tests {
         assert!(f.full_by.unwrap().d14 >= 0.5, "{:?}", f.full_by);
         assert_eq!(f.robust.unwrap().d14, 0.0, "{:?}", f.robust);
         assert_eq!(alert(Some(&f), f.avail, 500_000_000_000), Alert::None);
+        // And a heavy day that started at any hour: whole in one of the
+        // spans left out.
+        for offset in [1, 6, 11, 17] {
+            let pts = hourly(6, 55.0 * GB, |k| {
+                let end = 6 * 24 - offset;
+                let gb = if k > end - 24 && k <= end { 30.0 } else { 1.0 };
+                (gb * GB / 24.0, true)
+            });
+            let f = forecast(&pts, &Params::default()).unwrap();
+            assert_eq!(f.robust.unwrap().d14, 0.0, "{offset}: {:?}", f.robust);
+            assert_eq!(alert(Some(&f), f.avail, 500_000_000_000), Alert::None);
+        }
         // The same fill every day does.
         let pts = hourly(6, 230.0 * GB, |_| (30.0 * GB / 24.0, true));
         let f = forecast(&pts, &Params::default()).unwrap();

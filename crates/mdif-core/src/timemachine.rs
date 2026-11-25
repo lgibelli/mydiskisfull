@@ -747,7 +747,7 @@ pub fn report(
 
     // Each folder checked once, side by side (git for most); only those
     // still backed up are measured: the others are a count.
-    let found: Vec<(PathBuf, &'static str)> = crate::tidy::artifact_folders(home)
+    let mut found: Vec<(PathBuf, &'static str)> = crate::tidy::artifact_folders(home)
         .into_par_iter()
         .filter(|p| !keep.touches(p))
         .filter_map(|p| rebuildable(&p).map(|what| (p, what)))
@@ -760,6 +760,11 @@ pub fn report(
                 .map(|p| (p, "cache")),
         )
         .collect();
+
+    if let Some(s) = store {
+        let more = kept_out_by_mdif(s, home, &found);
+        found.extend(more);
+    }
 
     let asked: Vec<PathBuf> = changes
         .iter()
@@ -814,6 +819,89 @@ pub fn report(
     r.changes = changes;
     r.rebuildable = rebuildable;
     r
+}
+
+/// Where the folders mdif kept out of the backups are listed: a JSON list
+/// of `[path, what, inode]`. The inode finds one renamed or moved since (a
+/// `dist` renamed to keep a release, which takes its exclusion with it), so
+/// that it's still on the page, to be let back in.
+pub const EXCLUDED_KEY: &str = "timemachine.excluded";
+
+type Excluded = (String, String, u64);
+
+fn excluded_by_mdif(store: &Store) -> Vec<Excluded> {
+    store
+        .meta(EXCLUDED_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Notes that mdif kept `paths` out of the backups (`exclude`), or let them
+/// back in: for [`kept_out_by_mdif`].
+pub fn remember_excluded(
+    store: &Store,
+    paths: &[PathBuf],
+    exclude: bool,
+    home: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut list = excluded_by_mdif(store);
+    for p in paths {
+        let path = p.to_string_lossy().into_owned();
+        let inode = std::fs::symlink_metadata(p).map_or(0, |m| m.ino());
+        list.retain(|(q, _, i)| *q != path && (inode == 0 || *i != inode));
+        if exclude && inode != 0 {
+            let what = match rebuildable(p) {
+                Some(w) => w,
+                None if download_cache(p, home) => "cache",
+                None => "build",
+            };
+            list.push((path, what.to_string(), inode));
+        }
+    }
+    list.sort();
+    store.set_meta(EXCLUDED_KEY, &serde_json::to_string(&list)?)
+}
+
+/// The folders mdif kept out that aren't among `found`, where they are now
+/// (renamed or moved in the home folder): still folders, and still kept out.
+/// One let back in by hand, or deleted, isn't listed.
+fn kept_out_by_mdif(
+    store: &Store,
+    home: &Path,
+    found: &[(PathBuf, &'static str)],
+) -> Vec<(PathBuf, &'static str)> {
+    use std::os::unix::fs::MetadataExt;
+    let volume = mdif_macos::fs::fsid(home).ok();
+    let mut out: Vec<(PathBuf, &'static str)> = Vec::new();
+    for (path, what, inode) in excluded_by_mdif(store) {
+        let what = match what.as_str() {
+            "dependencies" => "dependencies",
+            "cache" => "cache",
+            _ => "build",
+        };
+        let same = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.ino() == inode);
+        let path = PathBuf::from(path);
+        let now = if privacy::may_open(&path) && same(&path) {
+            Some(path)
+        } else {
+            volume
+                .and_then(|v| mdif_macos::fs::path_of(v, inode).ok())
+                .filter(|p| p.starts_with(home))
+        };
+        let Some(p) = now else { continue };
+        if !found.iter().any(|(f, _)| *f == p)
+            && !out.iter().any(|(f, _)| *f == p)
+            && privacy::may_open(&p)
+            && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir() && m.ino() == inode)
+            && mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false)
+        {
+            out.push((p, what));
+        }
+    }
+    out
 }
 
 /// How many of `folders` inside `dir` Time Machine skips.
@@ -1351,6 +1439,45 @@ mod tests {
             [repo.join("ios/build")]
         );
         assert_eq!(expand(&[repo.join("notes")], &home), [repo.join("notes")]);
+    }
+
+    #[test]
+    fn what_mdif_kept_out_is_found_again_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = home.join("devel/app");
+        let dist = app.join("dist");
+        let kept = app.join("node_modules");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        for p in [&dist, &kept] {
+            mdif_macos::fs::set_excluded_from_backup(p, true).unwrap();
+        }
+        remember_excluded(&store, &[dist.clone(), kept.clone()], true, &home).unwrap();
+        // Found as made again: listed there, not twice.
+        let found = [(kept.clone(), "dependencies")];
+        assert_eq!(
+            kept_out_by_mdif(&store, &home, &found),
+            [(dist.clone(), "build")]
+        );
+        // Renamed to keep a release: found where it is now.
+        let release = home.join("Archive/release-1.0");
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::rename(&dist, &release).unwrap();
+        assert_eq!(
+            kept_out_by_mdif(&store, &home, &found),
+            [(release.clone(), "build")]
+        );
+        // Let back in: no longer listed, by mdif or by hand.
+        mdif_macos::fs::set_excluded_from_backup(&release, false).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
+        mdif_macos::fs::set_excluded_from_backup(&release, true).unwrap();
+        remember_excluded(&store, std::slice::from_ref(&release), false, &home).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
+        // Deleted: gone from the list, and nothing else taken for it.
+        std::fs::remove_dir(&kept).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &[]).is_empty());
     }
 
     #[test]

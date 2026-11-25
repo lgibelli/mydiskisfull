@@ -56,6 +56,20 @@ pub fn set(db: &Path, paths: &[PathBuf], exclude: bool, json_out: bool) -> Resul
     let home = home();
     let paths = timemachine::expand(&paths, &home);
     let done = timemachine::set_excluded(&paths, exclude, &keep, &home);
+    // What mdif keeps out is noted, so the page lists each even once it no
+    // longer looks made again; what's let back in, no longer.
+    let changed: Vec<PathBuf> = done
+        .iter()
+        .filter(|(_, r)| r.is_ok())
+        .map(|(p, _)| p.clone())
+        .collect();
+    if !changed.is_empty() {
+        let noted = Store::open(db)
+            .and_then(|s| timemachine::remember_excluded(&s, &changed, exclude, &home));
+        if let Err(e) = noted {
+            eprintln!("noting what was kept out of Time Machine: {e:#}");
+        }
+    }
     if json_out {
         let out = json!({
             "done": done.iter().filter(|(_, r)| r.is_ok()).map(|(p, _)| p).collect::<Vec<_>>(),
