@@ -47,6 +47,12 @@ export const store = {
   /** The app's own settings, and whether it opens at sign-in ("yes", "off", "no"). */
   settings: null,
   login: null,
+  /**
+   * Updates (update.rs): checked once a day if `on`, when GitHub last
+   * answered (`checked`), the version `found`, and what's under way
+   * (`busy`: "checking" or "installing").
+   */
+  update: null,
   /** Kept since the window opened: gone from the lists at once. */
   kept: new Set(),
   /** Clean-ups under way, by their first path. */
@@ -287,6 +293,26 @@ let tweaksRead = 0;
 
 // -- What the buttons do ---------------------------------------------------------
 
+/**
+ * Whether an update is being installed: nothing that changes something
+ * starts then (the app ends once the installer starts), and it says so.
+ */
+function updating() {
+  if (store.update?.busy !== "installing") return false;
+  notice(false, "MyDiskIsFull is being updated", "Try again once it has opened again.");
+  return true;
+}
+
+/** What's under way that an update would cut short, if anything: said before installing. */
+function underWay() {
+  if (store.cleanup?.running || store.cleaning.size) return "A clean-up is under way.";
+  if (store.tidyBusy.size) return "An automatic clean-up is being changed or run.";
+  if (store.tweaksChanging.size) return "A setting is being changed.";
+  if (store.watcherBusy) return "The watcher is being started or stopped.";
+  if (store.gpt?.signingIn) return "Signing in with ChatGPT isn't finished.";
+  return null;
+}
+
 export const act = {
   show(page, kind = null) {
     store.page = page;
@@ -317,6 +343,7 @@ export const act = {
 
   /** Never suggested again (`mdif keep add`), several at once. */
   async keepAll(paths) {
+    if (updating()) return;
     try {
       await mdifJson(["keep", "add", ...paths], 30);
       for (const p of paths) {
@@ -479,6 +506,7 @@ export const act = {
 
   /** In the browser, which `mdif` waits for up to 5 minutes. */
   async signIn() {
+    if (updating()) return;
     if (store.gpt.signingIn) return;
     store.gpt.signingIn = true;
     store.gpt.problem = null;
@@ -536,6 +564,7 @@ export const act = {
 
   /** Sent: the folder's name, its size, the Windows version; the answer is kept beside the history. */
   async ask(path, bytes) {
+    if (updating()) return;
     store.asks.set(path, { step: "asking" });
     render();
     try {
@@ -570,6 +599,7 @@ export const act = {
 
   /** Turns one on or off; `mdif tidy` gives the list as it is then. */
   async setTidy(id, on) {
+    if (updating()) return;
     if (store.tidyBusy.has(id)) return;
     store.tidyBusy.add(id);
     render();
@@ -584,6 +614,7 @@ export const act = {
 
   /** Runs one now, instead of at the watcher's daily turn: what it did goes to a notice. */
   async tidyNow(id) {
+    if (updating()) return;
     if (store.tidyBusy.has(id)) return;
     store.tidyBusy.add(id);
     render();
@@ -628,6 +659,7 @@ export const act = {
 
   /** What it changes and costs first (a dry run), then applied: what happened goes to a notice. */
   async applyTweak(id) {
+    if (updating()) return;
     if (store.tweaksChanging.has(id)) return;
     store.tweaksChanging.set(id, true);
     render();
@@ -657,6 +689,7 @@ export const act = {
 
   /** Puts back what it replaced; a setting changed since is left as it is. */
   async revertTweak(id, title) {
+    if (updating()) return;
     if (store.tweaksChanging.has(id)) return;
     store.tweaksChanging.set(id, false);
     render();
@@ -759,6 +792,7 @@ export const act = {
 
   /** Starts the watcher at sign-in and now (`mdif agent install`), or stops it. */
   async setWatching(on) {
+    if (updating()) return;
     store.watcherBusy = true;
     render();
     try {
@@ -819,6 +853,7 @@ export const act = {
    * it did in a banner.
    */
   async runCleanUp() {
+    if (updating()) return;
     const c = store.cleanup;
     const picked = c.rows.filter((r) => c.chosen.has(r.id));
     if (c.running || !picked.length) return;
@@ -871,6 +906,7 @@ export const act = {
 
   /** A clean-up: asked first when it can't be undone, then `mdif clean`, which checks each path again. */
   async clean(a) {
+    if (updating()) return;
     if (a.confirm && !(await confirmDialog(`${a.label}?`, a.confirm, a.label))) return;
     // Each path shows it's under way (several at once from Old Files).
     for (const p of a.paths) store.cleaning.add(p);
@@ -919,6 +955,7 @@ export const act = {
 
   /** Never suggested again (`mdif keep add`). */
   async keep(path) {
+    if (updating()) return;
     try {
       await mdifJson(["keep", "add", path], 30);
       store.kept.add(path);
@@ -960,6 +997,56 @@ export const act = {
     store.settings = { ...store.settings, welcomed: true };
     store.login = await app("login_item").catch(() => store.login);
     act.show("overview");
+  },
+
+  async loadUpdates() {
+    store.update = { busy: null, ...store.update, ...(await app("updates").catch(() => null)) };
+    render();
+  },
+
+  async setUpdates(on) {
+    try {
+      await app("set_updates", { on });
+      store.update = { ...store.update, on };
+    } catch (e) {
+      notice(false, "Couldn't change it", message(e));
+    }
+    render();
+  },
+
+  /** Check Now: what's found shows in Settings; nothing new is said in a notice. */
+  async checkUpdates() {
+    if (store.update?.busy) return;
+    store.update = { ...store.update, busy: "checking" };
+    render();
+    try {
+      const found = await app("check_updates");
+      store.update = { ...store.update, found, checked: Date.now() / 1000 };
+      if (!found) notice(true, "MyDiskIsFull is up to date", `${store.version ?? "This version"} is the latest.`);
+    } catch (e) {
+      notice(false, "Couldn't check for updates", message(e));
+    }
+    if (store.update.busy === "checking") store.update = { ...store.update, busy: null };
+    render();
+  },
+
+  /** Install and Restart: the app ends once the installer starts, and comes back after it. */
+  async installUpdate() {
+    if (store.update?.busy) return;
+    const busy = underWay();
+    if (busy) {
+      notice(false, "Not installed yet", `${busy} Install once it's done.`);
+      return;
+    }
+    store.update = { ...store.update, busy: "installing" };
+    render();
+    try {
+      await app("install_update", { version: store.update.found?.version });
+    } catch (e) {
+      notice(false, "Couldn't update MyDiskIsFull", message(e), true);
+    }
+    if (store.update.busy === "installing") store.update = { ...store.update, busy: null };
+    render();
   },
 
   async setLogin(on) {
@@ -1081,6 +1168,11 @@ async function start() {
     render();
   });
   on("shown", () => act.catchUp());
+  // A check by itself found a version, or nothing new.
+  on("update", (found) => {
+    store.update = { ...store.update, found, checked: Date.now() / 1000 };
+    render();
+  });
   render();
   const [latest, settings, login, v] = await Promise.all([
     app("latest").catch(() => null),
@@ -1096,6 +1188,7 @@ async function start() {
   act.refresh();
   act.loadAgent();
   act.loadDetail();
+  act.loadUpdates();
   // Started at sign-in with no window: what measures the disk waits until the
   // window is first shown (catchUp, as nothing has been measured yet).
   if (!(await app("window_shown").catch(() => true))) return;

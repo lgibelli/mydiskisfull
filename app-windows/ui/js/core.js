@@ -55,7 +55,8 @@ export async function version() {
 
 /**
  * What the app tells the window: "status" (what `mdif status` printed, as
- * text), "status-error" and "shown" (the window came forward).
+ * text), "status-error", "shown" (the window came forward) and "update"
+ * (what a check found, or null).
  * @param {string} event
  * @param {(payload: any) => void} handler
  */
@@ -273,4 +274,19 @@ const devAnswers = {
   set_login_item: ({ on }) => (on ? "yes" : "no"),
   latest: () => null,
   open_chatgpt_usage: () => null,
+  // `?update`: a newer version was found.
+  updates: () => ({
+    on: true,
+    checked: Date.now() / 1000 - 3 * 3600,
+    found: params.has("update") ? { version: "9.9.9" } : null,
+  }),
+  set_updates: () => null,
+  check_updates: async () => {
+    await new Promise((r) => setTimeout(r, 1200));
+    return params.has("update") ? { version: "9.9.9" } : null;
+  },
+  install_update: async () => {
+    await new Promise((r) => setTimeout(r, 1500));
+    throw new Error("Only in the app.");
+  },
 };

@@ -41,7 +41,12 @@ globalThis.document = {
   createDocumentFragment: () => new Fragment(),
 };
 
+// What core.js reads when it loads: no app, so it's a page in a browser.
+globalThis.window = {};
+globalThis.location = { search: "" };
+
 const { prevention } = await import("../js/pages/prevention.js");
+const { updates } = await import("../js/pages/settings.js");
 
 /** `el` and every element in it. */
 const all = (el) => [el, ...el.children.flatMap((c) => (c instanceof Element ? all(c) : []))];
@@ -76,4 +81,30 @@ test("a click on a switch's row flips the switch, never another control in the r
     }
   }
   assert.equal(withButton, 1, "the clean-up that can run has Tidy Now in its row");
+});
+
+/** The text in `el`, every piece joined. */
+const text = (el) => all(el).flatMap((e) => e.children.filter((c) => c instanceof Text).map((c) => c.data)).join(" ");
+const buttons = (el) => all(el).filter((e) => e.tagName === "BUTTON").map(text);
+
+test("Updates offers Check Now, then Install and Restart for what's found, and no button while busy", () => {
+  assert.equal(updates({ update: null }, {}), null, "not read yet");
+  const none = updates({ update: { on: true, checked: Date.now() / 1000 - 7200, found: null, busy: null } }, {});
+  assert.deepEqual(buttons(none), ["Check Now"]);
+  assert.match(text(none), /Last checked 2 hours ago/);
+  const checking = updates({ update: { on: true, checked: null, found: null, busy: "checking" } }, {});
+  assert.deepEqual(buttons(checking), [], "one check at a time");
+  assert.match(text(checking), /Checking…/);
+  const found = { version: "0.1.7" };
+  const ready = updates({ update: { on: false, checked: null, found, busy: null } }, {});
+  assert.deepEqual(buttons(ready), ["Check Now", "Install and Restart"], "found, though checks are off: Check Now found it");
+  assert.match(text(ready), /MyDiskIsFull 0\.1\.7 is ready/);
+  assert.match(text(ready), /closes while it installs/);
+  const installing = updates({ update: { on: true, checked: null, found, busy: "installing" } }, {});
+  assert.deepEqual(buttons(installing), [], "installed once");
+  assert.match(text(installing), /Installing…/);
+  // A check by itself found it while Check Now ran: nothing to press until it's done.
+  const both = updates({ update: { on: true, checked: null, found, busy: "checking" } }, {});
+  assert.deepEqual(buttons(both), []);
+  assert.match(text(both), /Checking…/);
 });

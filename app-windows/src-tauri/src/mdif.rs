@@ -6,6 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 
 /// The commands the window may run: those the app has a page or a button
@@ -48,6 +49,156 @@ fn allowed(args: &[String]) -> bool {
         }
 }
 
+/// Whether `mdif <args>` changes something (deletes, applies a tweak, sets
+/// the watcher up, signs in, asks ChatGPT on the user's plan, which may also
+/// renew the sign-in): one an update must let finish, never stop.
+/// What only reads may be stopped, as it changes nothing it would leave
+/// half done.
+fn changes(args: &[String]) -> bool {
+    let first = args.first().map(String::as_str).unwrap_or_default();
+    // The subcommand wherever it is among the options (`tidy --json run`).
+    let mut words = args.iter().skip(1).filter(|a| !a.starts_with('-'));
+    let sub = words.next().map(String::as_str);
+    let reads = match first {
+        "status" | "forecast" | "suggest" | "map" => true,
+        // A measurement is saved (the cache, then the history): only the
+        // kept one's read is a read.
+        "space" => args.iter().any(|a| a == "--cached"),
+        // Only the list: anything more names what to change.
+        "tidy" | "tweaks" | "alerts" | "keep" => sub.is_none(),
+        "agent" => sub == Some("status"),
+        // Ask AI's preview of what would be sent asks nothing.
+        "knowledge" => {
+            sub == Some("account") || (sub == Some("ask") && args.iter().any(|a| a == "--dry-run"))
+        }
+        _ => false,
+    };
+    !reads
+}
+
+/// What's running, for an update: the installer can't replace a running
+/// `mdif.exe`, so once one is about to start nothing new runs, what's
+/// running is given a while to end, and then what only reads is stopped.
+/// What changes something is never stopped: the update waits for it.
+struct Gate {
+    running: AtomicUsize,
+    changing: AtomicUsize,
+    closed: AtomicBool,
+    stop: AtomicBool,
+}
+
+/// One run, counted while it lasts.
+struct Pass<'a> {
+    gate: &'a Gate,
+    changes: bool,
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        if self.changes {
+            self.gate.changing.fetch_sub(1, SeqCst);
+        }
+        self.gate.running.fetch_sub(1, SeqCst);
+    }
+}
+
+/// Why an update can't start yet.
+#[derive(Debug, PartialEq)]
+pub enum Busy {
+    /// Something that changes the disk or the settings is still running.
+    Changing,
+    /// Something was told to stop and hasn't.
+    Stuck,
+}
+
+// Closing is for installs, which are Windows' (the tests close it anywhere).
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Gate {
+    const fn new() -> Self {
+        Gate {
+            running: AtomicUsize::new(0),
+            changing: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+        }
+    }
+
+    /// A run may start, unless an update is about to. Counted first, then
+    /// the gate read: [`Gate::close`] sets it first, then reads the counts,
+    /// so one of the two always sees the other.
+    fn enter(&self, changes: bool) -> Option<Pass<'_>> {
+        self.running.fetch_add(1, SeqCst);
+        if changes {
+            self.changing.fetch_add(1, SeqCst);
+        }
+        let pass = Pass {
+            gate: self,
+            changes,
+        };
+        (!self.closed.load(SeqCst)).then_some(pass)
+    }
+
+    /// Whether a run that only reads should stop now.
+    fn stopping(&self) -> bool {
+        self.stop.load(SeqCst)
+    }
+
+    /// Nothing new runs; what runs has `grace` to end. Then, unless
+    /// something that changes things still runs, what reads is stopped (and
+    /// has a moment to be). Closed only when nothing runs: otherwise it's
+    /// open again.
+    fn close(&self, grace: Duration) -> Result<(), Busy> {
+        self.closed.store(true, SeqCst);
+        let ended = |within: Duration| {
+            let until = Instant::now() + within;
+            while self.running.load(SeqCst) > 0 {
+                if Instant::now() >= until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            true
+        };
+        if ended(grace) {
+            return Ok(());
+        }
+        if self.changing.load(SeqCst) > 0 {
+            self.open();
+            return Err(Busy::Changing);
+        }
+        self.stop.store(true, SeqCst);
+        if ended(Duration::from_secs(5)) {
+            return Ok(());
+        }
+        self.open();
+        Err(Busy::Stuck)
+    }
+
+    fn open(&self) {
+        self.stop.store(false, SeqCst);
+        self.closed.store(false, SeqCst);
+    }
+}
+
+static GATE: Gate = Gate::new();
+
+/// Before an update: see [`Gate::close`].
+#[cfg_attr(not(windows), allow(dead_code))] // installs are Windows'
+pub fn stop_all(grace: Duration) -> Result<(), Busy> {
+    GATE.close(grace)
+}
+
+/// An update's installer is still running (the app was opened again
+/// meanwhile): nothing runs until [`resume`].
+pub fn hold() {
+    GATE.closed.store(true, SeqCst);
+}
+
+/// The update didn't start, or its installer has ended: runs may start again.
+pub fn resume() {
+    GATE.open()
+}
+
 /// Beside the app's own program, where the installer puts it; `MDIF` names
 /// another (a build of the command line, while working on the app).
 pub fn path() -> PathBuf {
@@ -78,6 +229,10 @@ pub fn run_at(args: &[String], limit: Duration, low: bool) -> Result<String, Str
             named.join(" ")
         ));
     }
+    let changes = changes(args);
+    let Some(_pass) = GATE.enter(changes) else {
+        return Err("MyDiskIsFull is being updated.".into());
+    };
     let mut cmd = Command::new(path());
     cmd.args(args)
         .stdin(Stdio::null())
@@ -121,15 +276,21 @@ pub fn run_at(args: &[String], limit: Duration, low: bool) -> Result<String, Str
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(40)),
+            Ok(None) if Instant::now() < deadline && (changes || !GATE.stopping()) => {
+                std::thread::sleep(Duration::from_millis(40))
+            }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 // The readers are left: what it started may still hold its pipes.
-                return Err(format!(
-                    "`mdif {first}` took longer than {} s, and was stopped.",
-                    limit.as_secs()
-                ));
+                return Err(if GATE.stopping() && !changes {
+                    format!("`mdif {first}` was stopped for the update.")
+                } else {
+                    format!(
+                        "`mdif {first}` took longer than {} s, and was stopped.",
+                        limit.as_secs()
+                    )
+                });
             }
             Err(e) => return Err(format!("`mdif {first}`: {e}")),
         }
@@ -164,6 +325,115 @@ mod tests {
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Before an update: nothing new starts, a run that ends within the
+    /// grace isn't stopped, one that only reads and doesn't is told to stop,
+    /// one that changes things is never stopped (the update waits), and
+    /// after a failed update runs start again.
+    #[test]
+    fn an_update_waits_for_runs_then_stops_only_what_reads() {
+        let gate = Gate::new();
+        let pass = gate.enter(false).expect("open");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(pass);
+            });
+            assert_eq!(
+                gate.close(Duration::from_secs(5)),
+                Ok(()),
+                "ended by itself"
+            );
+        });
+        assert!(!gate.stopping(), "nothing had to be stopped");
+        assert!(gate.enter(false).is_none(), "closed");
+        assert!(gate.enter(true).is_none(), "closed to changes too");
+        assert_eq!(gate.running.load(SeqCst), 0, "a refused run isn't counted");
+        assert_eq!(gate.changing.load(SeqCst), 0);
+
+        gate.open();
+        let stubborn = gate.enter(false).expect("open again");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                // A run's loop: it stops once it's told to.
+                while !gate.stopping() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                drop(stubborn);
+            });
+            let started = Instant::now();
+            assert_eq!(gate.close(Duration::from_millis(100)), Ok(()), "stopped");
+            assert!(
+                started.elapsed() >= Duration::from_millis(100),
+                "after the grace"
+            );
+        });
+
+        gate.open();
+        let cleaning = gate.enter(true).expect("open again");
+        let reading = gate.enter(false).expect("open");
+        assert_eq!(
+            gate.close(Duration::from_millis(100)),
+            Err(Busy::Changing),
+            "a clean-up under way isn't stopped"
+        );
+        assert!(!gate.stopping(), "nor is what reads beside it");
+        assert!(
+            gate.enter(false).is_some(),
+            "open again: nothing was installed"
+        );
+        drop((cleaning, reading));
+        assert_eq!(gate.running.load(SeqCst), 0);
+        assert_eq!(gate.changing.load(SeqCst), 0);
+    }
+
+    /// What only reads may be stopped for an update; everything else the
+    /// window runs is let finish, an unknown command included.
+    #[test]
+    fn what_changes_things_is_told_from_what_reads() {
+        for reads in [
+            &["status"][..],
+            &["space", "--cached"],
+            &["map", "C:\\"],
+            &["suggest"],
+            &["forecast", "--series"],
+            &["tidy"],
+            &["tidy", "--json"],
+            &["tweaks", "--json"],
+            &["alerts", "--json"],
+            &["keep", "--json"],
+            &["agent", "status"],
+            &["agent", "--json", "status"],
+            &["knowledge", "account"],
+            &["knowledge", "ask", "C:\\x", "--dry-run"],
+        ] {
+            assert!(!changes(&args(reads)), "{reads:?}");
+        }
+        for changes_things in [
+            &["clean", "C:\\x"][..],
+            // A measurement is saved: let finish.
+            &["space", "--refresh"],
+            &["space", "--max-age", "3600"],
+            &["tidy", "run", "builds"],
+            &["tidy", "--json", "run", "builds"],
+            &["tweaks", "--json", "apply", "x"],
+            &["agent", "--json", "start"],
+            &["knowledge", "--json", "ask", "C:\\x"],
+            &["tidy", "on", "builds"],
+            &["tweaks", "apply", "x"],
+            &["tweaks", "revert", "x"],
+            &["alerts", "set", "low_free", "auto"],
+            &["keep", "add", "C:\\x"],
+            &["agent", "install"],
+            &["agent", "stop"],
+            &["knowledge", "ask", "C:\\x", "--bytes", "5"],
+            &["knowledge", "sign-in"],
+            &["knowledge", "sign-out"],
+            &["something-new"],
+        ] {
+            assert!(changes(&args(changes_things)), "{changes_things:?}");
+        }
     }
 
     /// The text literals a JavaScript array starts with: `"keep", "add"` of

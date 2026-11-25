@@ -15,8 +15,10 @@ mod login;
 mod map;
 mod mdif;
 mod monitor;
+mod update;
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -34,6 +36,25 @@ struct Settings {
     login_set: bool,
     /// The first window's welcome is done (Get Started).
     welcomed: bool,
+    /// Updates are checked for once a day ([`update`]).
+    updates: bool,
+    /// When GitHub last answered a check.
+    update_checked: Option<i64>,
+    /// The newest version the user was told of, so it's said once.
+    update_told: Option<String>,
+    /// The version offered by the last check that found one, until a
+    /// check finds none: looked for again when the app starts.
+    update_offered: Option<String>,
+    /// The version whose installer an update this app started left in the
+    /// temporary folder: removed at the next start.
+    update_staged: Option<String>,
+    /// The watcher is yet to be started (or stopped) again after that update:
+    /// once, apart from the clean-up retried at each start.
+    update_watcher_due: bool,
+    /// An update is being installed: the app it starts again shows its
+    /// window, though it gets `--background` back if it was started at
+    /// sign-in.
+    show_after_update: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +63,13 @@ impl Default for Settings {
             notifications: true,
             login_set: false,
             welcomed: false,
+            updates: true,
+            update_checked: None,
+            update_told: None,
+            update_offered: None,
+            update_staged: None,
+            update_watcher_due: false,
+            show_after_update: false,
         }
     }
 }
@@ -68,12 +96,29 @@ fn load_settings(app: &AppHandle) -> Settings {
         .unwrap_or_default()
 }
 
+/// One change at a time: the window's and the update checks' (another
+/// thread), so neither saves over the other's.
+static SETTINGS: Mutex<()> = Mutex::new(());
+
+/// Reads the settings, changes them and saves them.
+fn change_settings(app: &AppHandle, f: impl FnOnce(&mut Settings)) -> Result<(), String> {
+    let _one = SETTINGS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = load_settings(app);
+    f(&mut s);
+    save_settings(app, &s)
+}
+
 fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let file = settings_file(app).ok_or("no folder for the app's settings")?;
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&file, serde_json::to_vec(s).map_err(|e| e.to_string())?)
+    // Written beside it, then put in its place: what reads it meanwhile (the
+    // update checks, another thread) gets the old settings or the new ones,
+    // never part of a file (which would read as the defaults).
+    let next = file.with_extension("json.new");
+    std::fs::write(&next, serde_json::to_vec(s).map_err(|e| e.to_string())?)
+        .and_then(|()| std::fs::rename(&next, &file))
         .map_err(|e| e.to_string())
 }
 
@@ -92,19 +137,17 @@ fn settings(app: AppHandle) -> ForWindow {
 /// off). Asked once: what the user does with it later stays theirs.
 #[tauri::command]
 fn finish_welcome(app: AppHandle) -> Result<(), String> {
-    let mut s = load_settings(&app);
-    s.welcomed = true;
-    if !s.login_set && login::set(true) == Ok("yes") {
-        s.login_set = true;
-    }
-    save_settings(&app, &s)
+    change_settings(&app, |s| {
+        s.welcomed = true;
+        if !s.login_set && login::set(true) == Ok("yes") {
+            s.login_set = true;
+        }
+    })
 }
 
 #[tauri::command]
 fn set_notifications(app: AppHandle, on: bool) -> Result<(), String> {
-    let mut s = load_settings(&app);
-    s.notifications = on;
-    save_settings(&app, &s)?;
+    change_settings(&app, |s| s.notifications = on)?;
     *app.state::<monitor::State>()
         .quiet
         .lock()
@@ -220,6 +263,35 @@ fn show(app: &AppHandle) {
     let _ = app.emit("shown", ());
 }
 
+/// The tray icon: what's free in its tooltip (the monitor sets it), Open and
+/// Quit in its menu (their handler is the app's, set once: [`main`]). Made
+/// again after an update that couldn't start, as the updater takes it down
+/// first.
+fn tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open MyDiskIsFull", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit MyDiskIsFull", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("MyDiskIsFull")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, e| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = e
+            {
+                show(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         // Started again (from the Start menu, at sign-in): the one running
@@ -228,6 +300,7 @@ fn main() {
             show(app)
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             finish_welcome,
             login::login_item,
@@ -237,6 +310,10 @@ fn main() {
             mdif::mdif,
             monitor::latest,
             monitor::refresh_now,
+            update::check_updates,
+            update::install_update,
+            update::set_updates,
+            update::updates,
             open_chatgpt_usage,
             open_recycle_bin,
             open_startup_apps,
@@ -248,35 +325,19 @@ fn main() {
         ])
         .setup(|app| {
             follow_login(app.handle());
-            let open = MenuItem::with_id(app, "open", "Open MyDiskIsFull", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit MyDiskIsFull", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-            let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("MyDiskIsFull")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, e| match e.id.as_ref() {
-                    "open" => show(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, e| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = e
-                    {
-                        show(tray.app_handle());
-                    }
-                });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
-            tray.build(app)?;
+            // Once: a tray made again doesn't add another (Tauri keeps each).
+            app.on_menu_event(|app, e| match e.id.as_ref() {
+                "open" => show(app),
+                "quit" => app.exit(0),
+                _ => {}
+            });
+            tray(app.handle())?;
             let quiet = !load_settings(app.handle()).notifications;
+            // Before the monitor: it runs mdif, which an update still
+            // installing keeps from running.
+            let updated = update::start(app.handle());
             monitor::start(app.handle(), quiet);
-            if !std::env::args().any(|a| a == "--background") {
+            if updated || !std::env::args().any(|a| a == "--background") {
                 show(app.handle());
             }
             Ok(())

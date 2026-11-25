@@ -118,6 +118,7 @@ const ICONS = {
   close: { d: "M5 5l10 10 M15 5L5 15" },
   chevron: { d: "M7.5 4.5l5.5 5.5-5.5 5.5" },
   back: { d: "M12.5 4.5L7 10l5.5 5.5" },
+  download: { d: "M10 3v9.5 M6 8.5l4 4 4-4 M3.5 13.5v3h13v-3" },
 };
 
 /** An icon by name (ICONS), `size` points square. */

@@ -1,6 +1,7 @@
 // Settings, as the Mac app's: watching in the background, opening at
 // sign-in and notifications; then what raises a notification, kept in the
-// history (`mdif alerts`), where the watcher reads it too. On Windows, no
+// history (`mdif alerts`), where the watcher reads it too; Ask AI, About and
+// Updates. On Windows, no
 // program's writes are recorded, so `mdif` refuses the write-churn settings
 // and they aren't shown.
 
@@ -13,7 +14,43 @@ const SIZES = [500_000_000, 1_000_000_000, 2_000_000_000, 5_000_000_000, 10_000_
 const FLOORS = [5_000_000_000, 10_000_000_000, 20_000_000_000, 50_000_000_000];
 
 export function settings(store, act) {
-  return page("Settings", {}, watching(store, act), alerts(store, act), folders(store, act), about(store));
+  return page("Settings", {}, watching(store, act), alerts(store, act), folders(store, act), about(store),
+    updates(store, act));
+}
+
+/** Updates, as the Mac app's: once a day from GitHub, and Install and Restart for what's found. */
+export function updates(store, act) {
+  const u = store.update;
+  if (!u) return null;
+  const installing = u.busy === "installing";
+  // While one thing is under way, no button starts another.
+  const working = (text) =>
+    h("span", { class: "working secondary" }, h("span", { class: "spinner", "aria-hidden": "true" }), text);
+  const checkNow = u.busy ? null : button("Check Now", act.checkUpdates);
+  return section("Updates", {},
+    toggle({
+      title: "Check for updates automatically",
+      text: "Once a day, from GitHub. Updates are signed, and nothing else is sent.",
+      on: u.on,
+      onchange: (on) => act.setUpdates(on),
+    }),
+    u.found
+      ? row({
+        glyph: ["download", "var(--accent)"],
+        title: `MyDiskIsFull ${u.found.version} is ready`,
+        text: installing
+          ? "Downloading it. MyDiskIsFull closes while it installs, and opens again after."
+          : "MyDiskIsFull closes while it installs, and opens again after.",
+        end: u.busy
+          ? working(installing ? "Installing…" : "Checking…")
+          // Check Now too: an offer can go stale (a release withdrawn).
+          : [checkNow, button("Install and Restart", act.installUpdate, { kind: "accent" })],
+      })
+      : row({
+        title: "Check for Updates",
+        text: u.checked ? `Last checked ${F.ago(u.checked)}.` : "Not checked yet.",
+        end: u.busy ? working(installing ? "Installing…" : "Checking…") : checkNow,
+      }));
 }
 
 /** Ask AI, and the ChatGPT account it uses (OpenAI's names for the buttons). */
