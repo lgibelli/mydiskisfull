@@ -85,9 +85,21 @@ for page in ['Overview', 'Storage', 'Old Files', 'History', 'Prevention', 'Setti
 ui.press(window, 'Check Now')
 ui.find(window, 'Install and Restart', secs=120)
 ui.shot(os.path.join(shots, f'{start}-offered.png'))
-ui.press(window, 'Install and Restart')
-# The app ends once the installer has started.
-wait('the app to close for the installer', lambda: not running('MyDiskIsFull.exe'), secs=300)
+# The app ends once the installer has started. It may say it can't yet (a
+# first measurement of the disk still under way): pressed again once it can.
+for attempt in range(1, 6):
+    ui.press(window, 'Install and Restart', secs=180)
+    end = time.time() + 120
+    while running('MyDiskIsFull.exe') and time.time() < end:
+        time.sleep(3)
+    if not running('MyDiskIsFull.exe'):
+        break
+    ui.shot(os.path.join(shots, f'{start}-install-{attempt}.png'))
+    said = ui.named(window, lambda n: n.startswith(("Couldn't", 'Not installed', 'A clean-up',
+                                                   'mdif', 'The update', 'MyDiskIsFull 0')))
+    print(f'still open after Install and Restart ({attempt}): {said}')
+else:
+    sys.exit('the app never closed for the installer')
 wait(f'mdif {target}', lambda: mdif_version() == target, secs=600)
 wait('the app to open again', lambda: running('MyDiskIsFull.exe'), secs=180)
 ui.shot(os.path.join(shots, f'{target}-after.png'))

@@ -86,7 +86,11 @@ os.startfile('ms-settings:storagepolicies')
 window = ui.wait_window('Settings')
 time.sleep(5)
 ui.shot(os.path.join(shots, 'storage-sense.png'))
-ui.press(window, 'Run Storage Sense now', secs=120)
+# Storage's own page first, where Storage Sense is a row that opens its page.
+ui.press(window, 'Storage Sense', secs=120)
+time.sleep(3)
+ui.shot(os.path.join(shots, 'storage-sense-page.png'))
+ui.press(window, 'Run Storage Sense now', secs=60)
 end = time.time() + 600
 while files['old.bin'].lower() in binned():
     if time.time() > end:
