@@ -95,7 +95,7 @@ BUILD_NUMBER=102.1 app/app-store.sh --upload   # 0.1.2 again: each build number 
 Then, in App Store Connect, pick the build for the version and submit it for review. Releasing
 it once it's approved is the author's call, like publishing a GitHub release.
 
-## The Windows edition (not released yet)
+## The Windows edition
 
 The Windows app (`app-windows/`, Tauri) ships as a per-user NSIS installer holding the app,
 `mdif.exe` and `mdif-watch.exe`; nothing needs an administrator. Its version is the workspace's:

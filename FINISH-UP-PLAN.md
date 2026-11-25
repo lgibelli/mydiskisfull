@@ -18,7 +18,7 @@ Actions Windows runner as the only test box, a per-user watcher with an optional
 | 4 | Windows catalogue | **started**: `mdif map` runs; the rest is open |
 | 5 | Optional elevated service | not started |
 | 6 | Tauri app | **started**: tray, notifications, sign-in; Overview, Storage, History, Settings |
-| 7 | Packaging, signing, updater | **started**: the NSIS installer and its hooks, tested by CI; the updater wired (its key made); unsigned for Windows at first; the release job never run |
+| 7 | Packaging, signing, updater | **started**: the NSIS installer and its hooks, tested by CI; the updater wired (its key made); unsigned for Windows at first; **released in 0.1.6** (release.yml run 45666802059) |
 
 What runs on Windows today: `watch`, `status`, `forecast`, `alerts`, `keep`, `knowledge` (Ask AI too),
 `agent` (with `stop` and `start`, Windows' own, for the installer), `owners`, `incidents`, `map`, `space` (its only action: Delete for build output and
@@ -219,10 +219,12 @@ Signing, then `bundle > windows > signCommand`). The updater is wired (`tauri-pl
 on the author's Mac (login keychain, beside Sparkle's), the public half in `tauri.conf.json`;
 `build.sh` signs the installers when `TAURI_SIGNING_PRIVATE_KEY` is set and `feed.sh` writes
 `latest.json`, which `release.yml` puts on the draft, so only publishing ships. No Backups page in
-the first release. Still open: the key in the `release` environment's secrets (the author's
-call); the first run of `release.yml`'s `windows` job (its build is the one CI's `windows-app`
-runs; its signing, feed, attestation and upload have never run); an update installed by the app
-on a real PC; the site's page, at the first release. A Microsoft Store (MSIX) edition is out of
+the first release. 0.1.6 (2026-11-25) is the first release with it: the key is in the `release`
+environment, `release.yml`'s `windows` job built, signed, attested and uploaded both installers
+and `latest.json`, and the x64 one installed on a Windows 11 PC, its watcher sampling at sign-in.
+The site's page has a Windows download. Still open: an update installed by the app on a real PC
+(it needs a release after 0.1.6), a click-through of the app on that PC, and Storage Sense
+emptying the bin (only where the user turns it on). A Microsoft Store (MSIX) edition is out of
 scope for the first release.
 
 ## How to work on it

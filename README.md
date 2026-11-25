@@ -331,7 +331,7 @@ sandbox changes three more things:
 `app/app-store.sh` signs it for the store, packages it and has App Store Connect validate it;
 with `--upload` it sends it there (see [docs/RELEASING.md](docs/RELEASING.md)).
 
-## Windows (not released yet)
+## Windows
 
 `app-windows/` is the Windows edition: the same watcher, forecast and explanations on NTFS, with
 Overview, Storage, Old Files, History, Prevention, Clean Up and Ask AI, in a window installed per
@@ -341,8 +341,8 @@ workspace's tests also pass on a Windows 11 PC. It updates itself as the Mac app
 it reads the latest release's `latest.json` from GitHub (nothing else is sent), and Settings →
 Updates offers Install and Restart; each update is signed, and one that isn't is refused.
 
-The first releases aren't signed for Windows, so SmartScreen stops the installer with "Windows
-protected your PC": click **More info**, then **Run anyway**. Before that, the download can be
+Each release since 0.1.6 has both installers. They aren't signed for Windows yet, so SmartScreen
+stops the installer with "Windows protected your PC": click **More info**, then **Run anyway**. Before that, the download can be
 checked against `SHA256SUMS-windows.txt` on the release, and against this repository's build
 with `gh attestation verify MyDiskIsFull_<version>_x64-setup.exe --repo lgibelli/mydiskisfull`.
 
