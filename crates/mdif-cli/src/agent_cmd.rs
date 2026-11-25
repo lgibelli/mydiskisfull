@@ -164,7 +164,7 @@ pub fn uninstall() -> Result<()> {
 
 /// `mdif agent stop` is Windows' (its installer replaces a program a running
 /// watcher holds). On a Mac launchd keeps the watcher running.
-pub fn stop() -> Result<()> {
+pub fn stop(_for_install: bool) -> Result<()> {
     bail!(
         "on a Mac, launchd keeps the watcher running: `mdif agent uninstall` stops it, and \
          `mdif agent install` starts it again"
@@ -172,8 +172,8 @@ pub fn stop() -> Result<()> {
 }
 
 /// `mdif agent start`: see [`stop`].
-pub fn start() -> Result<()> {
-    stop()
+pub fn start(_after_install: bool) -> Result<()> {
+    stop(false)
 }
 
 pub fn status(json_out: bool) -> Result<()> {

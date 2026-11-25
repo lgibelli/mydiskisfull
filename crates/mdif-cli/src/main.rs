@@ -423,10 +423,19 @@ enum AgentAction {
     Uninstall,
     /// Stop the watcher until the next sign-in (the installer does, to replace it)
     #[command(hide = cfg!(target_os = "macos"))]
-    Stop,
+    Stop {
+        /// The installer's stop: told from one of yours, and never in its place
+        #[arg(long, hide = true)]
+        for_install: bool,
+    },
     /// Start the watcher now, as sign-in would
     #[command(hide = cfg!(target_os = "macos"))]
-    Start,
+    Start {
+        /// After an install: not if you stopped it, and nothing to do if it
+        /// isn't set up
+        #[arg(long, hide = true)]
+        after_install: bool,
+    },
     /// Whether the watcher is running, and how big its history is
     Status {
         /// Print it as JSON
@@ -623,8 +632,8 @@ fn main() -> Result<()> {
         Cmd::Agent { action } => match action {
             AgentAction::Install { interval } => agent::install(interval)?,
             AgentAction::Uninstall => agent::uninstall()?,
-            AgentAction::Stop => agent::stop()?,
-            AgentAction::Start => agent::start()?,
+            AgentAction::Stop { for_install } => agent::stop(for_install)?,
+            AgentAction::Start { after_install } => agent::start(after_install)?,
             AgentAction::Status { json } => agent::status(json)?,
         },
         Cmd::Map {

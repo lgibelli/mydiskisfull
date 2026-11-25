@@ -36,6 +36,8 @@ pub fn default_db() -> PathBuf {
     {
         data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
     }
+    // The installer looks for `agent stop`'s marker beside it here
+    // (app-windows/src-tauri/windows/hooks.nsh): keep the two in step.
     #[cfg(windows)]
     {
         data_dir().join("history.sqlite3")

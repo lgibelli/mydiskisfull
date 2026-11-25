@@ -118,8 +118,21 @@ fn call_off_stop(db: &std::path::Path) -> bool {
 /// at sign-in, leaves it stopped while it's there. A watcher that starts
 /// (at sign-in, or launched) takes it away, and so do `agent start` and
 /// `agent install` when one is running already: it's wanted again.
+/// What it says tells the installer's own stop (`agent stop --for-install`:
+/// [`INSTALLER_STOP`]) from the user's, for `agent start --after-install`.
 pub fn stopped_path(db: &std::path::Path) -> PathBuf {
     beside(db, ".stopped")
+}
+
+/// What the installer's stop writes there (hooks.nsh writes it too, after
+/// an mdif from before `--for-install`: keep the two in step).
+const INSTALLER_STOP: &str = "stopped by the installer";
+/// What the user's writes.
+const USER_STOP: &str = "stopped with `mdif agent stop`";
+
+/// Whether the stop there is the installer's, not the user's.
+fn stopped_by_installer(db: &std::path::Path) -> bool {
+    std::fs::read_to_string(stopped_path(db)).is_ok_and(|t| t.trim() == INSTALLER_STOP)
 }
 
 /// A watcher is running, or is wanted again: it's no longer stopped on purpose.
@@ -293,14 +306,22 @@ fn parse_run_command(command: &str) -> Option<(PathBuf, u64)> {
 /// `mdif agent stop`: the watcher stops now and starts again at the next
 /// sign-in (or with `agent start`). The installer stops it this way before it
 /// replaces `mdif-watch.exe`, which Windows doesn't let a running program's
-/// file be.
-pub fn stop() -> Result<()> {
+/// file be, `for_install`: said so in the marker, so an install that fails
+/// after it isn't taken for the user's stop (`start --after-install`), and
+/// never written over one of the user's.
+pub fn stop(for_install: bool) -> Result<()> {
     let db = watch_cmd::default_db();
     // Said first, so the app never sees it ended and not stopped on purpose;
     // until the next start it leaves it stopped. (No folder: no watcher ever
     // ran here.)
-    if db.parent().is_some_and(std::path::Path::is_dir) {
-        std::fs::write(stopped_path(&db), "stopped with `mdif agent stop`")
+    let users = stopped_path(&db).exists() && !stopped_by_installer(&db);
+    if db.parent().is_some_and(std::path::Path::is_dir) && !(for_install && users) {
+        let says = if for_install {
+            INSTALLER_STOP
+        } else {
+            USER_STOP
+        };
+        std::fs::write(stopped_path(&db), says)
             .with_context(|| format!("writing {}", stopped_path(&db).display()))?;
     }
     if stop_running(&db)? {
@@ -314,9 +335,27 @@ pub fn stop() -> Result<()> {
 /// `mdif agent start`: the watcher starts now, as sign-in would start it: the
 /// program and interval its `Run` value names, and not if it isn't set to
 /// start then (Task Manager's switch included).
-pub fn start() -> Result<()> {
+///
+/// `after_install` (the installer, and the app after an update): not one the
+/// user stopped (it stays so until sign-in), and not set up is nothing to do.
+pub fn start(after_install: bool) -> Result<()> {
     let db = watch_cmd::default_db();
-    let Some(item) = startup::login_item(NAME).context("reading the Run key")? else {
+    if after_install && stopped_path(&db).exists() && !stopped_by_installer(&db) {
+        println!("The watcher was stopped with `mdif agent stop`: it's left stopped.");
+        return Ok(());
+    }
+    let item = startup::login_item(NAME).context("reading the Run key")?;
+    if after_install && !item.as_ref().is_some_and(|i| i.enabled) {
+        // The installer's stop means nothing once it's done: none is left
+        // for the app to take as the user's when it's switched on again.
+        if stopped_by_installer(&db) {
+            clear_stopped(&db);
+            call_off_stop(&db);
+        }
+        println!("The watcher isn't set to start at sign-in: nothing to start.");
+        return Ok(());
+    }
+    let Some(item) = item else {
         bail!(
             "the watcher isn't set to start at sign-in: `mdif agent install` sets it up and starts it"
         );
@@ -392,7 +431,12 @@ pub fn status(json_out: bool) -> Result<()> {
             // Stopped on purpose (`agent stop`) until it next starts: the app
             // doesn't start it again meanwhile.
             "stopped": stopped_path(&watch_cmd::default_db()).exists(),
-            "history": watch_cmd::history_json(&watch_cmd::default_db())?,
+            // That stop is an install's (hooks.nsh), not the user's.
+            "stopped_by_installer": stopped_by_installer(&watch_cmd::default_db()),
+            // Null if it can't be read: the rest (the stop above) still says
+            // what it is.
+            "history": watch_cmd::history_json(&watch_cmd::default_db())
+                .unwrap_or(serde_json::Value::Null),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -425,6 +469,20 @@ pub fn status(json_out: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_installers_stop_is_told_from_the_users() {
+        let dir = std::env::temp_dir().join(format!("mdif-stopped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.sqlite3");
+        assert!(!stopped_by_installer(&db), "none");
+        std::fs::write(stopped_path(&db), "stopped with `mdif agent stop`").unwrap();
+        assert!(!stopped_by_installer(&db), "the user's");
+        // As hooks.nsh's FileWrite leaves it.
+        std::fs::write(stopped_path(&db), INSTALLER_STOP).unwrap();
+        assert!(stopped_by_installer(&db));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_command_line_quotes_the_program_whole() {
