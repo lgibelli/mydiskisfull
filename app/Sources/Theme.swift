@@ -199,6 +199,12 @@ struct RailBar: View {
                     hovering = on
                     if on { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
+                // Gone under the pointer (another page, the list measured
+                // again): the hand it pushed goes with it.
+                .onDisappear {
+                    if hovering { NSCursor.pop() }
+                    hovering = false
+                }
                 .onTapGesture { select(stop) }
                 .help(stop.id == nil ? "\(stop.title): \(Format.bytes(stop.bytes))"
                       : "\(stop.title): \(Format.bytes(stop.bytes)). Click to see what's in it.")
@@ -796,7 +802,9 @@ struct AskAI: View {
     private func ask() async {
         step = .asking
         do {
-            let a = try await Core.json(AskAnswer.self, args, timeout: 120)
+            // As long as `mdif` may take: the models (30 s), renewing the
+            // sign-in (60 s) and the answer (180 s), each with a margin.
+            let a = try await Core.json(AskAnswer.self, args, timeout: 330)
             Self.answers[path] = a
             step = .answer(a)
         } catch {

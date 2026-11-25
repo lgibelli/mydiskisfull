@@ -85,7 +85,8 @@ private struct TidyRow: View {
             }
         }
         .toggleStyle(.switch)
-        .disabled(busy || !t.available)
+        // One on that can't run here now can still be turned off.
+        .disabled(busy || (!t.available && !t.on))
         .padding(.vertical, 2)
     }
 
@@ -139,7 +140,8 @@ private struct TweakRow: View {
         .toggleStyle(.switch)
         // Applied by hand: there is no record of what it replaced. Just
         // changed: until it's measured again.
-        .disabled((t.isApplied && !byUs) || monitor.tweaksChanging[t.id] != nil)
+        .disabled((t.isApplied && !byUs) || monitor.tweaksChanging[t.id] != nil
+                  || monitor.tweaksBusy.contains(t.id))
         .help(t.isApplied && !byUs
               ? "Already done: its settings are as this tweak would set them (in System Settings, or by hand). MyDiskIsFull only undoes what it set itself."
               : "")

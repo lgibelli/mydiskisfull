@@ -159,7 +159,7 @@ private struct AttentionSection: View {
                 #if !APP_STORE
                 if let b = monitor.timeMachine?.backlog {
                     AttentionRow(symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                                 title: "Time Machine keeps failing", text: TimeMachineText.backlog(b)) {
+                                 title: TimeMachineText.backlogTitle(b, named: true), text: TimeMachineText.backlog(b)) {
                         Button("Time Machine…") { Navigator.shared.pane = .timeMachine }
                     }
                 }
@@ -479,7 +479,7 @@ enum Recommendations {
                 id: "trash", symbol: "trash.fill", tint: .gray, title: "Empty the Trash",
                 detail: "What's in it takes its space until it's emptied.", bytes: r.trash,
                 act: .clean(CleanAction(kind: "empty-trash", label: "Empty Trash", paths: [path],
-                                        confirm: "The \(Format.bytes(r.trash)) in the Trash is erased for good. You can't undo this.",
+                                        confirm: "Everything in the Trash is erased for good: \(Format.bytes(r.trash)) when the disk was measured, and whatever went there since. You can't undo this.",
                                         done: nil))))
         }
         out.sort { ($0.bytes ?? 0) > ($1.bytes ?? 0) }

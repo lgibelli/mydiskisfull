@@ -151,14 +151,34 @@ pub fn kept(dir: &Path, name: &str, now: i64) -> Option<Answer> {
 fn plain(t: Option<String>) -> Option<String> {
     let t = t?.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = t.to_lowercase();
-    let words: Vec<&str> = lower.split_whitespace().collect();
+    let words: Vec<&str> = lower
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '"' | '\'' | '(' | ')'))
+        })
+        .collect();
+    // Commands no sentence of prose has a word for.
+    const TOOLS: [&str; 9] = [
+        "sudo",
+        "rm",
+        "rmdir",
+        "killall",
+        "tmutil",
+        "launchctl",
+        "diskutil",
+        "chmod",
+        "chown",
+    ];
     let runs = t.contains(['`', '<', '>'])
         || lower.contains("http:")
         || lower.contains("https:")
-        || words.contains(&"sudo")
-        || words
-            .windows(2)
-            .any(|w| w[0] == "rm" && w[1].starts_with('-'));
+        || words.iter().any(|w| TOOLS.contains(w))
+        || words.windows(2).any(|w| {
+            matches!(
+                w,
+                ["defaults", "write" | "delete"] | ["brew", "uninstall" | "cleanup"]
+            ) || (w[0] == "xcrun" && w[1] == "simctl")
+        });
     (!t.is_empty() && t.chars().count() <= LONGEST && !t.chars().any(char::is_control) && !runs)
         .then_some(t)
 }
@@ -432,10 +452,17 @@ mod tests {
             "See https://example.com.",
             "Use sudo to clear it.",
             "Delete it with rm -r.",
+            "Delete it with rm ~/Library/Caches/x.",
+            "Run defaults write com.apple.x Key -bool false.",
+            "Then run brew cleanup.",
+            "Use tmutil to thin the snapshots.",
+            "Run xcrun simctl delete unavailable.",
         ] {
             assert_eq!(plain(Some(runs.into())), None, "{runs}");
         }
         assert!(plain(Some("Its sudoku cache, platform -independent.".into())).is_some());
+        assert!(plain(Some("Homebrew's downloads; it clears them itself.".into())).is_some());
+        assert!(plain(Some("Chrome's form defaults, written as you type.".into())).is_some());
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "done": [
+    "/Users/me/devel/app/node_modules"
+  ],
+  "refused": [
+    {
+      "path": "/Users/me/Documents",
+      "why": "It isn't build output or a download cache."
+    }
+  ]
+}

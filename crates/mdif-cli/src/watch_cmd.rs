@@ -222,6 +222,10 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     if attached {
         exit_when_stdin_closes();
     }
+    // One watcher to a history: a second would count every write and
+    // growth twice. Held until this process ends.
+    #[cfg(not(windows))]
+    let _held = if once { None } else { Some(hold(db)?) };
     let store = Store::open(db)?;
     let mut w =
         Watcher::new(store, volume)?.with_access_check(mdif_core::os::sys::access_probes(&home()));
@@ -261,37 +265,44 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         interval,
         // `mdif agent uninstall` asks a Windows watcher to go by making a file.
         stop_asked(db),
-        |s| match s {
-            Ok(s) => {
-                #[cfg(windows)]
-                if !acknowledged {
-                    acknowledged = true;
-                    crate::agent_windows::acknowledge(db);
-                }
-                if !quiet {
-                    print_sample(s);
-                }
-                // Logged even when quiet: the agent's log is where they go.
-                for i in &s.opened {
-                    eprintln!(
-                        "{} incident: {} Fix: {}",
-                        local(s.point.ts).format("%F %H:%M"),
-                        i.sentence(Some(&home)),
-                        crate::tweaks_cmd::fix_line(&suggest::for_incident(
-                            i,
-                            &home,
-                            &crate::keep_cmd::load_or_warn(db)
-                        ))
-                    );
-                }
-                if let Some(store) = &tidy_store
-                    && s.point.ts >= tidy_next
-                {
-                    tidy_next = s.point.ts + HOUR;
-                    crate::tidy_cmd::run_due(store, db, s.point.ts);
-                }
+        |s| {
+            // Rotated as it runs, not only when it starts: it may run for
+            // weeks.
+            if log && std::fs::metadata(log_path()).is_ok_and(|m| m.len() > LOG_MAX) {
+                let _ = open_log(true);
             }
-            Err(e) => eprintln!("{} sample failed: {e:#}", local_now().format("%F %T")),
+            match s {
+                Ok(s) => {
+                    #[cfg(windows)]
+                    if !acknowledged {
+                        acknowledged = true;
+                        crate::agent_windows::acknowledge(db);
+                    }
+                    if !quiet {
+                        print_sample(s);
+                    }
+                    // Logged even when quiet: the agent's log is where they go.
+                    for i in &s.opened {
+                        eprintln!(
+                            "{} incident: {} Fix: {}",
+                            local(s.point.ts).format("%F %H:%M"),
+                            i.sentence(Some(&home)),
+                            crate::tweaks_cmd::fix_line(&suggest::for_incident(
+                                i,
+                                &home,
+                                &crate::keep_cmd::load_or_warn(db)
+                            ))
+                        );
+                    }
+                    if let Some(store) = &tidy_store
+                        && s.point.ts >= tidy_next
+                    {
+                        tidy_next = s.point.ts + HOUR;
+                        crate::tidy_cmd::run_due(store, db, s.point.ts);
+                    }
+                }
+                Err(e) => eprintln!("{} sample failed: {e:#}", local_now().format("%F %T")),
+            }
         },
     );
     Ok(())
@@ -305,6 +316,34 @@ fn stop_asked(db: &Path) -> impl FnMut() -> bool + '_ {
 #[cfg(not(windows))]
 fn stop_asked(_db: &Path) -> impl FnMut() -> bool {
     || false
+}
+
+/// The history's lock, `watch.lock` beside it, once no other watcher holds
+/// it: one started while another runs (the app's and `mdif agent`'s, or one
+/// in a terminal) waits for that one to stop rather than exiting, which
+/// launchd would answer by starting it again every few seconds. (On Windows
+/// `agent_windows::lock_path`'s claim refuses a second one instead: nothing
+/// starts it again.)
+#[cfg(not(windows))]
+fn hold(db: &Path) -> Result<std::fs::File> {
+    let dir = db.parent().context("no folder for the history")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = db.with_file_name("watch.lock");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if !mdif_core::os::fs::try_lock(&file)? {
+        eprintln!(
+            "{} another watcher keeps {}: waiting for it to stop",
+            local_now().format("%F %T"),
+            db.display()
+        );
+        mdif_core::os::fs::lock(&file)?;
+    }
+    Ok(file)
 }
 
 /// The App Store edition's app runs the watcher while it's open, with a pipe
@@ -486,7 +525,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     let open: Vec<_> = store
         .incidents_since(now)?
         .into_iter()
-        .filter(|e| e.closed.is_none())
+        .filter(|e| e.live(now))
         .collect();
     for e in &open {
         println!("Runaway: {}", e.incident.sentence(Some(&home())));

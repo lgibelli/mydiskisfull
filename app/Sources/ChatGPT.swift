@@ -52,12 +52,23 @@ final class ChatGPT: ObservableObject {
 
     func cancel() { attempt?.cancel() }
 
+    /// `mdif` forgets the tokens first, then asks OpenAI to end the session:
+    /// up to about two minutes on a connection that stalls, so it's given
+    /// longer than that. What's said is what it answered.
     func signOut() {
         problem = nil
         Task {
-            let r = try? await Core.json(SignedOut.self, ["knowledge", "sign-out"], timeout: 60)
+            var failed: String?
+            var r: SignedOut?
+            do {
+                r = try await Core.json(SignedOut.self, ["knowledge", "sign-out"], timeout: 180)
+            } catch {
+                failed = AskAI.sentence(error)
+            }
             await load()
-            if r?.revoked != true {
+            if let failed, signedIn {
+                problem = "Couldn't sign out: \(failed)"
+            } else if r?.revoked != true {
                 problem = "Signed out here, but OpenAI didn't confirm it: you can disconnect MyDiskIsFull in ChatGPT's settings."
             }
         }

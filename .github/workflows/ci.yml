@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # A release branch too: what's signed and released is tested as well.
+    branches: [main, 'release/**']
   pull_request:
   workflow_dispatch:
     inputs:

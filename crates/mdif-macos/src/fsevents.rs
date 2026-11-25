@@ -61,8 +61,10 @@ unsafe impl Send for Stream {}
 
 impl Stream {
     /// Watch `paths` (directories, recursively). `since` is an event ID to
-    /// replay from, or [`SINCE_NOW`]. Events caused by this process are
-    /// left out, so the watcher's own history writes never wake it.
+    /// replay from, or [`SINCE_NOW`]. Events this process causes while the
+    /// stream runs are left out; replayed ones aren't (FSEvents doesn't
+    /// know who made them), so a replay holds the watcher's own history
+    /// and log writes: two small folders listed again, their growth its own.
     pub fn start(paths: &[&Path], since: u64, latency: Duration) -> io::Result<Stream> {
         // Core Foundation needs valid UTF-8, and returns null otherwise.
         let paths: Vec<&str> = paths
@@ -164,6 +166,25 @@ pub fn current_event_id() -> u64 {
     unsafe { FSEventsGetCurrentEventId() }
 }
 
+/// The identity of the event history of the volume on device `dev`, as
+/// 32 hex digits: event IDs only mean something within one (a new one after
+/// its history was purged, or the volume restored). `None` when it has
+/// none.
+pub fn history_id(dev: i32) -> Option<String> {
+    unsafe {
+        let uuid = FSEventsCopyUUIDForDevice(dev);
+        if uuid.is_null() {
+            return None;
+        }
+        let bytes = CFUUIDGetUUIDBytes(uuid);
+        CFRelease(uuid);
+        Some(bytes.0.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+#[repr(C)]
+struct CfUuidBytes([u8; 16]);
+
 extern "C" fn callback(
     _stream: *const c_void,
     info: *mut c_void,
@@ -261,6 +282,7 @@ unsafe extern "C" {
     fn FSEventStreamRelease(stream: FSEventStreamRef);
     fn FSEventStreamGetLatestEventId(stream: FSEventStreamRef) -> u64;
     fn FSEventsGetCurrentEventId() -> u64;
+    fn FSEventsCopyUUIDForDevice(dev: libc::dev_t) -> *const c_void;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -280,6 +302,7 @@ unsafe extern "C" {
         callbacks: *const c_void,
     ) -> CFArrayRef;
     fn CFRelease(cf: *const c_void);
+    fn CFUUIDGetUUIDBytes(uuid: *const c_void) -> CfUuidBytes;
 }
 
 unsafe extern "C" {

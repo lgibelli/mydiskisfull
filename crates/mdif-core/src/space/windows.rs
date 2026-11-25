@@ -760,6 +760,7 @@ mod report_tests {
             avds: None,
             system_files: vec![file("pagefile.sys", 32 * GB), file("hiberfil.sys", 6 * GB)],
             quota_limited: false,
+            partial: false,
         };
         let r = report(&m, &Keep::default(), &[]);
         let kind = |id: &str| r.kinds.iter().find(|k| k.id == id).unwrap();

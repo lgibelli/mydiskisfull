@@ -14,9 +14,9 @@
 //! - `caches`: app and tool caches of 50 MB or more that nothing has written
 //!   to or read for 30 days, emptied while their app is closed.
 //! - `docker`: what Docker has had no use for in a week (stopped containers
-//!   that haven't run since, images no tag points to, networks no container
-//!   uses, build cache no build has used since), only while Docker is
-//!   running: it's never started for this. Until it runs, it waits.
+//!   that haven't run since, images no tag points to, build cache no build
+//!   has used since; never networks), only while Docker is running: it's
+//!   never started for this. Until it runs, it waits.
 //! - `backups`: folders a build or an install makes again
 //!   ([`timemachine::rebuildable`]) and tools' download caches of 10 MB or
 //!   more ([`timemachine::download_cache`]) kept out of Time Machine's
@@ -158,10 +158,10 @@ impl Id {
                  app is closed; the app makes what it needs again."
             }
             Id::Docker => {
-                "Stopped containers that haven't run for 7 days, images no tag points to, \
-                 networks no container uses, and build cache no build has used for 7 days. \
-                 Only while Docker is running: it's never started for this. Volumes and tagged \
-                 images stay."
+                "Stopped containers that haven't run for 7 days, with what was written inside \
+                 them (not in a volume), images no tag points to, and build cache no build has \
+                 used for 7 days. Only while Docker is running: it's never started for this. \
+                 Volumes, networks and tagged images stay."
             }
             Id::Backups => {
                 "Keeps the folders a build or an install makes again (target, build, \
@@ -490,8 +490,7 @@ fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     let mut o = Outcome::default();
     // The marks first: they're reads, git only for what isn't marked yet.
     fn unmarked(d: &Path) -> bool {
-        !crate::os::fs::excluded_from_backup(d).unwrap_or(true)
-            && !crate::os::fs::has_mark(d, crate::timemachine::LET_IN).unwrap_or(true)
+        !crate::os::fs::excluded_from_backup(d).unwrap_or(true) && !crate::timemachine::let_in(d)
     }
     let mut found = artifact_dirs(home, |d| {
         unmarked(d) && crate::timemachine::rebuildable(d).is_some()
@@ -583,6 +582,8 @@ fn simulators(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
         .map(|out| parse_runtimes(&out.stdout))
         .unwrap_or_default();
     let mut names = Vec::new();
+    // The images deleted (not on a dry run).
+    let mut deleted: Vec<String> = Vec::new();
     match sim(&runtime_dry_run_args(), 60) {
         Some(out) if out.status.success() || nothing_to_delete(&out) => {
             for uuid in parse_would_delete(&String::from_utf8_lossy(&out.stdout)) {
@@ -610,6 +611,7 @@ fn simulators(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
                     Some(out) if out.status.success() => {
                         o.did(id, path, bytes);
                         names.push(name);
+                        deleted.push(uuid.clone());
                     }
                     other => {
                         let why = format!("The {name} wasn't deleted: {}", failure(other.as_ref()));
@@ -622,11 +624,26 @@ fn simulators(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     }
 
     // Simulators left without a runtime. On a dry run, those without one
-    // now: the runtimes it would delete are still there.
-    let devices = sim(&strings(&["list", "devices", "-j"]), 30)
+    // now: the runtimes it would delete are still there. Only once simctl
+    // has said which runtimes it has: an image deleted just now isn't one.
+    let mut known: Option<Vec<String>> = sim(&strings(&["list", "runtimes", "-j"]), 30)
         .filter(|out| out.status.success())
-        .map(|out| parse_unavailable(&out.stdout))
-        .unwrap_or_default();
+        .and_then(|out| parse_runtime_ids(&out.stdout));
+    if let Some(k) = known.as_mut() {
+        k.extend(
+            runtimes
+                .iter()
+                .filter(|r| !deleted.contains(&r.identifier) && !r.runtime.is_empty())
+                .map(|r| r.runtime.clone()),
+        );
+    }
+    let devices = match &known {
+        Some(k) => sim(&strings(&["list", "devices", "-j"]), 30)
+            .filter(|out| out.status.success())
+            .map(|out| parse_unavailable(&out.stdout, k))
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let mut gone = 0;
     for d in devices {
         let dir = d.dir.clone().unwrap_or_else(|| {
@@ -737,6 +754,8 @@ pub fn parse_would_delete(out: &str) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimRuntime {
     pub identifier: String,
+    /// What simulators name it by: `com.apple.CoreSimulator.SimRuntime.iOS-27-0`.
+    pub runtime: String,
     /// "iOS 27.0 Simulator".
     pub name: String,
     /// The asset folder that holds it (as the Overview shows it), or the
@@ -761,6 +780,7 @@ pub fn parse_runtimes(out: &[u8]) -> Vec<SimRuntime> {
             };
             SimRuntime {
                 identifier: r["identifier"].as_str().unwrap_or(key).to_string(),
+                runtime: r["runtimeIdentifier"].as_str().unwrap_or("").to_string(),
                 name: runtime_name(r),
                 path: PathBuf::from(path),
                 bytes: r["sizeBytes"].as_u64().unwrap_or(0),
@@ -779,18 +799,55 @@ pub struct SimDevice {
     pub bytes: u64,
 }
 
-/// The simulators `simctl list devices -j` says aren't available.
-pub fn parse_unavailable(out: &[u8]) -> Vec<SimDevice> {
-    crate::xcode::parse_simulators(out)
-        .into_iter()
-        .filter(|s| !s.available)
-        .map(|s| SimDevice {
-            udid: s.udid,
-            name: s.name,
-            dir: s.dir,
-            bytes: s.bytes,
+/// The simulators `simctl list devices -j` says are unavailable because
+/// their runtime is gone, on a runtime none of `runtimes` is (what simctl
+/// can run, and the images it has, mounted or not): not one whose runtime
+/// is there but can't be used for now, nor one whose device type is
+/// missing. Those stay.
+pub fn parse_unavailable(out: &[u8], runtimes: &[String]) -> Vec<SimDevice> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(out) else {
+        return Vec::new();
+    };
+    let Some(by_runtime) = v["devices"].as_object() else {
+        return Vec::new();
+    };
+    by_runtime
+        .iter()
+        .filter(|(runtime, _)| !runtimes.contains(runtime))
+        .filter_map(|(_, list)| list.as_array())
+        .flatten()
+        .filter(|d| {
+            // Before Xcode 10.1: "(unavailable, runtime profile not found)".
+            let why = d["availabilityError"]
+                .as_str()
+                .or(d["availability"].as_str())
+                .unwrap_or("");
+            d["isAvailable"].as_bool() != Some(true) && why.contains("runtime profile not found")
+        })
+        .filter_map(|d| {
+            Some(SimDevice {
+                udid: d["udid"].as_str()?.to_string(),
+                name: d["name"].as_str().unwrap_or("").to_string(),
+                dir: d["dataPath"]
+                    .as_str()
+                    .and_then(|p| Path::new(p).parent())
+                    .map(Path::to_path_buf),
+                bytes: d["dataPathSize"].as_u64().unwrap_or(0),
+            })
         })
         .collect()
+}
+
+/// What `simctl list runtimes -j` says simctl can run, by identifier.
+pub fn parse_runtime_ids(out: &[u8]) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_slice(out).ok()?;
+    Some(
+        v["runtimes"]
+            .as_array()?
+            .iter()
+            .filter_map(|r| r["identifier"].as_str().map(str::to_string))
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -835,8 +892,9 @@ fn unused(
                 continue;
             }
         };
-        // Hard links (Rust's `deps`, pnpm's store) count once.
-        let bytes = crate::scan::size_of(&dir).unwrap_or(0);
+        // What deleting it frees: a pnpm store's hard links, or a clone,
+        // frees nothing however big it looks.
+        let bytes = crate::scan::freed_by(&dir).unwrap_or(0);
         let project = dir.parent().map(Path::to_path_buf);
         if dry_run {
             o.did(id, dir, bytes);
@@ -1016,7 +1074,7 @@ fn incremental(home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome {
                 continue;
             }
         };
-        let bytes = crate::scan::size_of(&dir).unwrap_or(0);
+        let bytes = crate::scan::freed_by(&dir).unwrap_or(0);
         let project = project_of(&dir);
         if dry_run {
             o.did(id, dir, bytes);
@@ -1136,7 +1194,8 @@ fn caches(
         let Some(owner) = clean::cache_of(&dir, home) else {
             continue;
         };
-        if clean::NOT_REMADE.contains(&owner.as_str()) {
+        // What its tool doesn't download again by itself is left to you.
+        if clean::not_refilled(&owner).is_some() {
             continue;
         }
         if let Some(entry) = kept(keep, &dir) {
@@ -1223,12 +1282,21 @@ fn cache_folders(home: &Path, may_open: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> 
 // Looking, metadata only.
 
 /// The real folders in `dir` (links aren't followed), with their names.
+/// The folders in `dir`: not a link to one, nor another volume mounted
+/// there (a share, a disk image), which a walk would list and mark.
 fn subdirs(dir: &Path) -> Vec<(std::ffi::OsString, PathBuf)> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
+    let (Ok(rd), Ok(dev)) = (
+        std::fs::read_dir(dir),
+        std::fs::symlink_metadata(dir).map(|m| crate::portable::dev(dir, &m)),
+    ) else {
         return Vec::new();
     };
     rd.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            e.metadata()
+                .is_ok_and(|m| crate::portable::dev(e, &m) == dev)
+        })
         .map(|e| (e.file_name(), e.path()))
         .collect()
 }
@@ -1591,6 +1659,27 @@ mod tests {
         File::open(path).unwrap().set_times(times).unwrap();
     }
 
+    /// "Code" is a code folder as "code" is: where the disk ignores case
+    /// they are one folder, and what's in it is found once, as the disk
+    /// spells it, not once per spelling ("1.8 GB in 2 folders" for 880 MB).
+    #[test]
+    fn a_code_folder_is_looked_at_once_whatever_its_case() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join("Code/app/node_modules")).unwrap();
+        std::fs::create_dir_all(h.join("Work/site/target/debug/incremental")).unwrap();
+        std::fs::write(h.join("Work/site/Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(h.join("Elsewhere/x/node_modules")).unwrap();
+        assert_eq!(
+            artifact_folders(h),
+            [h.join("Code/app/node_modules"), h.join("Work/site/target")]
+        );
+        assert_eq!(
+            incremental_dirs(h),
+            [h.join("Work/site/target/debug/incremental")]
+        );
+    }
+
     fn write(path: &Path, bytes: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![7u8; bytes]).unwrap();
@@ -1838,6 +1927,8 @@ mod tests {
         let read = cache(h, "Library/Caches/com.example.mdif-read", 300_000, old);
         let apple = cache(h, "Library/Caches/com.apple.mdif-test", 300_000, old);
         let models = cache(h, ".cache/huggingface", 300_000, old);
+        let cypress = cache(h, "Library/Caches/Cypress", 300_000, old);
+        let whisper = cache(h, ".cache/whisper", 300_000, old);
         let kept = cache(h, "Library/Caches/com.example.mdif-kept", 300_000, old);
         // Written to deep inside 2 days ago, or read yesterday.
         let blob = written.join("a/b/c/blob");
@@ -1880,7 +1971,9 @@ mod tests {
         for d in [&big, &tool, &electron] {
             assert!(d.is_dir() && std::fs::read_dir(d).unwrap().count() == 0);
         }
-        for d in [&small, &written, &read, &apple, &models, &kept] {
+        for d in [
+            &small, &written, &read, &apple, &models, &cypress, &whisper, &kept,
+        ] {
             assert!(d.join("a/b/c/blob").is_file(), "{}", d.display());
         }
         assert_eq!(o.note.as_deref(), Some("Emptied 3 caches"));
@@ -2062,12 +2155,14 @@ mod tests {
             [
                 SimRuntime {
                     identifier: "0A1B2C3D-0000-4000-8000-00000000000A".into(),
+                    runtime: "com.apple.CoreSimulator.SimRuntime.watchOS-11-0".into(),
                     name: "watchOS 11.0 Simulator".into(),
                     path: "/Library/Developer/CoreSimulator/Images/0A1B2C3D.dmg".into(),
                     bytes: 0,
                 },
                 SimRuntime {
                     identifier: "2BFB81AB-BA92-4510-90B5-F1DA4A8F84FC".into(),
+                    runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-0".into(),
                     name: "iOS 26.0 Simulator".into(),
                     path: "/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime/3e80.asset".into(),
                     bytes: 8_067_000_161,
@@ -2103,10 +2198,31 @@ mod tests {
                 "availability" : "(unavailable, runtime profile not found)",
                 "name" : "iPhone X"
               }
+            ],
+            "com.apple.CoreSimulator.SimRuntime.iOS-25-0" : [
+              {
+                "udid" : "33333333-2222-3333-4444-555555555555",
+                "isAvailable" : false,
+                "availabilityError" : "runtime profile not found",
+                "name" : "iPhone 16, its image not mounted"
+              }
+            ],
+            "com.apple.CoreSimulator.SimRuntime.iOS-24-0" : [
+              {
+                "udid" : "44444444-2222-3333-4444-555555555555",
+                "isAvailable" : false,
+                "availabilityError" : "device type profile not found",
+                "name" : "iPhone 15, its device type missing"
+              }
             ]
           }
         }"#;
-        let mut gone = parse_unavailable(devices);
+        // The iOS 25 image is there, not mounted; the iOS 27 runtime runs.
+        let known = [
+            "com.apple.CoreSimulator.SimRuntime.iOS-27-0".to_string(),
+            "com.apple.CoreSimulator.SimRuntime.iOS-25-0".to_string(),
+        ];
+        let mut gone = parse_unavailable(devices, &known);
         gone.sort_by(|a, b| a.udid.cmp(&b.udid));
         assert_eq!(
             gone,
@@ -2128,6 +2244,13 @@ mod tests {
                 },
             ]
         );
-        assert!(parse_unavailable(b"{}").is_empty());
+        assert!(parse_unavailable(b"{}", &known).is_empty());
+        let listed =
+            br#"{"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0"}]}"#;
+        assert_eq!(
+            parse_runtime_ids(listed).unwrap(),
+            ["com.apple.CoreSimulator.SimRuntime.iOS-27-0"]
+        );
+        assert_eq!(parse_runtime_ids(b"nope"), None);
     }
 }

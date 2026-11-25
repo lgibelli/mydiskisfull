@@ -6,10 +6,12 @@
 #
 # What a fresh history can't show (open incidents, every kind of fix, an
 # undone tweak, a tweak that installs a profile, a tidy-up that ran, alert
-# settings that were changed) comes from app/Tests/*.json; Rust tests in
-# status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs and alerts_cmd.rs hold those
-# fixtures to the real serialization. map.json is a made-up Windows drive (the
-# Windows app's window shows it when opened in a browser).
+# settings that were changed, a clean-up done, a folder kept out of Time
+# Machine, a backup started, a sign-out) comes from app/Tests/*.json; Rust
+# tests beside each command (status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs,
+# alerts_cmd.rs, clean_cmd.rs, timemachine_cmd.rs, knowledge_cmd.rs) hold
+# those fixtures to the real serialization. map.json is a made-up Windows
+# drive (the Windows app's window shows it when opened in a browser).
 #
 #   app/build.sh && app/check-contract.sh
 #
@@ -87,4 +89,8 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     alerts=app/Tests/alerts.json \
     timemachine=app/Tests/timemachine.json \
     docker=app/Tests/docker.json \
-    map=app/Tests/map.json
+    map=app/Tests/map.json \
+    clean=app/Tests/clean.json \
+    exclusion=app/Tests/exclude.json \
+    started=app/Tests/back-up.json \
+    signedout=app/Tests/sign-out.json

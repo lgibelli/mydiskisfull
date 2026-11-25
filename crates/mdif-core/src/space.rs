@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use crate::clean::{self, Action, Step};
 use crate::keep::Keep;
 use crate::map::DATA_ROOT;
-use crate::owners::{ARTIFACTS, CODE_ROOTS};
+use crate::owners::ARTIFACTS;
 use crate::scan::{self, Node, Options};
 use crate::suggest::display;
 use crate::units::bytes;
@@ -221,6 +221,12 @@ pub struct Measured {
     /// couldn't see isn't worked out from them.
     #[serde(default)]
     pub quota_limited: bool,
+    /// A clean-up was in a folder [`update`] couldn't measure again (too
+    /// big, or the whole home folder): the volume's figures are now, that
+    /// folder's aren't, and what it freed shows as less System data until
+    /// it's measured again.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// A file of yours of at least [`clean::BIG_FILE`] allocated bytes, as the
@@ -334,6 +340,9 @@ pub struct Runtime {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub measured: i64,
+    /// Patched where it couldn't be measured again ([`Measured::partial`]):
+    /// to be measured again.
+    pub partial: bool,
     pub took_secs: f64,
     pub volume: VolumeSpace,
     /// Space counted as used that is freed without a clean-up: purgeable,
@@ -546,6 +555,7 @@ pub fn measure(home: &Path) -> Result<Measured> {
         avds: None,
         system_files,
         quota_limited,
+        partial: false,
     };
     let sorted = sort(&m, &Keep::default());
     let apps: Vec<String> = sorted
@@ -600,6 +610,7 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
         if depth < 3
             || node_mut(&mut m.tree, &names[..depth]).is_none_or(|d| d.allocated > PATCH_MAX)
         {
+            m.partial = true;
             continue;
         }
         let at = under(&names[..depth]);
@@ -613,6 +624,11 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             continue;
         };
         new.name = old.name.clone();
+        // Each folder above's dates, size-weighted, as the new sizes have
+        // them: what went was likely what was old (a clean-up), and the
+        // folder above would stay "unused" as if it were still there.
+        let weight = |d: &Dir| d.mtime.unwrap_or(0) as i128 * d.allocated as i128;
+        let dw = weight(&new) - weight(old);
         let delta = |n: u64, o: u64| n as i128 - o as i128;
         let (da, dp, dc, dk, dt) = (
             delta(new.allocated, old.allocated),
@@ -625,7 +641,9 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
         let apply = |v: &mut u64, d: i128| *v = (*v as i128 + d).max(0) as u64;
         for up in 0..depth {
             if let Some(a) = node_mut(&mut m.tree, &names[..up]) {
+                let w = weight(a) + dw;
                 apply(&mut a.allocated, da);
+                a.mtime = (a.allocated > 0).then(|| (w / a.allocated as i128) as i64);
                 apply(&mut a.private, dp);
                 apply(&mut a.cold, dc);
                 apply(&mut a.cloned, dk);
@@ -1134,8 +1152,8 @@ fn in_home(c: &[String], name: &str) -> Option<Class> {
         [".cache"] => group(Caches),
         [".cache", _] => item(Caches, What::Cache),
         [t] if DEV_HOME.contains(t) => item(Dev, What::Plain),
-        [root] if CODE_ROOTS.contains(root) => item(Files, What::Plain),
-        [root, _, .., last] if CODE_ROOTS.contains(root) && ARTIFACTS.contains(last) => {
+        [root] if crate::owners::is_code_root(root) => item(Files, What::Plain),
+        [root, _, .., last] if crate::owners::is_code_root(root) && ARTIFACTS.contains(last) => {
             item(Build, What::Artifact)
         }
         [_] => item(Files, What::Plain),
@@ -1568,6 +1586,7 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
 
     Report {
         measured: m.measured,
+        partial: m.partial,
         took_secs: m.took_secs,
         volume: m.volume,
         comes_back: comes_back(m, &back),
@@ -1850,11 +1869,18 @@ fn describe(
             note = Some("Xcode's build output: the next build makes it again".into());
         }
         What::Cache => {
-            flags.extend(["cache", "regrows"]);
+            let owner = clean::cache_of(&s.path, &m.home);
+            let kept = owner.as_deref().and_then(clean::not_refilled).is_some();
+            flags.push("cache");
+            if !kept {
+                flags.push("regrows");
+            }
             note = Some(if s.path == Path::new("/private/var/folders") {
                 "Apps' temporary files and caches: macOS clears out old ones itself".into()
-            } else if s.path.starts_with(&m.home) && clean::cache_of(&s.path, &m.home).is_none() {
+            } else if s.path.starts_with(&m.home) && owner.is_none() {
                 "macOS's own, or shared by several apps: left to macOS".into()
+            } else if kept {
+                "Its tool doesn't download what's in it again by itself".into()
             } else {
                 "Apps fill it again as they run".into()
             });
@@ -1926,7 +1952,7 @@ fn describe(
     {
         note = Some(minecraft_note(&s.path, &m.home));
     }
-    let about = about(m, &s.path, bytes);
+    let about = about(m, keep, &s.path, bytes);
     let known = crate::knowledge::known(&s.path, &m.home);
     // Said in particular: a folder's own note (the list's, a game's), its
     // handler, the list's explanation; for a cache, the note on what all
@@ -2099,7 +2125,7 @@ fn dir_of<'a>(m: &'a Measured, item: &Path) -> Option<&'a Dir> {
 }
 
 /// The biggest folder in an item (or the item) that an app's handler knows.
-fn about(m: &Measured, item: &Path, bytes: u64) -> Option<About> {
+fn about(m: &Measured, keep: &Keep, item: &Path, bytes: u64) -> Option<About> {
     fn walk(
         d: &Dir,
         path: PathBuf,
@@ -2136,17 +2162,24 @@ fn about(m: &Measured, item: &Path, bytes: u64) -> Option<About> {
         what: h.what,
         how: h.how,
         open: h.open,
-        action: empty_action(h, &path, &m.home).or_else(|| trash_action(h, &path, &m.home, size)),
+        action: empty_action(h, &path, &m.home, keep)
+            .or_else(|| trash_action(h, &path, &m.home, keep, size)),
     })
 }
 
-/// The button for a folder its handler says can go to the Trash.
-fn trash_action(h: &crate::handlers::Handler, at: &Path, home: &Path, size: u64) -> Option<Action> {
-    // Planning looks inside it, which may prompt (a cloud provider's folder).
+/// The button for a folder its handler says can go to the Trash: none
+/// when `mdif clean` would refuse it (something kept in it, or around it).
+fn trash_action(
+    h: &crate::handlers::Handler,
+    at: &Path,
+    home: &Path,
+    keep: &Keep,
+    size: u64,
+) -> Option<Action> {
     if !h.trash || !crate::privacy::may_open(at) {
         return None;
     }
-    let Ok(Step::Trash { .. }) = clean::plan(at, home, &Keep::default(), &[], &[]) else {
+    let Ok(Step::Trash { .. }) = clean::plan(at, home, keep, &[], &[]) else {
         return None;
     };
     Some(Action {
@@ -2165,8 +2198,13 @@ fn trash_action(h: &crate::handlers::Handler, at: &Path, home: &Path, size: u64)
 }
 
 /// The button for a handler's caches: those of its folders to empty that
-/// are there now and that `mdif clean` would empty.
-fn empty_action(h: &crate::handlers::Handler, base: &Path, home: &Path) -> Option<Action> {
+/// are there now and that `mdif clean` would empty (none kept).
+fn empty_action(
+    h: &crate::handlers::Handler,
+    base: &Path,
+    home: &Path,
+    keep: &Keep,
+) -> Option<Action> {
     fn expand(at: PathBuf, rest: &[&str], out: &mut Vec<PathBuf>) {
         let Some((first, rest)) = rest.split_first() else {
             if std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
@@ -2195,12 +2233,7 @@ fn empty_action(h: &crate::handlers::Handler, base: &Path, home: &Path) -> Optio
             &mut found,
         );
     }
-    found.retain(|p| {
-        matches!(
-            clean::plan(p, home, &Keep::default(), &[], &[]),
-            Ok(Step::Empty { .. })
-        )
-    });
+    found.retain(|p| matches!(clean::plan(p, home, keep, &[], &[]), Ok(Step::Empty { .. })));
     let size: u64 = found.iter().filter_map(|p| scan::size_of(p)).sum();
     if found.is_empty() || size < 50_000_000 {
         return None;
@@ -2417,8 +2450,9 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
             ..Default::default()
         });
     }
-    // Planning looks inside it, which may prompt (another app's container), and
-    // this runs in the watcher too, after a tidy-up.
+    // Planning looks inside it (and asks git), which may prompt (another
+    // app's container): not where nobody is there to answer (this runs in the
+    // watcher too, after a tidy-up).
     if !matches!(
         s.what,
         What::Artifact | What::Incremental | What::Cache | What::DerivedData | What::DevCache
@@ -2456,29 +2490,29 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
             });
         }
         // Whether its app is open is asked when it's done: this is cached.
+        // A tool's cache that doesn't fill again by itself is offered, not
+        // ticked: what it costs is said beside it.
         Ok(Step::Empty { owner, .. }) => {
-            // What doesn't come back by itself is never ticked to go.
-            let lost = clean::not_remade(&owner);
-            let confirm = match lost {
-                Some(lost) => format!(
-                    "Empty {shown}? {} on disk. What's in it is deleted, not moved to the \
-                     Trash, and doesn't come back by itself: {lost}",
-                    bytes(s.whole)
-                ),
-                None => format!(
-                    "Empty {shown}? {} on disk. What's in it is deleted, not moved to the \
-                     Trash; the app makes what it needs again, so it may be slower for a while \
-                     and download some of it again.",
-                    bytes(s.whole)
-                ),
-            };
+            let lost = clean::not_refilled(&owner);
             return Some(Action {
                 kind: "empty",
                 label: "Empty Cache".into(),
                 safe: lost.is_none(),
-                quit: Some(owner),
+                quit: Some(clean::app_of(&owner).to_string()),
                 paths: vec![i.path.clone()],
-                confirm: Some(confirm),
+                confirm: Some(match lost {
+                    None => format!(
+                        "Empty {shown}? {} on disk. What's in it is deleted, not moved to the \
+                         Trash; the app makes what it needs again, so it may be slower for a \
+                         while and download some of it again.",
+                        bytes(s.whole)
+                    ),
+                    Some(lost) => format!(
+                        "Empty {shown}? {} on disk. What's in it is deleted, not moved to the \
+                         Trash, and nothing fills it again by itself: {lost}",
+                        bytes(s.whole)
+                    ),
+                }),
                 done: None,
                 ..Default::default()
             });
@@ -2749,8 +2783,9 @@ fn docker_action() -> Action {
         paths: vec![crate::docker::OLD.into()],
         confirm: Some(
             "Remove what Docker hasn't used in a week? Stopped containers that haven't run for 7 \
-             days, images no tag points to, networks no container uses, and build cache no build \
-             has used for 7 days. Volumes and tagged images stay. If Docker isn't running, it's \
+             days, with what was written inside them (not in a volume), images no tag points \
+             to, and build cache no build has used for 7 days. Volumes, networks and tagged \
+             images stay. If Docker isn't running, it's \
              started in the background for this and quit after."
                 .into(),
         ),
@@ -2868,7 +2903,7 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     } else {
         let trash = m.home.join(".Trash");
         if crate::privacy::may_open(&trash) && trash.is_dir() {
-            scan::size_of(&trash).unwrap_or(b.trash)
+            scan::freed_by(&trash).unwrap_or(b.trash)
         } else {
             b.trash
         }
@@ -3014,6 +3049,22 @@ fn month(t: i64, now: i64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_folder_with_something_kept_in_it_gets_no_button() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let gone = h.join("Library/CloudStorage/GoogleDrive-me@example.com (11-10-24 10:55)");
+        std::fs::create_dir_all(gone.join("Taxes")).unwrap();
+        std::fs::write(gone.join("Taxes/2025.pdf"), "x").unwrap();
+        let handler = crate::handlers::find(gone.strip_prefix(h).unwrap()).unwrap();
+        assert!(trash_action(handler, &gone, h, &Keep::default(), 300 * MB).is_some());
+        let keep = Keep::parse(
+            "~/Library/CloudStorage/GoogleDrive-me@example.com (11-10-24 10:55)/Taxes\n",
+            h,
+        );
+        assert!(trash_action(handler, &gone, h, &keep, 300 * MB).is_none());
+    }
+
     const GB: u64 = 1_000_000_000;
     const MB: u64 = 1_000_000;
     /// 2026-10-21 12:00 UTC.
@@ -3086,6 +3137,7 @@ mod tests {
             avds: None,
             system_files: Vec::new(),
             quota_limited: false,
+            partial: false,
         }
     }
 
@@ -3985,6 +4037,62 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_cache_that_doesnt_fill_again_by_itself_isnt_ticked() {
+        // A real home with two tools' caches, measured as the whole-disk
+        // scan would, set in a tree from the root down to it. Not in the
+        // default temp folder: all of `/private/var/folders` is one item.
+        let tmp = tempfile::tempdir_in("/private/tmp").unwrap();
+        let home = tmp.path().canonicalize().unwrap().join("home");
+        for tool in ["huggingface", "tool"] {
+            let d = home.join(".cache").join(tool).join("data");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("f"), vec![1u8; 300_000]).unwrap();
+        }
+        let opts = scan::Options {
+            min_node: 1,
+            ..TREE
+        };
+        let mut tree = Dir::from_node(&scan::scan(&home, &opts).unwrap().root, false);
+        tree.name = "home".into();
+        let names: Vec<String> = home
+            .strip_prefix("/")
+            .unwrap()
+            .iter()
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        for n in names[..names.len() - 1].iter().rev() {
+            tree = Dir {
+                name: n.clone(),
+                allocated: tree.allocated,
+                private: tree.private,
+                children: vec![tree],
+                ..Dir::default()
+            };
+        }
+        let root = Dir {
+            name: DATA_ROOT.into(),
+            allocated: tree.allocated,
+            private: tree.private,
+            children: vec![tree],
+            ..Dir::default()
+        };
+        let mut m = measured(root, Vec::new(), 0);
+        m.home = home.clone();
+        let r = report(&m, &Keep::default(), &[]);
+        let action = |name: &str| {
+            named(&r, "caches", name)
+                .action
+                .clone()
+                .unwrap_or_else(|| panic!("a button for {name}"))
+        };
+        let models = action("huggingface");
+        assert!(!models.safe, "offered, not ticked");
+        let why = models.confirm.unwrap();
+        assert!(why.contains("nothing fills it again by itself"), "{why}");
+        assert!(action("tool").safe);
+    }
+
+    #[test]
     fn a_clean_up_is_measured_again_where_it_was_and_above() {
         // A real folder with two big-enough parts, measured as the whole-disk
         // scan would, then set in a tree from the root down to it.
@@ -4008,11 +4116,18 @@ mod tests {
             .map(|n| n.to_string_lossy().into_owned())
             .collect();
         let mut tree = inner;
+        // Around it, 5 GB a level last changed long ago.
+        const LONG_AGO: i64 = 1_000_000;
+        let mean = |a: (Option<i64>, u64), b: (i64, u64)| {
+            ((a.0.unwrap_or(0) as i128 * a.1 as i128 + b.0 as i128 * b.1 as i128)
+                / (a.1 + b.1) as i128) as i64
+        };
         for n in names[..names.len() - 1].iter().rev() {
             tree = Dir {
                 name: n.clone(),
                 allocated: tree.allocated + 5 * GB,
                 private: tree.private + 5 * GB,
+                mtime: Some(mean((tree.mtime, tree.allocated), (LONG_AGO, 5 * GB))),
                 children: vec![tree],
                 ..Dir::default()
             };
@@ -4034,14 +4149,40 @@ mod tests {
             .unwrap()
             .allocated;
         assert!(gone > 0 && gone < before);
+        let dated = node_mut(&mut m.tree, &names[..names.len() - 1])
+            .unwrap()
+            .mtime
+            .unwrap();
         std::fs::remove_dir_all(&goes).unwrap();
         update(&mut m, &[goes]).unwrap();
         let project = node_mut(&mut m.tree, &names).unwrap();
         assert!(project.children.iter().all(|c| c.name != "goes"));
         assert_eq!(project.allocated, before - gone);
+        // The folder above is dated by what it holds now (to the second:
+        // its mean was rounded).
+        let now = (project.mtime, project.allocated);
+        let above = node_mut(&mut m.tree, &names[..names.len() - 1]).unwrap();
+        let want = mean(now, (LONG_AGO, 5 * GB));
+        assert!(
+            (above.mtime.unwrap() - want).abs() <= 1,
+            "{:?} {want}",
+            above.mtime
+        );
+        // Before, it was dated later than that, by far more than a second:
+        // what went was new, next to 5 GB of old.
+        assert!(dated - want > 10, "{dated} {want}");
         assert_eq!(m.tree.allocated, root_before - gone);
         // Free space is what the disk says now.
         assert_eq!(m.volume.used + m.volume.free, m.volume.total);
+        assert!(!m.partial);
+        // A folder too big to measure in a moment: left as it was, and the
+        // measurement says it's to be measured again, not that what it
+        // freed is less System data.
+        let big = node_mut(&mut m.tree, &names).unwrap();
+        big.allocated = PATCH_MAX + 1;
+        update(&mut m, &[top.join("keep")]).unwrap();
+        assert!(m.partial);
+        assert!(report(&m, &Keep::default(), &[]).partial);
     }
 
     #[test]
@@ -4263,6 +4404,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../app/Tests/space.json")).unwrap();
         let real = serde_json::to_value(Report {
             measured: 0,
+            partial: false,
             took_secs: 0.0,
             volume: VolumeSpace::default(),
             comes_back: vec![ComesBack {

@@ -28,15 +28,20 @@ final class MapModel: ObservableObject {
     static let refreshEvery: TimeInterval = 60 * 60
 
     private var loaded = false
+    /// When the last map that didn't finish (failed, or cancelled) started.
+    private var triedAt: Date?
 
     func age(at now: Date = Date()) -> TimeInterval? {
         measuredAt.map { now.timeIntervalSince($0) }
     }
 
-    /// Measures in the background if there's no map or it's older than `limit`.
+    /// Measures in the background if there's no map or it's older than `limit`,
+    /// and none was tried in that time: one that failed or was cancelled
+    /// isn't run again a minute later, the whole disk each time.
     func refreshIfOld(_ limit: TimeInterval) {
         guard !running, Self.mayMeasure else { return }
         if let age = age(), age < limit { return }
+        if let t = triedAt, Date().timeIntervalSince(t) < limit { return }
         Task { await measure(automatic: true) }
     }
 
@@ -84,21 +89,36 @@ final class MapModel: ObservableObject {
     func measure(automatic: Bool = false) async {
         guard !running, Self.mayMeasure else { return }
         running = true
-        started = Date()
+        let start = Date()
+        started = start
         defer { running = false }
         await loadGrowth()
+        #if APP_STORE
+        // A folder rather than the disk: map that.
+        let root = AppDelegate.monitor?.access.mapRoot
+        #endif
         do {
             var args = ["map", "--depth", "6", "--min-mb", "200", "--json"]
+            // Nobody asked: no privacy prompt, which nobody would answer.
+            if automatic { args.append("--unattended") }
             #if APP_STORE
-            // A folder rather than the disk: map that.
-            if let root = AppDelegate.monitor?.access.mapRoot { args += ["--root", root] }
+            if let root { args += ["--root", root] }
             #endif
             // At background priority it takes longer, the more so the busier the Mac is.
             let data = try await Core.run(args, timeout: automatic ? 3600 : 900,
                                           qos: automatic ? .background : .userInitiated)
             let fresh = try Wire.decode(DiskMap.self, from: data)
+            #if APP_STORE
+            // Another folder was chosen meanwhile: this map is of the old
+            // one. That one's, now.
+            if AppDelegate.monitor?.access.mapRoot != root {
+                Task { await measure(automatic: automatic) }
+                return
+            }
+            #endif
             map = fresh
             measuredAt = Date()
+            triedAt = nil
             error = nil
             if let url = Self.keptURL {
                 try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
@@ -106,8 +126,10 @@ final class MapModel: ObservableObject {
                 try? data.write(to: url, options: .atomic)
             }
         } catch is DecodingError {
+            triedAt = start
             self.error = "The bundled mdif printed something this version of the app can't read."
         } catch {
+            triedAt = start
             self.error = error.localizedDescription
         }
     }
@@ -154,6 +176,13 @@ struct FoldersView: View {
         var parts = ["Sizes are what deleting would free"]
         if m.scan.sharedOnce >= 1_000_000_000 {
             parts.append("\(Format.bytes(m.scan.sharedOnce)) more is shared by clones and snapshots")
+        }
+        if m.scan.sharedUncertain >= 1_000_000_000 {
+            parts.append("Up to \(Format.bytes(m.scan.sharedUncertain)) may be counted twice: files that may be clones, whose blocks couldn't be read")
+        }
+        // The whole disk mapped: what it holds that no folder shows.
+        if MapContext.userPath(m.scan.root) == "/", m.unmeasured >= 1_000_000_000 {
+            parts.append("\(Format.bytes(m.unmeasured)) more is in use outside any folder shown: files only the system can read, the file system's own records, blocks only snapshots hold")
         }
         if t.datalessLogical >= 1_000_000_000 {
             parts.append("\(Format.bytes(t.datalessLogical)) is in the cloud only, not on this Mac")

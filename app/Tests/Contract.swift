@@ -75,6 +75,11 @@ enum Contract {
                 case "exclusion":
                     let r = try check(BackupExclusion.self, path)
                     summary = "\(r.done.count) done, \(r.refused.count) refused"
+                case "started":
+                    let r = try check(BackupStarted.self, path)
+                    summary = r.started ? "started" : "not started: \(r.why ?? "")"
+                case "signedout":
+                    summary = try check(SignedOut.self, path).revoked ? "revoked" : "not revoked"
                 default:
                     print("unknown kind \(kind)"); exit(2)
                 }

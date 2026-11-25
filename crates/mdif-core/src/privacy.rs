@@ -119,6 +119,9 @@ mod tests {
             "/volumes/Backup",
             "/Users/me/devel/../Documents/x",
             "/Users/me/Library/Developer/../CloudStorage/x",
+            "/System/Volumes/Data/Volumes/Backup",
+            "/system/volumes/data/Users/me/Downloads",
+            "/Users/me/library/containers/net.whatsapp.WhatsApp/Data",
         ] {
             assert!(prompts(Path::new(p)), "{p}");
         }

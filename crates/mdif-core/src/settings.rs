@@ -77,9 +77,8 @@ impl Setting {
                         obj.shift_remove(key);
                     }
                 }
-                let mut text = serde_json::to_string_pretty(&obj)?;
-                text.push('\n');
-                replace_file(file, &text)
+                let layout = read_text(file)?.map_or(Layout::Indent("  ".into()), |t| layout(&t));
+                replace_file(file, &json_text(&obj, &layout)?)
             }
             Setting::Env { file, key } => {
                 let value = match to {
@@ -295,6 +294,47 @@ fn set_env(text: &str, key: &str, value: Option<&str>) -> String {
     s
 }
 
+/// How a JSON file is laid out, kept when it's written: on one line, or
+/// indented with its own spaces or tabs.
+enum Layout {
+    OneLine,
+    Indent(String),
+}
+
+fn layout(text: &str) -> Layout {
+    let lines: Vec<&str> = text.trim().lines().collect();
+    if lines.len() <= 1 {
+        return if lines.first().is_some_and(|l| l.trim() != "{}") {
+            Layout::OneLine
+        } else {
+            Layout::Indent("  ".into())
+        };
+    }
+    let indent = lines[1..]
+        .iter()
+        .map(|l| &l[..l.len() - l.trim_start().len()])
+        .find(|i| !i.is_empty())
+        .unwrap_or("  ");
+    Layout::Indent(indent.to_string())
+}
+
+fn json_text(obj: &Map<String, Value>, layout: &Layout) -> Result<String> {
+    let mut text = match layout {
+        Layout::OneLine => serde_json::to_string(obj)?,
+        Layout::Indent(i) => {
+            let mut out = Vec::new();
+            let f = serde_json::ser::PrettyFormatter::with_indent(i.as_bytes());
+            serde::Serialize::serialize(
+                obj,
+                &mut serde_json::Serializer::with_formatter(&mut out, f),
+            )?;
+            String::from_utf8(out)?
+        }
+    };
+    text.push('\n');
+    Ok(text)
+}
+
 fn read_text(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(t) => Ok(Some(t)),
@@ -306,14 +346,29 @@ fn read_text(path: &Path) -> Result<Option<String>> {
 /// Write `text` to `path` atomically, through a symlink if it is one,
 /// keeping the old file's permissions.
 fn replace_file(path: &Path, text: &str) -> Result<()> {
-    let path = match std::fs::canonicalize(path) {
-        Ok(real) => real,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
-        Err(e) => return Err(e).with_context(|| format!("resolving {}", path.display())),
-    };
+    let link = path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink());
+    let (named, path) = (
+        path,
+        match std::fs::canonicalize(path) {
+            Ok(real) => real,
+            // A link to a file not made yet: written where it points.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && link => link_end(path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
+            Err(e) => return Err(e).with_context(|| format!("resolving {}", path.display())),
+        },
+    );
     let dir = path
         .parent()
         .with_context(|| format!("{} has no folder", path.display()))?;
+    if link && !dir.is_dir() {
+        bail!(
+            "{} links to {}, in a folder that isn't there; leaving it alone",
+            named.display(),
+            path.display()
+        );
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = dir.join(format!(".{name}.mdif-{}", std::process::id()));
@@ -333,6 +388,18 @@ fn replace_file(path: &Path, text: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written.with_context(|| format!("replacing {}", path.display()))
+}
+
+/// Where a chain of links ends, the last of them pointing at nothing.
+fn link_end(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    for _ in 0..32 {
+        let Ok(to) = std::fs::read_link(&at) else {
+            break;
+        };
+        at = at.parent().unwrap_or(Path::new("/")).join(to);
+    }
+    at
 }
 
 fn remove_file(path: &Path) -> Result<()> {
@@ -383,6 +450,18 @@ mod tests {
         s.write(None).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
         round_trip(&s, json!(7));
+        // Laid out its own way (four spaces, tabs, one line): undone, it's
+        // as it was.
+        for original in [
+            "{\n    \"zeta\": 1,\n    \"alpha\": [\n        true\n    ]\n}\n",
+            "{\n\t\"zeta\": 1\n}\n",
+            "{\"zeta\":1,\"alpha\":[true]}\n",
+        ] {
+            std::fs::write(&file, original).unwrap();
+            s.write(Some(&json!(14))).unwrap();
+            s.write(None).unwrap();
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+        }
     }
 
     #[test]
@@ -428,6 +507,40 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
+        let links = &dir.path().join("links");
+        std::fs::create_dir(links).unwrap();
+        // A link to a file not made yet stays a link, the file made where
+        // it points; one into a folder that isn't there is left alone.
+        let later = links.join("dotfiles/later.json");
+        std::fs::create_dir(links.join("dotfiles")).unwrap();
+        let dangling = links.join("later.json");
+        std::os::unix::fs::symlink("dotfiles/later.json", &dangling).unwrap();
+        let s = Setting::Json {
+            file: dangling.clone(),
+            key: "k".into(),
+        };
+        s.write(Some(&json!(1))).unwrap();
+        assert!(
+            dangling
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&later)
+                .unwrap()
+                .contains("\"k\": 1")
+        );
+        let nowhere = links.join("nowhere.json");
+        std::os::unix::fs::symlink(links.join("gone/x.json"), &nowhere).unwrap();
+        let s = Setting::Json {
+            file: nowhere.clone(),
+            key: "k".into(),
+        };
+        assert!(s.write(Some(&json!(1))).is_err());
+        assert!(nowhere.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!links.join("gone").exists());
     }
 
     #[test]

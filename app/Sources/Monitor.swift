@@ -9,6 +9,7 @@
 
 import AppKit
 import Combine
+import Network
 import UserNotifications
 
 @MainActor
@@ -17,7 +18,9 @@ final class Monitor: ObservableObject {
     @Published private(set) var statusError: String?
     /// The free-space series and what grew and wrote in the last day.
     @Published private(set) var detail: ForecastDetail?
-    @Published private(set) var suggestions: [Suggestion]?
+    /// Why the series couldn't be read, when they couldn't.
+    @Published private(set) var detailError: String?
+    @Published private(set) var suggestions: [Suggestion]? { didSet { placed = nil } }
     @Published private(set) var tweaks: [TweakInfo]?
     /// What is never suggested for deleting, cleaning or moving.
     @Published private(set) var kept: [Kept]?
@@ -34,16 +37,23 @@ final class Monitor: ObservableObject {
     @Published private(set) var backupChanging: Set<String> = []
     @Published private(set) var backupStarting = false
     private var timeMachineAt: Date?
+    /// Changes made here to what Time Machine skips, and a full look asked
+    /// for while one ran: a look that ends after either looks again.
+    private var timeMachineChanges = 0
+    private var timeMachineAgain = false
     /// Being switched or run, by id.
     @Published private(set) var tidyBusy: Set<String> = []
     /// Where the space goes, from a whole-disk scan `mdif` caches.
-    @Published private(set) var space: SpaceReport?
+    @Published private(set) var space: SpaceReport? { didSet { placed = nil } }
     @Published private(set) var spaceMeasuring = false
     @Published private(set) var spaceError: String?
     #if !APP_STORE
     /// Tweaks applied or undone here that no measurement has read since: the
     /// switch shows the new state meanwhile.
     @Published private(set) var tweaksChanging: [String: Bool] = [:]
+    /// Tweaks being applied or undone now (the dry run, the question, the
+    /// change): their switch waits.
+    @Published private(set) var tweaksBusy: Set<String> = []
     /// When one was last applied or undone here.
     private var tweakChanged = Date.distantPast
     #endif
@@ -64,6 +74,7 @@ final class Monitor: ObservableObject {
     private var measuredAt: Date?
     private var lookObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var menuObserver: NSObjectProtocol?
     private var watcherChanges: AnyCancellable?
     private var refreshing = false
     /// After a wake the watcher's last sample is old until its next one, so
@@ -93,6 +104,17 @@ final class Monitor: ObservableObject {
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.viewed() }
+        }
+        // The menu bar menu opened (it's a menu, no window comes forward):
+        // what it says is read again if it's older than half a minute, and
+        // shows in the open menu as it comes.
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.lastRefresh.map({ Date().timeIntervalSince($0) > 30 }) ?? true else { return }
+                await self.refresh()
+            }
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -141,6 +163,24 @@ final class Monitor: ObservableObject {
     }
 
     #if !APP_STORE
+    /// Whether the connection now costs traffic (a phone's hotspot, Low
+    /// Data Mode), as Network says.
+    private static func metered() async -> Bool {
+        final class Once: @unchecked Sendable { var done = false }
+        let once = Once()
+        let queue = DispatchQueue(label: "mydiskisfull.metered")
+        return await withCheckedContinuation { c in
+            let m = NWPathMonitor()
+            m.pathUpdateHandler = { path in
+                guard !once.done else { return }
+                once.done = true
+                m.cancel()
+                c.resume(returning: path.isExpensive || path.isConstrained)
+            }
+            m.start(queue: queue)
+        }
+    }
+
     /// Once a day, a newer list of what's known about folders, unless
     /// Settings turned that off. It goes by itself: what's named and said
     /// from it shows when the disk is measured next.
@@ -149,11 +189,17 @@ final class Monitor: ObservableObject {
         guard d.bool(forKey: "knowledgeUpdates") else { return }
         if let last = d.object(forKey: "knowledgeChecked") as? Date,
            Date().timeIntervalSince(last) < 86_400 { return }
+        // Not over a phone's hotspot or in Low Data Mode: it waits for
+        // another connection.
+        guard !(await Self.metered()) else { return }
+        // Set first, so the refreshes meanwhile don't start one each.
         d.set(Date(), forKey: "knowledgeChecked")
         do {
             let u = try await Core.json(KnowledgeUpdate.self, ["knowledge", "update"], timeout: 60)
             if u.newer { log.notice("knowledge: version \(u.version), \(u.folders) folders") }
         } catch {
+            // Offline, say: tried again in an hour, not a day.
+            d.set(Date().addingTimeInterval(-86_400 + 3_600), forKey: "knowledgeChecked")
             log.info("knowledge: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -200,8 +246,12 @@ final class Monitor: ObservableObject {
 
     /// The series behind the charts, from the same history: milliseconds.
     func loadDetail() async {
-        if let d = try? await Core.json(ForecastDetail.self, ["forecast", "--series"], timeout: 60) {
-            detail = d
+        do {
+            detail = try await Core.json(ForecastDetail.self, ["forecast", "--series"], timeout: 60)
+            detailError = nil
+        } catch {
+            // Stopped for a newer one (the page's task): that one says.
+            if !Task.isCancelled { detailError = error.localizedDescription }
         }
     }
 
@@ -220,27 +270,37 @@ final class Monitor: ObservableObject {
         measuring = true
         defer { measuring = false }
         var behind = automatic && suggestions != nil
+        // Nobody asked: no privacy prompt, which nobody would answer. Run
+        // again, it was asked for.
+        var unattended = automatic
         repeat {
             measureAgain = false
             let qos: QualityOfService = behind ? .background : .userInitiated
             let timeout: TimeInterval = behind ? 900 : 120
+            let quiet = unattended ? ["--unattended"] : []
             behind = false
+            unattended = false
             #if APP_STORE
             // Its tweaks are only advice: no need to read other apps' settings.
-            if let sg = try? await Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos) {
+            // Asked again meanwhile (a clean-up done since it started): what
+            // it found may be cleaned already, and the next run says.
+            if let sg = try? await Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos),
+               !measureAgain {
                 suggestions = notKept(sg)
             }
             #else
             let started = Date()
-            async let t = try? Core.json([TweakInfo].self, ["tweaks"], timeout: timeout, qos: qos)
-            async let s = try? Core.json([Suggestion].self, ["suggest"], timeout: timeout, qos: qos)
+            async let t = try? Core.json([TweakInfo].self, ["tweaks"] + quiet, timeout: timeout, qos: qos)
+            async let s = try? Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos)
             let (tw, sg) = await (t, s)
             // Read before a tweak changed, it would put back the old state.
             if let tw, started > tweakChanged {
                 tweaks = tw
                 tweaksChanging = [:]
             }
-            if let sg { suggestions = notKept(sg) }
+            // Asked again meanwhile (a clean-up done since it started): what
+            // it found may be cleaned already, and the next run says.
+            if let sg, !measureAgain { suggestions = notKept(sg) }
             #endif
             measuredAt = Date()
         } while measureAgain
@@ -256,10 +316,35 @@ final class Monitor: ObservableObject {
     /// and if it's old it's measured again behind it at background priority:
     /// nobody is waiting for that one, so it waits for whatever the Mac is
     /// doing, on the efficiency cores.
+    ///
+    /// Run in a task of its own, which a page that opened it can't cancel:
+    /// leaving the page would stop the measure (Core.run stops a command
+    /// whose task is cancelled), and the next visit start it from nothing.
     func loadSpace(refresh: Bool = false) async {
-        guard !spaceMeasuring, spaceReadable else { return }
+        await Task { await measureSpace(refresh: refresh) }.value
+    }
+
+    private func measureSpace(refresh: Bool) async {
+        guard spaceReadable else { return }
+        // Asked for while one runs (a clean-up patched the kept one): read
+        // again once that one is done, which kept it with the clean-up in.
+        guard !spaceMeasuring else {
+            spaceAgain = true
+            return
+        }
         spaceMeasuring = true
         defer { spaceMeasuring = false }
+        await readSpace(refresh: refresh)
+        while spaceAgain {
+            spaceAgain = false
+            await readSpace(refresh: false)
+        }
+    }
+
+    /// Read again once the measure under way is done.
+    private var spaceAgain = false
+
+    private func readSpace(refresh: Bool) async {
         do {
             if refresh {
                 space = try await Core.json(SpaceReport.self, ["space", "--refresh"], timeout: 900, qos: .userInitiated)
@@ -268,8 +353,16 @@ final class Monitor: ObservableObject {
                 let last = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Int32.max)"],
                                                timeout: 900, qos: .userInitiated)
                 space = last
-                if Int64(Date().timeIntervalSince1970) - last.measured > Int64(Self.spaceMaxAge) {
-                    space = try await Core.json(SpaceReport.self, ["space", "--max-age", "\(Self.spaceMaxAge)"],
+                // Measured again behind it: nobody is waiting, nor there to
+                // answer a privacy prompt.
+                // Or partly: a clean-up in a folder too big to measure again
+                // in a moment.
+                if last.partial == true {
+                    space = try await Core.json(SpaceReport.self, ["space", "--refresh", "--unattended"],
+                                                timeout: 3600, qos: .background)
+                } else if Int64(Date().timeIntervalSince1970) - last.measured > Int64(Self.spaceMaxAge) {
+                    space = try await Core.json(SpaceReport.self,
+                                                ["space", "--max-age", "\(Self.spaceMaxAge)", "--unattended"],
                                                 timeout: 3600, qos: .background)
                 }
             }
@@ -294,16 +387,41 @@ final class Monitor: ObservableObject {
 
     /// `quick`: the backups and the snapshots only, in a second; the
     /// folders keep what the last full look found.
+    /// In a task of its own, as `loadSpace` is: leaving the page doesn't
+    /// stop the full look.
     func loadTimeMachine(quick: Bool = false) async {
-        guard !timeMachineLoading else { return }
+        await Task { await lookAtTimeMachine(quick: quick) }.value
+    }
+
+    private func lookAtTimeMachine(quick: Bool) async {
+        guard !timeMachineLoading else {
+            // A full look asked for meanwhile (after a change) is one
+            // more, once this one ends, not none.
+            if !quick { timeMachineAgain = true }
+            return
+        }
         timeMachineLoading = true
         defer { timeMachineLoading = false }
-        let args = ["timemachine"] + (quick ? ["--quick"] : [])
-        guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
-        if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
-            timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
-        } else {
-            timeMachine = r
+        var quick = quick
+        while true {
+            timeMachineAgain = false
+            let changes = timeMachineChanges
+            // The quick look runs when a window comes forward: nobody there to
+            // answer a privacy prompt.
+            let args = ["timemachine"] + (quick ? ["--quick", "--unattended"] : [])
+            guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
+            // A folder kept out or let in while it looked: what it read may
+            // be from before, and would undo what's shown. Looked again.
+            if changes != timeMachineChanges || timeMachineAgain {
+                quick = quick && !timeMachineAgain
+                continue
+            }
+            if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
+                timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
+            } else {
+                timeMachine = r
+            }
+            return
         }
     }
 
@@ -323,6 +441,7 @@ final class Monitor: ObservableObject {
                     Notices.shared.post(ok: false, backedUp ? "Not backed up again" : "Not kept out",
                                         r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
                 }
+                timeMachineChanges += 1
                 timeMachine = timeMachine?.marking(r.done, backedUp: backedUp)
                 // Those kept out weren't measured: their sizes, now.
                 if backedUp, !r.done.isEmpty { await loadTimeMachine() }
@@ -417,14 +536,27 @@ final class Monitor: ObservableObject {
     }
 
     /// Each suggestion goes with the first item it's about (its folder, or
-    /// one in it or around it), biggest kinds first, and shows there.
+    /// one in it or around it), biggest kinds first, and shows there. Worked
+    /// out once for each `space` and `suggestions`, not for every row on
+    /// every redraw.
     var placements: [String: Suggestion] {
+        if let placed { return placed }
+        let out = place()
+        placed = out
+        return out
+    }
+
+    /// `placements` as last worked out; `nil` once either changes.
+    private var placed: [String: Suggestion]?
+
+    private func place() -> [String: Suggestion] {
         guard let r = space, let list = suggestions else { return [:] }
         var out: [String: Suggestion] = [:]
         var placed = Set<String>()
         for k in r.kinds {
-            // System data has no path: it's about nothing.
-            for i in k.items where !i.path.isEmpty {
+            // System data has no path: it's about nothing. Nor one you keep:
+            // Overview doesn't list it, and what's placed there wouldn't show.
+            for i in k.items where !i.path.isEmpty && !i.has("kept") {
                 let p = Self.dataless(i.path)
                 if let s = list.first(where: { s in
                     guard let sp = s.path.map(Self.dataless), !placed.contains(s.cause) else { return false }
@@ -490,9 +622,15 @@ final class Monitor: ObservableObject {
             } catch {
                 keptNow.removeAll { paths.contains($0) }
                 log.error("keep: \(error.localizedDescription, privacy: .public)")
+                // Said, not only logged: it shows again, and may be ticked
+                // in Clean Up, as it isn't kept.
+                Notices.shared.post(ok: false, "Not kept", error.localizedDescription)
             }
             measuredAt = nil
             await measure()
+            // The breakdown as `mdif space` shows it with the list: no
+            // button on what's kept now (`mdif clean` would refuse it).
+            if space != nil { await loadSpace() }
         }
     }
 
@@ -502,6 +640,7 @@ final class Monitor: ObservableObject {
             if let list = try? await Core.json([Kept].self, ["keep", "remove", k.entry]) { kept = list }
             measuredAt = nil
             await measure()
+            if space != nil { await loadSpace() }
         }
     }
 
@@ -524,7 +663,9 @@ final class Monitor: ObservableObject {
     var watcherProblem: String? {
         if !watcher.isOn && !watcher.hasCommandLineAgent { return "The watcher is off" }
         let settled = Date().timeIntervalSince(wokeAt) > 2 * Double(max(status?.history.intervalSecs ?? 300, 60))
-        if let s = status, watcher.isOn, settled, s.history.samples > 0, s.watcherStale() {
+        // The command-line one may have stopped too (turned off in Login
+        // Items, or its mdif gone): it says so by not sampling.
+        if let s = status, watcher.isOn || watcher.hasCommandLineAgent, settled, s.history.samples > 0, s.watcherStale() {
             return "The watcher hasn't sampled for \(Format.duration(Int64(Date().timeIntervalSince1970) - (s.history.last ?? 0)))"
         }
         return nil
@@ -621,7 +762,13 @@ final class Monitor: ObservableObject {
         for t in undone where !undoneKnown.contains("\(t.id):\(t.applied)") {
             Notifier.undone(t)
         }
-        let fixed = undoneKnown.subtracting(undoneNow).compactMap { $0.split(separator: ":").first }
+        // Withdrawn once nothing of that tweak is undone: not when an older
+        // record of one undone again is all that went, which would take
+        // back the notification just posted (they share an identifier).
+        let stillUndone = Set(undone.map(\.id))
+        let fixed = undoneKnown.subtracting(undoneNow)
+            .compactMap { $0.split(separator: ":").first.map(String.init) }
+            .filter { !stillUndone.contains($0) }
         Notifier.withdraw(fixed.map { "undone-\($0)" })
         d.set(Array(undoneNow), forKey: Keys.undone)
     }
@@ -642,11 +789,21 @@ final class Monitor: ObservableObject {
 
     #if !APP_STORE
     func apply(_ id: String) {
-        Task { await afterTweak(id, await TweakFlow.apply(id), on: true) }
+        guard !tweaksBusy.contains(id) else { return }
+        tweaksBusy.insert(id)
+        Task {
+            defer { tweaksBusy.remove(id) }
+            await afterTweak(id, await TweakFlow.apply(id), on: true)
+        }
     }
 
     func revert(_ id: String) {
-        Task { await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false) }
+        guard !tweaksBusy.contains(id) else { return }
+        tweaksBusy.insert(id)
+        Task {
+            defer { tweaksBusy.remove(id) }
+            await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false)
+        }
     }
 
     /// Does a suggestion's clean-up, then measures again; `after`, once it's
@@ -681,6 +838,11 @@ final class Monitor: ObservableObject {
         // `mdif clean` measured again what it changed: the breakdown
         // follows at once, without a whole-disk scan.
         await loadSpace()
+        // Snapshots deleted: the Time Machine page lists what's left (a
+        // quick look keeps its folders).
+        if actions.contains(where: { $0.kind == "snapshots" }), timeMachine != nil {
+            await loadTimeMachine(quick: true)
+        }
     }
 
     /// The switch shows the new state at once; the measurement that follows

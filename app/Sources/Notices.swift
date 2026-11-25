@@ -28,8 +28,11 @@ final class Notices: ObservableObject {
     static let shared = Notices()
     @Published private(set) var current: Notice?
 
-    /// `stays` defaults to whether it went wrong.
+    /// `stays` defaults to whether it went wrong. One that went right
+    /// doesn't replace one that went wrong and stays: that one is read
+    /// first, and dismissed.
     func post(ok: Bool, _ title: String, _ text: String, stays: Bool? = nil) {
+        if ok, let c = current, !c.ok, c.stays { return }
         current = Notice(ok: ok, title: title, text: text, stays: stays ?? !ok)
     }
 

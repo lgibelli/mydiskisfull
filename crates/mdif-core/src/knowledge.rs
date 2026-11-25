@@ -34,6 +34,9 @@ const MAX: usize = 1_000_000;
 /// The downloaded copy and its signature, in the folder `init` is given.
 const FILE: &str = "folders.json";
 const SIG: &str = "folders.json.sig";
+/// The signature of the last list looked at online that wasn't newer: the
+/// same list isn't downloaded again each day.
+const SEEN: &str = "folders.json.seen";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Knowledge {
@@ -401,8 +404,21 @@ fn generic_name(path: &Path, home: &Path) -> Option<String> {
             .cloned()
             .collect::<Vec<_>>()
     };
-    if let Ok(rel) = path.strip_prefix(home) {
-        let n = names(rel)?;
+    // The home folder whatever the case it's typed in (`/users/jane`): the
+    // disk ignores it, and its name is never said.
+    let in_home = {
+        let (mut p, mut h) = (path.components(), home.components());
+        let same = h.by_ref().zip(p.by_ref()).all(|(a, b)| {
+            a.as_os_str()
+                .to_str()
+                .zip(b.as_os_str().to_str())
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        });
+        (same && home.components().count() <= path.components().count())
+            .then(|| p.as_path().to_path_buf())
+    };
+    if let Some(rel) = in_home {
+        let n = names(&rel)?;
         let keep: Vec<String> = match n.as_slice() {
             [] => return None,
             [lib, kind, app, rest @ ..]
@@ -620,13 +636,18 @@ pub fn update(dir: &Path) -> Result<Updated> {
     };
     let sig = String::from_utf8(fetch(&format!("{URL}.sig"), 200)?)
         .context("the signature isn't text")?;
-    if std::fs::read_to_string(dir.join(SIG)).is_ok_and(|s| s == sig) {
+    if [SIG, SEEN]
+        .iter()
+        .any(|f| std::fs::read_to_string(dir.join(f)).is_ok_and(|s| s == sig))
+    {
         return Ok(same);
     }
     let bytes = fetch(URL, MAX)?;
     verify(&bytes, &sig, &key())?;
     let k = parse(&bytes)?;
     if k.version <= now.knowledge.version {
+        std::fs::create_dir_all(dir)?;
+        let _ = std::fs::write(dir.join(SEEN), &sig);
         return Ok(same);
     }
     std::fs::create_dir_all(dir)?;
@@ -892,6 +913,16 @@ mod tests {
             )
             .as_deref(),
             Some("~/Library/Developer/Xcode/DerivedData")
+        );
+        // The home folder typed in another case is still yours: its name
+        // is never said, and what's in it as above.
+        let typed = |p: &str| generic(Path::new(p), home);
+        assert_eq!(typed("/users/me/Documents/Taxes"), None);
+        assert_eq!(typed("/USERS/ME"), None);
+        assert_eq!(typed("/users/other/Library"), None);
+        assert_eq!(
+            typed("/users/me/Library/Biome").as_deref(),
+            Some("~/Library/Biome")
         );
         // A tool's folder, and its own folders in it, not a project's.
         assert_eq!(g(".dartServer").as_deref(), Some("~/.dartServer"));

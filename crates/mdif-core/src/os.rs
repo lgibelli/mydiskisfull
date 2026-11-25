@@ -44,6 +44,7 @@ mod twins {
     const _: fn(&Path, &str) -> io::Result<bool> = fs::has_mark;
     const _: fn(&File) -> io::Result<()> = fs::lock;
     const _: fn() -> io::Result<()> = fs::forbid_dataless_materialization;
+    const _: fn(&str) -> std::borrow::Cow<'_, str> = fs::decomposed;
 
     const _: u32 = bulk::LINKS_UNKNOWN;
     const _: fn(&Path) -> io::Result<Vec<bulk::Entry>> = bulk::read_dir;
@@ -56,6 +57,7 @@ mod twins {
     const _: fn(&Path, u64) -> io::Result<Vec<(u64, u64)>> = extents::physical;
 
     const _: fn(&Path) -> u64 = changes::now;
+    const _: fn(&Path) -> Option<String> = changes::history;
     const _: fn(&Path, u64, Duration) -> io::Result<changes::Replay> = changes::replay;
 
     const _: bool = proc::WRITES_ARE_DISK_WRITES;
@@ -66,6 +68,7 @@ mod twins {
     const _: fn(i32) -> io::Result<()> = proc::terminate;
     const _: fn(i32) -> io::Result<()> = proc::force_quit;
     const _: fn(i32) -> bool = proc::alive;
+    const _: fn(&Path) -> Option<String> = proc::working_in;
     const _: fn(i32) -> Option<PathBuf> = proc::path;
 
     const _: fn(&Path) -> Vec<PathBuf> = sys::access_probes;

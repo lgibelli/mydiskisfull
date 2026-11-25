@@ -163,6 +163,8 @@ pub fn entry(path: &str, home: &Path) -> io::Result<String> {
     } else {
         std::path::absolute(path)?
     };
+    // `../game/build` from `~/devel/app` is `~/devel/game/build`.
+    let abs = resolved(&abs);
     let abs = abs
         .strip_prefix(DATA_ROOT)
         .map_or(abs.clone(), |rest| Path::new("/").join(rest));
@@ -251,9 +253,27 @@ pub fn expand(entry: &str, home: &Path) -> PathBuf {
     }
 }
 
+/// `path` with each `..` taking off the name before it, by name: what the
+/// entry was meant to name, and what the paths it's compared with spell.
+pub(crate) fn resolved(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The names in `path`, lowercased, as seen from `/` (the Data volume's own
-/// mount point left out). On Windows the drive or share comes first, as a
-/// name: `D:\Archive` isn't `C:\Archive`.
+/// mount point left out), each `..` taking off the name before it. On
+/// Windows the drive or share comes first, as a name: `D:\Archive` isn't
+/// `C:\Archive`. Each name decomposed ([`crate::os::fs::decomposed`]), as
+/// a Mac's disk compares them: `Vidéos` typed by hand is Finder's.
 fn names(path: &Path) -> Vec<String> {
     use std::path::Prefix::*;
     let path = path.strip_prefix(DATA_ROOT).unwrap_or(path);
@@ -262,7 +282,9 @@ fn names(path: &Path) -> Vec<String> {
     let mut floor = 0;
     for c in path.components() {
         match c {
-            Component::Normal(n) => out.push(n.to_string_lossy().to_lowercase()),
+            Component::Normal(n) => {
+                out.push(crate::os::fs::decomposed(&n.to_string_lossy()).to_lowercase())
+            }
             // `a/../b` names what `b` does: a kept `../target` keeps the target
             // folder, and `mdif clean src/../target` is checked as `target`.
             Component::ParentDir => {
@@ -329,6 +351,20 @@ mod tests {
         Keep::parse(text, Path::new(HOME))
     }
 
+    // A Mac's disk takes both forms for one name; NTFS keeps them apart.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_name_typed_composed_keeps_the_one_finder_wrote_decomposed() {
+        let k = keep("~/Vid\u{e9}os\n");
+        assert_eq!(
+            k.covering(Path::new("/Users/me/Vide\u{301}os/clip.mov")),
+            Some("~/Vid\u{e9}os")
+        );
+        let k = keep("~/Vide\u{301}os\n");
+        assert!(k.covering(Path::new("/Users/me/VID\u{c9}OS")).is_some());
+        assert!(k.covering(Path::new("/Users/me/Videos")).is_none());
+    }
+
     #[test]
     fn a_kept_path_keeps_what_is_inside_it_without_case() {
         let k = keep(
@@ -363,6 +399,27 @@ mod tests {
                 .is_none()
         );
         assert!(k.covering(Path::new("/Volumes/Archive2")).is_none());
+    }
+
+    // A Mac's paths; on Windows a path from the root is on a drive.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_entry_with_dot_dot_keeps_what_it_names() {
+        let home = Path::new(HOME);
+        // Given from `~/devel/app` as `../game/build`.
+        assert_eq!(
+            entry("/Users/me/devel/app/../game/./build", home).unwrap(),
+            "~/devel/game/build"
+        );
+        // One saved with it before still keeps that, not another.
+        let k = keep("~/devel/app/../game/build\n");
+        let build = Path::new("/Users/me/devel/game/build");
+        assert!(k.covering(build).is_some());
+        assert!(k.touches(Path::new("/Users/me/devel/game")));
+        assert!(
+            k.covering(Path::new("/Users/me/devel/app/game/build"))
+                .is_none()
+        );
     }
 
     #[test]

@@ -58,9 +58,38 @@ pub struct Watcher {
     /// Free space at the last sample.
     last_avail: Option<u64>,
     /// When a folder period was measured but couldn't be written (the history
-    /// couldn't commit: a full disk): its growth is lost, and the next sample
-    /// written says there was a gap then.
+    /// couldn't commit: a full disk): what it found goes with the next sample
+    /// ([`Unsaved`]), but not its record of what it looked at, so the next
+    /// sample written says there was a gap then.
     unrecorded: Option<i64>,
+    /// What a sample couldn't record (the history busy, the disk full):
+    /// the processes' writes and the folders' growth since the one before,
+    /// added to the next sample's rather than lost.
+    unsaved: Unsaved,
+}
+
+#[derive(Default)]
+struct Unsaved {
+    writes: Vec<(String, u64)>,
+    growth: Vec<(String, i64)>,
+}
+
+impl Unsaved {
+    /// `writes` and `growth` with what's here added, by name; here emptied.
+    fn add_to(&mut self, writes: &mut Vec<(String, u64)>, growth: &mut Vec<(String, i64)>) {
+        for (name, b) in self.writes.drain(..) {
+            match writes.iter_mut().find(|w| w.0 == name) {
+                Some(w) => w.1 += b,
+                None => writes.push((name, b)),
+            }
+        }
+        for (owner, d) in self.growth.drain(..) {
+            match growth.iter_mut().find(|g| g.0 == owner) {
+                Some(g) => g.1 += d,
+                None => growth.push((owner, d)),
+            }
+        }
+    }
 }
 
 /// What counts as an incident. The defaults are the plan's clauses.
@@ -211,13 +240,20 @@ impl Cost {
     }
 
     /// Steady-state cost per hour at one sample every `interval` seconds
-    /// and one owners period every [`Cost::every`].
+    /// and one owners period every [`Cost::every`], or as many as ran once
+    /// an hour has been seen, if more: one also runs early when space comes
+    /// back ([`EARLY_RISE`]).
     pub fn per_hour(&self, interval: i64) -> (Duration, u64) {
         let (cpu, written) = self.per_sample();
         let samples = HOUR as f64 / interval.max(1) as f64;
+        let ran = if self.samples as f64 >= samples {
+            self.periods as f64 * samples / self.samples as f64
+        } else {
+            0.0
+        };
         let periods = match self.every {
             0 => 0.0,
-            every => HOUR as f64 / every as f64,
+            every => (HOUR as f64 / every as f64).max(ran),
         };
         let period = self.per_period().unwrap_or_default();
         (
@@ -266,6 +302,7 @@ impl Watcher {
             access_probes: Vec::new(),
             last_avail: None,
             unrecorded: None,
+            unsaved: Unsaved::default(),
         })
     }
 
@@ -315,13 +352,30 @@ impl Watcher {
         } else {
             PathBuf::from(mount)
         };
+        // A position only means something in the history it was saved from,
+        // and never ahead of where it is now (its history purged, the Mac
+        // migrated, the journal made again): else from now, as on a first run.
+        let history = changes::history(&self.volume);
+        let history_key = format!("owners.{}.history", self.key);
+        let same = self
+            .store
+            .meta(&history_key)?
+            .is_none_or(|h| Some(h) == history);
+        // The journal's position now, taken now, not at the first replay.
+        let now_id = changes::now(&root);
         let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
             // 0 is "no journal could be asked" on Windows, not a position (on a
             // Mac it is the start of all the history there is, and a position).
-            (Some(id), Some(wall)) if id != 0 || cfg!(target_os = "macos") => (id as u64, wall),
-            // The journal's position now, taken now, not at the first replay.
-            _ => (changes::now(&root), unix_now()),
+            (Some(id), Some(wall))
+                if (id != 0 || cfg!(target_os = "macos")) && resumable(id as u64, now_id, same) =>
+            {
+                (id as u64, wall)
+            }
+            _ => (now_id, unix_now()),
         };
+        if let Some(h) = &history {
+            self.store.set_meta(&history_key, h)?;
+        }
         self.user = alerts::Settings::load(&self.store)?;
         let mut tracker = Tracker::new(rules, fs::dev_of_volume(&self.volume).ok(), every.max(1));
         if let Ok(id) = fs::fsid(&self.volume) {
@@ -535,21 +589,30 @@ impl Watcher {
         );
         meta.push(("watch.cost".to_string(), format_cost(&so_far)));
         let meta: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let recorded = self.store.record(&self.key, point, &writes, &growth, &meta);
-        match &recorded {
+        let (mut writes, mut growth) = (writes, growth);
+        self.unsaved.add_to(&mut writes, &mut growth);
+        match self.store.record(&self.key, point, &writes, &growth, &meta) {
             Ok(()) => self.unrecorded = None,
-            // The folders' checkpoint has moved on past what this period found.
-            Err(_) if missed || period.is_some() => self.unrecorded = Some(now),
-            Err(_) => {}
+            Err(e) => {
+                // The folders' checkpoint has moved on past what this period
+                // looked at.
+                if missed || period.is_some() {
+                    self.unrecorded = Some(now);
+                }
+                self.unsaved = Unsaved { writes, growth };
+                return Err(e);
+            }
         }
-        recorded?;
         if now - self.last_compact >= HOUR {
             self.store.compact(now)?;
             self.last_compact = now;
         }
         let before = proc::own_usage().0;
+        // The room the forecast counts: free, and what macOS frees by itself
+        // before the disk is full (snapshots, purgeable caches).
+        let room = point.avail + crate::space::purgeable(&self.volume, point.avail);
         let (incidents, opened) = match (&self.owners, period) {
-            (Some(o), Some(_)) => self.detect(now, point.avail, 2 * o.every)?,
+            (Some(o), Some(_)) => self.detect(now, room, 2 * o.every)?,
             _ => (Vec::new(), Vec::new()),
         };
 
@@ -585,6 +648,7 @@ impl Watcher {
     ) -> Result<(Vec<Incident>, Vec<Incident>)> {
         let Detect { growth, churn } = &self.detect.with_user(&self.user);
         let series = self.store.growth_series(now - growth.sustain - HOUR)?;
+        let rules = self.owners.as_ref().map(|o| o.tracker.rules().clone());
         let sizes = &mut self.sizes;
         let mut found = incidents::growth(
             &series,
@@ -609,6 +673,19 @@ impl Watcher {
                 let path = Path::new(owner);
                 let size = if !privacy::may_open(path) {
                     None
+                } else if rules.as_ref().is_some_and(|r| r.owns_only_its_files(path)) {
+                    // A prefix (`~/Movies`) owns only the files directly in it:
+                    // its growth is set against those, not against all below it
+                    // (a recording growing next to a 400 GB library).
+                    crate::os::bulk::read_dir_with(path, crate::os::bulk::Detail::Sizes)
+                        .ok()
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter(|e| e.kind != crate::os::bulk::Kind::Dir)
+                                .map(crate::owners::entry_size)
+                                .sum()
+                        })
                 } else {
                     match std::fs::symlink_metadata(path) {
                         // A file directly in a folder above where owners are (the
@@ -744,6 +821,14 @@ impl Owners {
     }
 }
 
+/// Whether replaying from the saved event ID `saved` finds what happened
+/// since: in the same history (`same`), and not ahead of the system's
+/// `now` (a purged history starts again from low IDs, and replaying from a
+/// later one would deliver nothing, without a word).
+fn resumable(saved: u64, now: u64, same: bool) -> bool {
+    same && saved <= now
+}
+
 const ACCESS_KEY: &str = "watch.full_disk_access";
 const PERIOD_KEY: &str = "watch.last_period";
 const GAP_KEY: &str = "watch.last_gap";
@@ -876,6 +961,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn what_a_sample_couldnt_record_goes_with_the_next() {
+        let mut u = Unsaved {
+            writes: vec![("OneDrive".into(), 10), ("mds".into(), 5)],
+            growth: vec![("/Users/me/Movies".into(), -3)],
+        };
+        let mut writes = vec![("OneDrive".to_string(), 1)];
+        let mut growth = vec![("/Users/me/.cache".to_string(), 7)];
+        u.add_to(&mut writes, &mut growth);
+        assert_eq!(
+            writes,
+            [("OneDrive".to_string(), 11), ("mds".to_string(), 5)]
+        );
+        assert_eq!(
+            growth,
+            [
+                ("/Users/me/.cache".to_string(), 7),
+                ("/Users/me/Movies".to_string(), -3)
+            ]
+        );
+        assert!(u.writes.is_empty() && u.growth.is_empty());
+    }
+
+    #[test]
     fn the_last_gap_is_kept_apart_and_found_in_an_older_history() {
         let store = Store::open_in_memory().unwrap();
         let point = SpacePoint {
@@ -964,6 +1072,17 @@ mod tests {
         assert_eq!(c.per_period(), Some(ms(300)));
         // 12 samples and 2 periods an hour.
         assert_eq!(c.per_hour(300), (ms(660), 480_000));
+        // Space coming back again and again ran six more periods early in
+        // the next hour, counted as they ran.
+        let mut busy = c;
+        for i in 0..12 {
+            let period = (i % 2 == 0).then_some((ms(300), false));
+            let extra = period.map_or(ms(0), |(p, _)| p);
+            busy.add(ms(5) + extra, 40_000, period);
+        }
+        assert_eq!(busy.periods, 7);
+        // Seven after the first in 28 samples (2 h 20 min): 3 an hour.
+        assert_eq!(busy.per_hour(300), (ms(60) + ms(900), 480_000));
         // Stored and read back.
         assert_eq!(parse_cost(&format_cost(&c)), Some(c));
         // Before a second period, the catch-up stands in for one.
@@ -1016,7 +1135,30 @@ mod tests {
     // Probes are macOS's (TCC); Windows has none.
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_journal_is_resumed_only_where_it_can_be() {
+        assert!(resumable(100, 200, true));
+        assert!(resumable(200, 200, true));
+        // Ahead of now: the history was purged, or this is another Mac's.
+        assert!(!resumable(300, 200, true));
+        // Another history altogether.
+        assert!(!resumable(100, 200, false));
+        // This Mac's volume has one, and it is read the same twice.
+        #[cfg(target_os = "macos")]
+        {
+            let id = changes::history(Path::new("/"));
+            assert!(id.as_ref().is_some_and(|h| h.len() == 32), "{id:?}");
+            assert_eq!(changes::history(Path::new("/")), id);
+        }
+    }
+
+    // Probes are macOS's (TCC); Windows has none.
+    #[cfg(target_os = "macos")]
+    #[test]
     fn full_disk_access_is_recorded_at_every_sample() {
+        // A sample without access switches prompts off for the process.
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("TCC.db");
         let mut w = Watcher::new(Store::open_in_memory().unwrap(), dir.path())

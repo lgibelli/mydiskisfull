@@ -35,8 +35,8 @@ nothing to warn about it.
    consumption, measured.
 2. **False positives are the whole product.** Coding agents writing build output in a burst,
    Xcode, Docker, Photos imports and backups are all legitimately big writers. Every incident
-   must pass strict clauses (below), and allowlist entries match whole path components, never
-   substrings.
+   must pass strict clauses (below), and allowlist entries match whole path components (a name,
+   or any name with an extension, `*.photoslibrary`), never substrings.
 3. **Explain why, in one sentence, with the evidence.** Example: "OneDrive is rewriting 3 GB of
    logs every 10 minutes while uploading nothing; usually a stuck sync. Restarting OneDrive fixes
    it."
@@ -101,7 +101,7 @@ nothing to warn about it.
   each kind notifies are the user's to set (`mdif alerts`, kept in the history's `meta`); the
   clauses below are not. Like Idlewild, each episode alerts once. A horizon warns when the disk is
   more likely than not full within it, with a day and a half of history at least, and still so
-  with any one day of the history left out (a jackknife): one heavy day never raises a warning.
+  with any one day of the history left out (a jackknife over 36-hour spans, one every 12 hours back from now, so any 24 hours are whole in one): one heavy day never raises a warning, whatever hour it started.
 
 ### 2. Runaway fillers
 Two kinds, each with its own clauses.
@@ -110,7 +110,7 @@ Two kinds, each with its own clauses.
 
 | Clause | What it removes |
 |---|---|
-| a fitted line over the sustain window (default 6 h, at least 8 points), positive slope, r² ≥ 0.85 | bursts, staircases (copied a file, stopped), sawtooth caches |
+| a fitted line over the sustain window (default 6 h), positive slope, r² ≥ 0.85, seen growing in at least 3 listings (a big folder is listed every 2 h) | bursts, staircases (copied a file, stopped), sawtooth caches |
 | grown by at least 1 GB *and* at least 5% of its own size | noise, which is proportional to size |
 | still growing (the last third of the window grew at least a quarter of the fitted rate) and within 2% of its peak | anything that has plateaued or started shrinking |
 | at the fitted rate, fills the remaining free space within the horizon (default 7 days) | slow, harmless growth on a roomy disk |
@@ -154,9 +154,10 @@ too; an emulator (`~/.android/avd/<id>.avd` and its `<id>.ini`), deleted unless 
 are honoured when set; the app, which has neither, uses Android Studio's defaults. Docker's old leftovers (`docker:old`): Docker Desktop started
 in the background when it isn't running (`docker desktop start`, else `open -g -j`), then each
 stopped container that ended 7 days ago or more (or was created then and never ran), untagged
-image and unused network removed by id, unforced, and build cache unused for 7 days pruned
-(`--filter until=168h`); Docker quit again if it was started for this. Volumes and tagged images
-stay.
+image removed by id, unforced, and build cache unused for 7 days pruned
+(`--filter until=168h`); Docker quit again if it was started for this. Volumes, networks (a
+stopped compose project's have no container on them, and it needs them to start again) and
+tagged images stay.
 
 **Clean Up** (the app, full edition): what the app can clean itself in one sheet, a checkbox
 each, run as a batch. An action marked `safe` (`clean::Action`) is ticked to start with: it

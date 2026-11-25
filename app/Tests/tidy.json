@@ -60,7 +60,7 @@
     {
       "id": "docker",
       "title": "Old Docker leftovers",
-      "detail": "Stopped containers that haven't run for 7 days, images no tag points to, networks no container uses, and build cache no build has used for 7 days. Only while Docker is running: it's never started for this. Volumes and tagged images stay.",
+      "detail": "Stopped containers that haven't run for 7 days, with what was written inside them (not in a volume), images no tag points to, and build cache no build has used for 7 days. Only while Docker is running: it's never started for this. Volumes, networks and tagged images stay.",
       "on": false,
       "available": false,
       "unavailable_why": "Needs Docker, which isn't installed.",
