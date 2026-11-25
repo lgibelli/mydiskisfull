@@ -50,6 +50,7 @@ pub mod privacy;
 pub mod profile;
 pub mod scan;
 pub mod settings;
+pub mod shell_env;
 pub mod space;
 pub mod store;
 pub mod suggest;

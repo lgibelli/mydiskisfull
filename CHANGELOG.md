@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 ## Unreleased
 
 ### Fixed
+- Where a variable set in `.zshrc` or `.bash_profile` says a tool keeps its files elsewhere
+  (`GRADLE_USER_HOME`, `ANDROID_HOME` or `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `XDG_CONFIG_HOME`
+  for Homebrew's `brew.env`), the app and the watcher looked, and wrote, where the tool never
+  reads: started by macOS, not from a shell, they don't see it. They now ask your login shell
+  once, as an interactive one, with nothing to read and at most 5 seconds to answer;
+  `MDIF_RESOLVING_ENVIRONMENT=1` is set, so a startup file can skip slow work. (The watcher asks
+  only with Full Disk Access: a startup file may open a folder that asks for permission.)
 - Deleting build output with a git repository somewhere inside it (a dependency checked out
   in `node_modules`, a clone a script made in `dist`) lost what was only in it. It's deleted only
   when the repository holds nothing its remotes don't: no commit of its own, no change, stash or
