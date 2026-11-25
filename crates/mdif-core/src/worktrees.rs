@@ -18,13 +18,16 @@
 //!   isn't counted; a week for one made by hand ([`IDLE`]), a workspace
 //!   that may be used again. Git's HEAD and log for it count, and the folder
 //!   itself;
-//! - it isn't locked.
+//! - it isn't locked, and has no submodules (`git worktree remove` refuses
+//!   one with them checked out).
 //!
 //! Git reads, never writes: status runs without optional locks (no index
 //! refresh), and the trial merge writes its objects to a scratch folder
 //! instead of the repository. Repositories are the projects in the code
 //! folders ([`owners::code_folders`]) whose `.git` has worktrees, so git
-//! only runs where there are some.
+//! only runs where there are some. Git never fetches, and runs no command a
+//! repository's own configuration names: such a repository is left alone
+//! ([`Git::runs_its_own_commands`]).
 //!
 //! [`owners::code_folders`]: crate::owners::code_folders
 
@@ -88,6 +91,14 @@ pub fn finished(home: &Path, now: i64) -> Vec<Finished> {
 /// is git's own.
 pub fn remove(f: &Finished) -> Result<(), String> {
     let git = Git::find().ok_or("No git found: install the Command Line Tools.")?;
+    // `git worktree remove` runs `git status` in it first.
+    if git.repo_runs_its_own_commands(&f.repo) || git.runs_its_own_commands(&f.path) {
+        return Err(format!(
+            "{}: its repository's own settings name a command that git would run (a filter \
+             or a merge driver), so it's left to you.",
+            f.path.display()
+        ));
+    }
     let out = git
         .cmd(&f.repo)
         .args(["worktree", "remove"])
@@ -103,15 +114,19 @@ pub fn remove(f: &Finished) -> Result<(), String> {
 }
 
 /// Whether git tracks a file in `dir`; `None` when no repository holds it.
-/// In one that git can't be asked about, it counts as tracked.
+/// In one that git can't be asked about, it counts as tracked. Its name
+/// without case, as the disk finds it (`Bin` opens the `bin` git tracks), and
+/// as it's spelled (a `*` in it is a `*`).
 pub fn tracks_files_in(dir: &Path) -> Option<bool> {
     let (parent, name) = (dir.parent()?, dir.file_name()?);
     parent.ancestors().find(|a| a.join(".git").exists())?;
+    let mut spec = std::ffi::OsString::from(":(icase,literal)");
+    spec.push(name);
     let tracked = Git::find()
         .and_then(|git| {
             git.out(
                 parent,
-                &[OsStr::new("ls-files"), "-z".as_ref(), "--".as_ref(), name],
+                &[OsStr::new("ls-files"), "-z".as_ref(), "--".as_ref(), &spec],
             )
         })
         .is_none_or(|listed| !listed.is_empty());
@@ -197,17 +212,27 @@ impl Git {
     }
 
     /// git in `dir`, reading only, in a predictable language, with nothing
-    /// inherited that would point it at another repository.
+    /// inherited that would point it at another repository, read another
+    /// configuration file (`GIT_CONFIG`, which only `git config` reads), read
+    /// paths another way (a pathspec taken literally, or as a glob) or
+    /// history another way (replaced commits, another namespace's branches).
     fn cmd(&self, dir: &Path) -> Command {
         let mut c = Command::new(&self.bin);
-        c.arg("-C")
+        // No pager: choosing one reads the settings with what they include,
+        // before `config --no-includes` has a say.
+        c.arg("--no-pager")
+            .arg("-C")
             .arg(dir)
             .args(["-c", "core.fsmonitor=false"])
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // A partial clone fetches an object it's missing (git 2.44 on:
+            // older ones don't know it, and partial clones are left alone).
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stderr(Stdio::null());
+        c.env("GIT_NO_REPLACE_OBJECTS", "1");
         for var in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -215,6 +240,12 @@ impl Git {
             "GIT_COMMON_DIR",
             "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_LITERAL_PATHSPECS",
+            "GIT_GLOB_PATHSPECS",
+            "GIT_NOGLOB_PATHSPECS",
+            "GIT_ICASE_PATHSPECS",
+            "GIT_NAMESPACE",
         ] {
             c.env_remove(var);
         }
@@ -236,7 +267,7 @@ impl Git {
     }
 
     fn finished_in(&self, repo: &Path, now: i64) -> Vec<Finished> {
-        if runs_its_own_commands(&repo.join(".git")) {
+        if self.repo_runs_its_own_commands(repo) {
             return Vec::new();
         }
         let Some(listed) = self.out(repo, &["worktree", "list", "--porcelain", "-z"]) else {
@@ -347,6 +378,13 @@ impl Git {
     /// No changes and no untracked files (whatever `status.showUntrackedFiles`
     /// says), and nothing ignored that couldn't be made again.
     fn nothing_to_lose(&self, worktree: &Path, main: &Path) -> bool {
+        // What git uses there (a worktree's `.git` file may name another
+        // repository). A submodule: `git worktree remove` refuses one with
+        // its submodules checked out, and looking into them would run git in
+        // each, with their own settings.
+        if self.runs_its_own_commands(worktree) || self.has_submodules(worktree) {
+            return false;
+        }
         let Some(out) = self.out(
             worktree,
             &[
@@ -355,7 +393,9 @@ impl Git {
                 "-z",
                 "--untracked-files=normal",
                 "--ignored=matching",
-                "--ignore-submodules=none",
+                // A submodule's commit as recorded (a staged removal of one
+                // shows), never what's in it: that's git run in it.
+                "--ignore-submodules=dirty",
             ],
         ) else {
             return false;
@@ -408,7 +448,15 @@ fn same_in_main(worktree: &Path, main: &Path, rel: &Path, budget: &mut usize) ->
     if here.is_symlink() {
         return true;
     }
+    // A cloud file or folder, on either side: listing or reading it may
+    // download it (Windows has no switch to forbid that), and what's online
+    // only is no copy here.
     let there_at = main.join(rel);
+    let managed =
+        |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| crate::portable::managed(&m));
+    if crate::portable::managed(&here) || managed(&there_at) {
+        return false;
+    }
     let Ok(there) = std::fs::metadata(&there_at) else {
         return false;
     };
@@ -439,30 +487,55 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Whether a repository's own configuration names commands that checking it
-/// would run (`git status` runs a filter on a file it compares, a trial merge
-/// runs a merge driver), or pulls in another file that might. An archive
-/// unpacked into a code folder brings its `.git` with it, and nobody asked to
-/// run what it says: such a repository is left alone, none of its worktrees
-/// ever finished. The user's own configuration (git-lfs's filter, set
-/// globally) isn't the repository's, and runs as it would for them.
-fn runs_its_own_commands(git_dir: &Path) -> bool {
-    let mut configs = vec![git_dir.join("config"), git_dir.join("config.worktree")];
-    if let Ok(worktrees) = std::fs::read_dir(git_dir.join("worktrees")) {
-        configs.extend(
-            worktrees
-                .flatten()
-                .map(|w| w.path().join("config.worktree")),
-        );
+impl Git {
+    /// Whether the configuration git uses in `dir` sets, of the
+    /// repository's own, a command that checking it could run
+    /// ([`names_command`]), or git can't say. Asked of git, which reads it as
+    /// the commands that follow will: after a byte-order mark, with two
+    /// sections on a line, the repository a worktree's `.git` file names. An archive unpacked into a code folder brings its
+    /// `.git` with it, and nobody asked to run what that says: such a
+    /// repository is left alone, none of its worktrees ever finished.
+    fn runs_its_own_commands(&self, dir: &Path) -> bool {
+        // An include is refused, so what it names isn't opened (it may be in
+        // a folder that asks for permission first, and nobody's there).
+        let list = [
+            "config",
+            "--list",
+            "--no-includes",
+            "--show-scope",
+            "--name-only",
+            "-z",
+        ];
+        self.out(dir, &list)
+            .is_none_or(|listed| own_commands(&listed))
     }
-    // Submodules' repositories (`modules/<name>`, a name may have folders in
-    // it, and theirs in `modules/<name>/modules`), within a bound.
+
+    /// [`Git::runs_its_own_commands`] for the repository at `repo` and the
+    /// submodules' repositories it keeps (`.git/modules`), which a trial
+    /// merge opens.
+    fn repo_runs_its_own_commands(&self, repo: &Path) -> bool {
+        self.runs_its_own_commands(repo)
+            || submodule_repos(&repo.join(".git"))
+                .is_none_or(|subs| subs.iter().any(|s| self.runs_its_own_commands(s)))
+    }
+
+    /// Whether `worktree` has a submodule (or git can't say).
+    fn has_submodules(&self, worktree: &Path) -> bool {
+        self.out(worktree, &["ls-files", "--stage", "-z"])
+            .is_none_or(|listed| listed.split(|&b| b == 0).any(|e| e.starts_with(b"160000 ")))
+    }
+}
+
+/// Submodules' repositories (`modules/<name>`; a name may have folders in it,
+/// and theirs are in `modules/<name>/modules`), or `None` past a bound.
+fn submodule_repos(git_dir: &Path) -> Option<Vec<PathBuf>> {
+    let mut found = Vec::new();
     let mut stack = vec![git_dir.join("modules")];
     let mut looked = 0;
     while let Some(dir) = stack.pop() {
         looked += 1;
         if looked > 1_000 {
-            return true;
+            return None;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -473,31 +546,57 @@ fn runs_its_own_commands(git_dir: &Path) -> bool {
             }
             let at = e.path();
             if at.join("HEAD").is_file() {
-                configs.push(at.join("config"));
                 stack.push(at.join("modules"));
+                found.push(at);
             } else {
                 stack.push(at);
             }
         }
     }
-    configs
-        .iter()
-        .any(|c| std::fs::read(c).is_ok_and(|text| names_commands(&String::from_utf8_lossy(&text))))
+    Some(found)
 }
 
-/// Whether a git configuration file has a section that names a command run
-/// on files (`[filter "x"]`, `[merge "x"]`) or includes another file.
-fn names_commands(config: &str) -> bool {
-    config.lines().any(|l| {
-        let l: String = l
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        ["[filter", "[merge", "[include"]
-            .iter()
-            .any(|s| l.starts_with(s))
-    })
+/// Whether `git config --list --show-scope --name-only -z` (a scope and a
+/// name, each ended by NUL) lists a name that [`names_command`] set by the
+/// repository: its own files and what they include. What the user set
+/// (`global`, `system`; git-lfs's filter is set globally) runs as it would
+/// for them, and `command` is what mdif passes.
+fn own_commands(listed: &[u8]) -> bool {
+    let mut fields = listed.split(|&b| b == 0);
+    while let (Some(scope), Some(name)) = (fields.next(), fields.next()) {
+        let users = matches!(scope, b"global" | b"system" | b"command" | b"unknown");
+        if !users && names_command(&String::from_utf8_lossy(name)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a configuration name (`filter.lfs.clean`, as git lists it) sets a
+/// command that what mdif runs could start, or pulls in another file:
+/// - a filter, run on a file `git status` compares with what's committed;
+/// - a merge driver (`merge.<driver>.driver`), run by the trial merge;
+/// - a promisor remote (a partial clone): an object it's missing is
+///   fetched, with whatever transport the remote names;
+/// - an include, for what it might bring in later (a conditional one).
+///
+/// `core.fsmonitor` is turned off on git's command line, and nothing mdif
+/// runs writes the index (the hook that would run then) or shows a diff.
+fn names_command(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let (section, rest) = name.split_once('.').unwrap_or((name.as_str(), ""));
+    // `merge.<driver>.driver` has a subsection; `merge.conflictstyle` doesn't.
+    let subsection = rest.contains('.');
+    match section {
+        "filter" | "include" | "includeif" => true,
+        // A driver, or which one files without an attribute get.
+        "merge" => subsection || rest == "default",
+        "extensions" => rest == "partialclone",
+        "remote" => {
+            subsection && (rest.ends_with(".promisor") || rest.ends_with(".partialclonefilter"))
+        }
+        _ => false,
+    }
 }
 
 /// A folder for a trial merge's objects, removed when done.
@@ -681,6 +780,10 @@ mod tests {
         }
         assert_eq!(tracks_files_in(&repo.join("dist")), Some(true));
         assert_eq!(tracks_files_in(&repo.join("build")), Some(false));
+        // As the disk finds it, without case; as it's spelled, with no
+        // wildcards.
+        assert_eq!(tracks_files_in(&repo.join("Dist")), Some(true));
+        assert_eq!(tracks_files_in(&repo.join("d*")), Some(false));
         assert!(!crate::clean::build_output(&repo.join("dist")));
         assert!(crate::clean::build_output(&repo.join("build")));
     }
@@ -960,44 +1063,205 @@ mod tests {
         assert!(wt("dirty").join("a.txt").exists());
 
         // A command of the repository's own, which checking would run: the
-        // repository is left alone, and it never runs.
+        // repository is left alone, and it never runs. Wherever git finds it:
+        // after a byte-order mark, after another section on its line, with
+        // only carriage returns between lines, in a file it includes, in a
+        // worktree's own settings. (Quoted: in git's files `;` starts a
+        // comment, and the probe would be cut short and never run.)
         let ran = dir.path().join("ran");
-        let config = std::fs::read_to_string(repo.join(".git/config")).unwrap();
-        put(
-            repo.join(".git/config"),
-            &format!(
-                "{config}[filter \"probe\"]\n\tclean = sh -c 'touch {}; cat'\n",
-                ran.display()
-            ),
+        let slashed = |p: &Path| p.display().to_string().replace('\\', "/");
+        // The path quoted for sh (a temporary folder may have a space).
+        let filter = format!(
+            "[filter \"probe\"]\n\tclean = \"sh -c 'touch \\\"{}\\\"; cat'\"\n",
+            slashed(&ran)
         );
         std::fs::create_dir_all(repo.join(".git/info")).unwrap();
         put(repo.join(".git/info/attributes"), "* filter=probe\n");
-        put(wt("ff").join("a.txt"), "one\n");
-        assert_eq!(found(now + IDLE + 60), []);
-        assert!(!ran.exists());
+        let config = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+        let included = dir.path().join("included.cfg");
+        put(included.clone(), &filter);
+        let worktree_config = repo.join(".git/worktrees/ff/config.worktree");
+        let layouts = [
+            ("after the rest", format!("{config}{filter}"), None),
+            (
+                "after a byte-order mark",
+                format!("\u{feff}{filter}{config}"),
+                None,
+            ),
+            (
+                "on another section's line",
+                format!("{config}[user] {filter}"),
+                None,
+            ),
+            (
+                "between carriage returns",
+                format!("{config}{}", filter.replace('\n', "\r")),
+                None,
+            ),
+            (
+                "in a file it includes",
+                format!("{config}[include]\n\tpath = \"{}\"\n", slashed(&included)),
+                None,
+            ),
+            (
+                "in a worktree's own settings",
+                format!(
+                    "{}[extensions]\n\tworktreeConfig = true\n",
+                    config.replace("repositoryformatversion = 0", "repositoryformatversion = 1")
+                ),
+                Some(filter.as_str()),
+            ),
+        ];
+        let probe = || {
+            // A file read again, so status compares it (with the filter).
+            put(wt("ff").join("a.txt"), "one\n");
+            let _ = std::fs::remove_file(&ran);
+        };
+        for (how, text, in_worktree) in &layouts {
+            put(repo.join(".git/config"), text);
+            if let Some(f) = in_worktree {
+                put(worktree_config.clone(), f);
+            }
+            // The probe works: git's own status runs it.
+            probe();
+            assert!(
+                git.out(&wt("ff"), &["status", "--porcelain"]).is_some(),
+                "{how}"
+            );
+            assert!(ran.exists(), "the probe didn't run {how}");
+            probe();
+            assert!(!found(now + IDLE + 60).iter().any(|f| f.0 == "ff"), "{how}");
+            assert!(!ran.exists(), "checking ran it {how}");
+            let _ = std::fs::remove_file(&worktree_config);
+        }
+        // Without it, the same worktree is finished.
+        put(repo.join(".git/config"), &config);
+        probe();
+        assert!(found(now + IDLE + 60).iter().any(|f| f.0 == "ff"));
     }
 
     #[test]
     fn a_repositorys_own_commands_are_told_from_the_users() {
-        assert!(names_commands(
-            "[core]\n\tbare = false\n[filter \"x\"]\n\tclean = cat\n"
-        ));
-        assert!(names_commands("[ Merge \"ours\" ]\n\tdriver = true\n"));
-        assert!(names_commands("[includeIf \"gitdir:~/w/\"]\n\tpath = x\n"));
-        assert!(names_commands("[filter.lfs]\n"));
-        assert!(!names_commands(
-            "[core]\n\tfilemode = true\n[remote \"origin\"]\n\turl = x\n"
-        ));
-        // A submodule's repository has its own configuration.
+        for name in [
+            "filter.lfs.clean",
+            "filter.x.process",
+            "merge.ours.driver",
+            "Merge.Ours.Driver",
+            "merge.default",
+            "include.path",
+            "includeif.gitdir:~/w/.path",
+            "extensions.partialclone",
+            "remote.origin.promisor",
+            "remote.my.fork.partialclonefilter",
+        ] {
+            assert!(names_command(name), "{name}");
+        }
+        for name in [
+            "core.bare",
+            "merge.conflictstyle",
+            "remote.origin.url",
+            "remote.promisor.url",
+            "user.name",
+            "extensions.worktreeconfig",
+        ] {
+            assert!(!names_command(name), "{name}");
+        }
+        // Only what the repository sets: the user's own filter (git-lfs's,
+        // set globally) runs as it would for them.
+        let listed = |pairs: &[(&str, &str)]| -> Vec<u8> {
+            pairs
+                .iter()
+                .flat_map(|(scope, name)| format!("{scope}\0{name}\0").into_bytes())
+                .collect()
+        };
+        assert!(!own_commands(&listed(&[
+            ("global", "filter.lfs.clean"),
+            ("system", "filter.lfs.process"),
+            ("command", "core.fsmonitor"),
+            ("local", "core.bare"),
+        ])));
+        assert!(own_commands(&listed(&[
+            ("local", "core.bare"),
+            ("local", "filter.x.clean"),
+        ])));
+        assert!(own_commands(&listed(&[("worktree", "merge.x.driver")])));
+        assert!(!own_commands(b""));
+
+        // A submodule's repository has its own settings; a submodule is
+        // told by the index.
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
         let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join(".git");
-        let sub = git.join("modules/libs/one");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(git.join("config"), "[core]\n").unwrap();
-        std::fs::write(sub.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(sub.join("config"), "[core]\n").unwrap();
-        assert!(!runs_its_own_commands(&git));
-        std::fs::write(sub.join("config"), "[filter \"x\"]\n\tsmudge = x\n").unwrap();
-        assert!(runs_its_own_commands(&git));
+        let repo = dir.path().join("app");
+        let run = |args: &[&str]| {
+            let st = Command::new(&git.bin)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        run(&["init", "-q", repo.to_str().unwrap()]);
+        let sub = repo.join(".git/modules/libs/one");
+        run(&["init", "-q", "--bare", sub.to_str().unwrap()]);
+        assert!(!git.repo_runs_its_own_commands(&repo));
+        let config = std::fs::read_to_string(sub.join("config")).unwrap();
+        std::fs::write(
+            sub.join("config"),
+            format!("{config}[filter \"x\"]\n\tsmudge = x\n"),
+        )
+        .unwrap();
+        assert!(git.repo_runs_its_own_commands(&repo));
+        // Settings git can't read: it can't say what they'd run.
+        std::fs::write(sub.join("config"), "[broken\n").unwrap();
+        assert!(git.repo_runs_its_own_commands(&repo));
+        std::fs::write(sub.join("config"), config).unwrap();
+
+        // An include is refused without being opened: it may be in a folder
+        // that asks for permission first. One git can't open says so.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let kept = dir.path().join("kept.gitconfig");
+            std::fs::write(&kept, "[filter \"x\"]\n\tclean = x\n").unwrap();
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let config = repo.join(".git/config");
+            let before = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(
+                &config,
+                format!("{before}[include]\n\tpath = \"{}\"\n", kept.display()),
+            )
+            .unwrap();
+            assert!(git.runs_its_own_commands(&repo));
+            let o = git
+                .cmd(&repo)
+                .args(["config", "--list", "--no-includes", "--name-only"])
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&o.stderr);
+            assert!(o.status.success() && said.is_empty(), "{said}");
+            assert!(String::from_utf8_lossy(&o.stdout).contains("include.path"));
+            std::fs::write(&config, before).unwrap();
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(!git.repo_runs_its_own_commands(&repo));
+
+        assert!(!git.has_submodules(&repo));
+        let at = repo.to_str().unwrap();
+        run(&[
+            "-C",
+            at,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1234567890123456789012345678901234567890,libs/one",
+        ]);
+        assert!(git.has_submodules(&repo));
     }
 }

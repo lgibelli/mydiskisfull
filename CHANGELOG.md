@@ -22,7 +22,13 @@ All notable changes to this project are documented here. The format is based on
   when it held another worktree still in use: removing it lost what was in them. Every ignored
   file must now match main's, and a worktree with another inside it is never finished.
 - Worktree checks leave alone a repository whose own git config runs filters or merge drivers
-  (they would run code nobody asked for).
+  (they would run code nobody asked for), as git itself reads it: after a byte-order mark, with
+  two sections on a line, or set for one worktree. One that includes another file is left alone
+  without opening it (it may be in a folder that asks for permission). A partial clone is left
+  alone too, git never fetches, and a worktree with submodules is never finished (git refuses to
+  remove one).
+- A folder git tracks counted as untracked build output when its name's case differed from git's
+  (`Build` on disk, `build` in git), and could be deleted.
 - Docker's clean-ups (Remove Old Leftovers and the daily tidy) followed the shell's Docker
   context, which could be a remote engine: they now always reach this Mac's Docker Desktop.
 - `mdif clean` of a link given with a trailing slash (`link/`) emptied what the link points to.
