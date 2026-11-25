@@ -28,6 +28,15 @@ All notable changes to this project are documented here. The format is based on
 - `mdif map` on a Mac showed "not measured" below zero when it counted more than the disk uses
   (clones whose shared blocks couldn't be told apart, files that grew while it ran). It says how
   much was counted twice, as on Windows.
+- What each folder grows: a folder moved or renamed counted as freed where it was and as new
+  where it went when its new place was listed first, or when where it went couldn't be asked (as
+  when nothing may show a privacy prompt). It's found by its number at its new place now. A
+  folder moved out of another that was deleted after no longer took the deleted one's size
+  along, and files moved into a folder seen for the first time count there (a Mac records when
+  each was put there; a moved file keeps when it was made).
+- After FSEvents dropped events, the folders it asked to have listed again were listed in one
+  period, up to 20,000 of them, whatever it cost. A rescan now stops when the period's share is
+  spent and goes on in the next, counting what was made since it began.
 
 ## [0.1.6] - 2026-11-25
 

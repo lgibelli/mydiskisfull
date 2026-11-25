@@ -10,8 +10,9 @@
 //! only the directories that changed (one level, not recursively), and turns
 //! the change in each one's direct-file size into growth of its owner
 //! ([`Tracker`]). A directory seen for the first time has no previous size,
-//! so only its files created since the previous period count: the first
-//! period after a start is a lower bound, later ones are exact.
+//! so only its files created (or, where a Mac records it, put there) since
+//! the previous period count: the first period after a start is a lower
+//! bound, later ones are exact.
 //!
 //! FSEvents doesn't always say when a file grows: a 28 GB download by a
 //! torrent client showed only its folder being created, and the folder was
@@ -22,7 +23,10 @@
 //! its parents. When a parent is listed and a folder known below it is gone,
 //! it's looked up by its inode number (`fsgetpath`): what was known of it
 //! moves to where it is now, to its new owner (the Trash, until it's
-//! emptied), or is freed if it was deleted.
+//! emptied), or is freed if it was deleted. Its new parent, when listed
+//! first, finds it the same way, by the number it's listed with; and where
+//! it can't be looked up, the period ends before it counts as deleted, in
+//! case its new place is listed meanwhile.
 //!
 //! Sizes are allocated bytes, which snapshots don't change, divided among
 //! hard links and among pure clones so neither is counted twice.
@@ -492,8 +496,9 @@ pub struct Update {
     pub skipped: usize,
     /// Whole-volume rescans FSEvents asked for (history lost, e.g. after
     /// its journal was reset), which are skipped, and rescans cut short by
-    /// the period's [`MAX_RESCAN`]: what was measured is less than what
-    /// happened.
+    /// [`MAX_RESCAN`]: what was measured is less than what happened. (One
+    /// that only ran out of the period's [`PERIOD_ENTRIES`] goes on next
+    /// period, deferred.)
     pub gaps: usize,
 }
 
@@ -525,8 +530,20 @@ pub struct Tracker {
     budget: usize,
     /// Folders a period's rescans list at most ([`MAX_RESCAN`]).
     rescan: usize,
+    /// Folders a rescan still has to list, with their subtrees: it stops
+    /// when the period's [`PERIOD_ENTRIES`] are spent and goes on next
+    /// period. Each with the time files made after count from, the period's
+    /// it began in (where nothing was known, nothing made since is missed).
+    rescans: BTreeMap<PathBuf, i64>,
     /// Bytes per period a steady folder changes by less than.
     steady: u64,
+    /// The folders known, by their numbers, as the period began: one listed
+    /// at a new place is found by its number ([`Tracker::moved_from`]).
+    inodes: HashMap<u64, PathBuf>,
+    /// Folders found gone this period where where they went couldn't be
+    /// asked: found at a new place before it ends, they moved; else they
+    /// count as deleted then.
+    unresolved: Vec<PathBuf>,
 }
 
 impl Tracker {
@@ -545,7 +562,10 @@ impl Tracker {
             period,
             budget: PERIOD_ENTRIES,
             rescan: MAX_RESCAN,
+            rescans: BTreeMap::new(),
             steady: STEADY,
+            inodes: HashMap::new(),
+            unresolved: Vec::new(),
         }
     }
 
@@ -593,8 +613,11 @@ impl Tracker {
     /// `now` is on the caller's clock, in the unit of the period.
     pub fn apply(&mut self, events: &[Event], created_after: i64, now: i64) -> Update {
         let mut up = Update::default();
-        // Each directory once; `true` when its whole subtree must be rescanned.
-        let mut dirty: BTreeMap<PathBuf, bool> = BTreeMap::new();
+        // Each directory once.
+        let mut dirty: BTreeSet<PathBuf> = BTreeSet::new();
+        // And those whose whole subtree must be listed again, with the time
+        // files made after count from.
+        let mut rescans = std::mem::take(&mut self.rescans);
         for e in events {
             if e.flags & (flag::HISTORY_DONE | flag::MOUNT | flag::UNMOUNT) != 0 {
                 continue;
@@ -609,37 +632,49 @@ impl Tracker {
                 if names <= 1 {
                     up.gaps += 1;
                 } else {
-                    dirty.insert(dir, true);
+                    rescans.entry(dir).or_insert(created_after);
                 }
             } else {
-                dirty.entry(dir).or_insert(false);
+                dirty.insert(dir);
             }
         }
-        for dir in std::mem::take(&mut self.pending) {
-            dirty.entry(dir).or_insert(false);
-        }
+        dirty.append(&mut self.pending);
+        dirty.retain(|d| !rescans.contains_key(d));
+        self.inodes = self
+            .dirs
+            .iter()
+            .filter(|(_, d)| d.inode != 0)
+            .map(|(p, d)| (d.inode, p.clone()))
+            .collect();
         let mut deltas: HashMap<PathBuf, i64> = HashMap::new();
         let mut budget = self.rescan;
+        // Rescans first, those begun in an earlier period before the rest:
+        // what they list is listed before anything else spends the period's
+        // entries, so each gets somewhere.
+        let mut rescans: Vec<(PathBuf, i64)> = rescans.into_iter().collect();
+        rescans.sort_by_key(|(d, since)| (*since, d.clone()));
+        for (dir, since) in rescans {
+            self.measure(dir, true, since, now, &mut budget, &mut deltas, &mut up);
+        }
         // Folders listed before that are due, and how overdue (1: just due).
         let mut due: Vec<(f64, PathBuf)> = Vec::new();
         // Folders seen for the first time, listed last: one that moved here is
         // found gone from its old place by listing that place, and what was
         // known of it moves along, so it's then measured against what it held
-        // rather than counted as freed there and new here. Rescans, and new
-        // folders holding known ones (an old place, seen first itself), go
-        // first.
+        // rather than counted as freed there and new here. New folders holding
+        // known ones (an old place, seen first itself) go first.
         let mut first: Vec<PathBuf> = Vec::new();
-        for (dir, recursive) in dirty {
+        for dir in dirty {
             let (wait, seen) = match self.dirs.get(&dir) {
-                Some(d) if !recursive => (d.defer() as i64 * self.period, d.seen),
-                _ if !recursive && self.known_children(&dir).is_empty() => {
+                Some(d) => (d.defer() as i64 * self.period, d.seen),
+                None if self.known_children(&dir).is_empty() => {
                     first.push(dir);
                     continue;
                 }
-                _ => {
+                None => {
                     self.measure(
                         dir,
-                        recursive,
+                        false,
                         created_after,
                         now,
                         &mut budget,
@@ -687,6 +722,16 @@ impl Tracker {
                 &mut up,
             );
         }
+        // Found gone and not found anywhere else since: deleted, or moved
+        // where nothing was listed this period, which can't be told apart.
+        let mut unresolved = std::mem::take(&mut self.unresolved);
+        unresolved.sort();
+        for root in unresolved {
+            let below = self.below(&root);
+            if !below.is_empty() {
+                self.relocate(&root, below, None, &mut deltas);
+            }
+        }
         for (owner, d) in deltas {
             *self.carry.entry(owner).or_default() += d;
         }
@@ -720,6 +765,21 @@ impl Tracker {
         // Folders below left out of a rescan: its budget ran out.
         let mut cut = false;
         while let Some(dir) = stack.pop() {
+            // Rescans list a folder a period at least (they go first), and
+            // stop once the period's entries are spent: the rest is listed
+            // next period.
+            if recursive && up.listed > 0 && up.entries >= self.budget {
+                stack.push(dir);
+                for rest in stack.drain(..) {
+                    if self.rescans.len() < self.rescan {
+                        up.deferred += 1;
+                        self.rescans.entry(rest).or_insert(created_after);
+                    } else {
+                        cut = true;
+                    }
+                }
+                break;
+            }
             if !privacy::may_open(&dir) {
                 up.skipped += 1;
                 self.followed.remove(&dir);
@@ -737,6 +797,29 @@ impl Tracker {
                     up.entries += entries.len();
                     if entries.len() >= DEFER_UNIT as usize {
                         up.biggest.push((dir.clone(), entries.len()));
+                    }
+                    let meta = std::fs::symlink_metadata(&dir).ok();
+                    // A folder known somewhere else that is here now, found
+                    // by its number whichever end is listed first: what's
+                    // known of it comes along. It's this folder, seen here
+                    // first, or a folder in it, before the place it left is
+                    // found without it (a rename in here, too).
+                    if !self.dirs.contains_key(&dir)
+                        && let Some(m) = &meta
+                        && let Some(from) = self.moved_from(crate::portable::file_id(&dir, m), &dir)
+                    {
+                        self.carry_over(&from, &dir, deltas);
+                    }
+                    for e in entries
+                        .iter()
+                        .filter(|e| e.kind == Kind::Dir && !e.mount_point)
+                    {
+                        let child = dir.join(&e.name);
+                        if !self.dirs.contains_key(&child)
+                            && let Some(from) = self.moved_from(e.inode, &child)
+                        {
+                            self.carry_over(&from, &child, deltas);
+                        }
                     }
                     // Folders known below it that aren't in it any more:
                     // moved or deleted.
@@ -775,15 +858,18 @@ impl Tracker {
                         }
                         let size = entry_size(e);
                         own += size;
-                        if e.crtime > created_after {
+                        // Here since: made, or put here (a file moved in keeps
+                        // when it was made; where a Mac records when it was
+                        // added, that says it).
+                        let arrived = e.crtime.max(e.added);
+                        if arrived > created_after {
                             created += size;
                         }
                         written |= e.mtime > created_after;
                         if above && size >= LOOSE_MIN {
-                            loose.push((e.name.as_os_str(), size, e.crtime > since));
+                            loose.push((e.name.as_os_str(), size, arrived > since));
                         }
                     }
-                    let meta = std::fs::symlink_metadata(&dir).ok();
                     // Made since the last period: all it holds came since, a
                     // file moved in too (it keeps its own creation time).
                     let made = meta
@@ -944,18 +1030,69 @@ impl Tracker {
 
     /// `root` isn't where it was. What was known of it and below it moves to
     /// where it is now, and to that place's owner, or is freed if it was
-    /// deleted (or can't be followed).
+    /// deleted. Where it is now can't always be asked (privacy prompts are
+    /// avoided, or the volume can't be asked by number): then the period
+    /// decides, when it ends ([`Tracker::unresolved`]), so that a listing of
+    /// its new place meanwhile finds it moved rather than deleted.
     fn gone(&mut self, root: &Path, deltas: &mut HashMap<PathBuf, i64>) {
-        let below: Vec<PathBuf> = self
-            .dirs
-            .range(root.to_path_buf()..)
-            .take_while(|(p, _)| p.starts_with(root))
-            .map(|(p, _)| p.clone())
-            .collect();
+        if self.fsid.is_none() || privacy::avoiding() {
+            if !self.unresolved.iter().any(|u| root.starts_with(u)) {
+                self.unresolved.push(root.to_path_buf());
+            }
+            return;
+        }
+        let below = self.below(root);
         let to = self.now_at(root, &below);
         if to.as_deref() == Some(root) {
             return;
         }
+        self.relocate(root, below, to.as_deref(), deltas);
+    }
+
+    /// The folders known at `root` and below it.
+    fn below(&self, root: &Path) -> Vec<PathBuf> {
+        self.dirs
+            .range(root.to_path_buf()..)
+            .take_while(|(p, _)| p.starts_with(root))
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+
+    /// The folder known somewhere else that `to`, not known, is: the one with
+    /// its number, unless that one is still where it was (a firmlink or a
+    /// folder's hard link: one folder by two paths).
+    fn moved_from(&self, inode: u64, to: &Path) -> Option<PathBuf> {
+        if inode == 0 {
+            return None;
+        }
+        let from = self.inodes.get(&inode)?;
+        if from == to
+            || to.starts_with(from)
+            || self.dirs.get(from).is_none_or(|d| d.inode != inode)
+        {
+            return None;
+        }
+        let still_there = privacy::may_open(from)
+            && std::fs::symlink_metadata(from)
+                .is_ok_and(|m| crate::portable::file_id(from, &m) == inode);
+        (!still_there).then(|| from.clone())
+    }
+
+    /// `from`, known, is `to` now: what's known of it moves there.
+    fn carry_over(&mut self, from: &Path, to: &Path, deltas: &mut HashMap<PathBuf, i64>) {
+        let below = self.below(from);
+        self.relocate(from, below, Some(to), deltas);
+    }
+
+    /// What's known at `root` and `below` it moves to `to`, and to the owners
+    /// there, or is freed (`None`: deleted).
+    fn relocate(
+        &mut self,
+        root: &Path,
+        below: Vec<PathBuf>,
+        to: Option<&Path>,
+        deltas: &mut HashMap<PathBuf, i64>,
+    ) {
         for p in below {
             let d = self.dirs.remove(&p).expect("just listed");
             let pending = self.pending.remove(&p);
@@ -971,10 +1108,10 @@ impl Tracker {
                 }
                 None => *deltas.entry(self.rules.owner_of(&p)).or_default() -= d.own as i64,
             }
-            let Some(to) = &to else { continue };
+            let Some(to) = to else { continue };
             let rel = p.strip_prefix(root).expect("below it");
             let moved = if rel.as_os_str().is_empty() {
-                to.clone()
+                to.to_path_buf()
             } else {
                 to.join(rel)
             };
@@ -997,6 +1134,9 @@ impl Tracker {
                 if followed {
                     self.followed.insert(moved.clone());
                 }
+                if d.inode != 0 {
+                    self.inodes.insert(d.inode, moved.clone());
+                }
                 self.dirs.insert(moved, d);
             }
         }
@@ -1008,6 +1148,10 @@ impl Tracker {
     /// guarded folder now).
     fn now_at(&self, root: &Path, below: &[PathBuf]) -> Option<PathBuf> {
         let fsid = self.fsid.filter(|_| !privacy::avoiding())?;
+        // Where a folder in it is says where `root` is only if `root` is
+        // there too: one moved out of it earlier, and not seen since, is
+        // somewhere else, and `root` may have been deleted after.
+        let root_inode = self.dirs.get(root).map(|d| d.inode).filter(|&i| i != 0);
         // A few tried, not all: after a big tree is deleted none resolves, and a
         // lookup of each of thousands would cost more than the period.
         below.iter().take(MAX_LOOKUPS).find_map(|p| {
@@ -1016,9 +1160,15 @@ impl Tracker {
             // Its place inside what moved is the same.
             let rel = p.strip_prefix(root).ok()?;
             let depth = rel.components().count();
-            (depth == 0 || now.ends_with(rel))
+            let at = (depth == 0 || now.ends_with(rel))
                 .then(|| now.ancestors().nth(depth).map(Path::to_path_buf))
-                .flatten()
+                .flatten()?;
+            let with_root = depth == 0
+                || root_inode.is_none_or(|ino| {
+                    std::fs::symlink_metadata(&at)
+                        .is_ok_and(|m| crate::portable::file_id(&at, &m) == ino)
+                });
+            with_root.then_some(at)
         })
     }
 
@@ -1590,14 +1740,136 @@ mod tests {
         assert!(growth(&up, &trash) <= -(20 * MB as i64), "{up:?}");
         assert!(!tr.dirs.keys().any(|p| p.starts_with(trash.join("film"))));
 
-        // Not followed: gone from where it was.
-        let mut tr = Tracker::new(rules, None, 1);
+        // Where it went can't be asked (as without Full Disk Access): found
+        // by its number at its new place, listed the same period...
+        let mut tr = Tracker::new(rules.clone(), None, 1);
         write(&storage.join("other/x.bin"), 20 * MB as usize);
         tr.apply(&[event(&storage.join("other"))], 0, 100);
         fs::rename(storage.join("other"), trash.join("other")).unwrap();
         let up = tr.apply(&[event(&storage), event(&trash)], i64::MAX, 200);
         assert!(growth(&up, &storage) <= -(20 * MB as i64), "{up:?}");
+        assert!(growth(&up, &trash) >= 20 * MB as i64, "{up:?}");
+        // ...and gone from where it was when nothing listed it there.
+        let mut tr = Tracker::new(rules, None, 1);
+        write(&storage.join("more/x.bin"), 20 * MB as usize);
+        tr.apply(&[event(&storage.join("more"))], 0, 100);
+        fs::rename(storage.join("more"), trash.join("more")).unwrap();
+        let up = tr.apply(&[event(&storage)], i64::MAX, 200);
+        assert!(growth(&up, &storage) <= -(20 * MB as i64), "{up:?}");
         assert_eq!(growth(&up, &trash), 0, "{up:?}");
+        assert!(!tr.dirs.keys().any(|p| p.starts_with(storage.join("more"))));
+    }
+
+    #[test]
+    fn a_folder_renamed_in_its_folder_keeps_what_it_holds() {
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let projects = root.join("Projects");
+        write(&projects.join("a").join("data.bin"), 20 * MB as usize);
+        // Not asked where anything went: the listing says it, by number.
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.apply(&[event(&projects.join("a"))], 0, 100);
+        fs::rename(projects.join("a"), projects.join("b")).unwrap();
+        let up = tr.apply(&[event(&projects)], i64::MAX, 200);
+        assert_eq!(growth(&up, &projects), 0, "{up:?}");
+        assert!(tr.dirs.contains_key(&projects.join("b")));
+        assert!(!tr.dirs.contains_key(&projects.join("a")));
+        // What it holds is measured against what it held.
+        write(&projects.join("b").join("more.bin"), 2 * MB as usize);
+        let up = tr.apply(&[event(&projects.join("b"))], i64::MAX, 300);
+        let grew = growth(&up, &projects);
+        assert!((2 * MB as i64..3 * MB as i64).contains(&grew), "{up:?}");
+    }
+
+    // Asks where a moved folder is by its number, which only macOS can do so far.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_seen_first_at_its_new_place_takes_its_size_along() {
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (downloads, movies) = (root.join("Downloads"), root.join("Movies"));
+        let film = downloads.join("film");
+        write(&film.join("film.mkv"), 20 * MB as usize);
+        fs::create_dir_all(&movies).unwrap();
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.follow_moves(crate::os::fs::fsid(&root).unwrap());
+        tr.apply(&[event(&downloads), event(&film)], 0, 100);
+
+        // Its new place is listed before its old one: Downloads was listed
+        // just now, so it waits.
+        let moved = movies.join("film");
+        fs::rename(&film, &moved).unwrap();
+        let up = tr.apply(&[event(&downloads), event(&moved)], i64::MAX, 100);
+        assert!(up.deferred >= 1, "{up:?}");
+        assert!(growth(&up, &downloads) <= -(20 * MB as i64), "{up:?}");
+        assert!(growth(&up, &movies) >= 20 * MB as i64, "{up:?}");
+        // Downloads, listed at last, has nothing more to say about it.
+        let up = tr.apply(&[], i64::MAX, 102);
+        assert_eq!(growth(&up, &downloads), 0, "{up:?}");
+        assert_eq!(growth(&up, &movies), 0, "{up:?}");
+    }
+
+    // Asks where a moved folder is by its number, which only macOS can do so far.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_moved_out_before_its_folder_was_deleted_doesnt_take_that_along() {
+        let _on = crate::privacy::SWITCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (work, archive) = (root.join("Work"), root.join("Archive"));
+        let proj = work.join("proj");
+        write(&proj.join("big.bin"), 30 * MB as usize);
+        write(&proj.join("sub").join("small.bin"), MB as usize);
+        fs::create_dir_all(&archive).unwrap();
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.follow_moves(crate::os::fs::fsid(&root).unwrap());
+        tr.apply(&[event(&proj), event(&proj.join("sub"))], 0, 100);
+
+        // `sub` went to the archive, unseen; then `proj` was deleted.
+        fs::rename(proj.join("sub"), archive.join("sub")).unwrap();
+        fs::remove_dir_all(&proj).unwrap();
+        let up = tr.apply(&[event(&work)], i64::MAX, 200);
+        // Not taken for `proj` moved to the archive: its 30 MB were freed.
+        assert!(growth(&up, &work) <= -(30 * MB as i64), "{up:?}");
+        assert_eq!(growth(&up, &archive), 0, "{up:?}");
+        assert!(
+            !tr.dirs.keys().any(|p| p.starts_with(&archive)),
+            "{:?}",
+            tr.dirs.keys()
+        );
+    }
+
+    // A Mac records when a file was put in its folder; Windows doesn't.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_moved_into_a_folder_seen_first_counts_there() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let (downloads, docs) = (root.join("Downloads"), root.join("Docs"));
+        write(&downloads.join("report.pdf"), 4 * MB as usize);
+        fs::create_dir_all(&docs).unwrap();
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        tr.apply(&[event(&downloads)], 0, 100);
+
+        // The last period was after both were made; the file moved since.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let last = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::rename(downloads.join("report.pdf"), docs.join("report.pdf")).unwrap();
+        let up = tr.apply(&[event(&downloads), event(&docs)], last, 200);
+        assert!(growth(&up, &downloads) <= -(4 * MB as i64), "{up:?}");
+        assert!(growth(&up, &docs) >= 4 * MB as i64, "{up:?}");
     }
 
     // Follows a moved folder by its number, which only macOS is tested on.
@@ -1780,6 +2052,40 @@ mod tests {
         tr.rescan = 4;
         let up = tr.apply(&[rescan], 0, 1);
         assert_eq!((up.listed, up.gaps), (5, 0), "{up:?}");
+    }
+
+    #[test]
+    fn a_rescan_bigger_than_a_period_goes_on_in_the_next() {
+        let t = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(t.path()).unwrap();
+        let p = root.join("p");
+        for name in ["a", "b", "c", "d"] {
+            for i in 0..3 {
+                write(&p.join(name).join(format!("{i}.bin")), MB as usize);
+            }
+        }
+        let rescan = Event {
+            path: p.clone(),
+            flags: flag::MUST_SCAN_SUBDIRS,
+            id: 1,
+        };
+        let mut tr = Tracker::new(Rules::default().depth(&root, 1), None, 1);
+        // Two folders' entries a period.
+        tr.budget = 6;
+        let up = tr.apply(std::slice::from_ref(&rescan), 0, 1);
+        // `p` (four entries) and one folder, then the period's entries are
+        // spent: the other three wait, which is no gap.
+        assert_eq!((up.listed, up.deferred, up.gaps), (2, 3, 0), "{up:?}");
+        let mut grew = growth(&up, &p);
+        let up = tr.apply(&[], i64::MAX, 2);
+        assert_eq!((up.listed, up.deferred, up.gaps), (2, 1, 0), "{up:?}");
+        grew += growth(&up, &p);
+        // The files made before the next period count, as they would have.
+        let up = tr.apply(&[], i64::MAX, 3);
+        assert_eq!((up.listed, up.deferred, up.gaps), (1, 0, 0), "{up:?}");
+        grew += growth(&up, &p);
+        assert!(grew >= 12 * MB as i64, "{grew}");
+        assert!(tr.rescans.is_empty());
     }
 
     #[test]

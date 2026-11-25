@@ -30,6 +30,7 @@ const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
 const ATTR_CMN_ACCTIME: u32 = 0x0000_1000;
 const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const ATTR_CMN_FILEID: u32 = 0x0200_0000;
+const ATTR_CMN_ADDEDTIME: u32 = 0x1000_0000;
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
 const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
@@ -106,6 +107,10 @@ pub struct Entry {
     pub crtime: i64,
     pub mtime: i64,
     pub atime: i64,
+    /// When it was put in its folder (made, moved or copied there), seconds
+    /// since the epoch; 0 where the file system doesn't record it. A file
+    /// moved in keeps its creation time, so this is what says it's new here.
+    pub added: i64,
     /// BSD `st_flags`.
     pub flags: u32,
     /// Inode number: the same for every hard link to a file.
@@ -204,7 +209,8 @@ pub fn read_dir_fd_with(fd: &OwnedFd, detail: Detail) -> io::Result<Vec<Entry>> 
             | ATTR_CMN_MODTIME
             | ATTR_CMN_ACCTIME
             | ATTR_CMN_FLAGS
-            | ATTR_CMN_FILEID,
+            | ATTR_CMN_FILEID
+            | ATTR_CMN_ADDEDTIME,
         volattr: 0,
         dirattr: ATTR_DIR_MOUNTSTATUS,
         fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
@@ -252,7 +258,8 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
     let mut c = Cursor::new(rec);
     c.skip(4); // record length
     // attribute_set_t of what is actually valid for this entry.
-    let [_common, _vol, _dir, _file, ret_ext] = [c.u32()?, c.u32()?, c.u32()?, c.u32()?, c.u32()?];
+    let [ret_common, _vol, _dir, _file, ret_ext] =
+        [c.u32()?, c.u32()?, c.u32()?, c.u32()?, c.u32()?];
     let error = c.u32()?;
     let name_at = c.pos;
     let name_off = c.i32()?;
@@ -269,6 +276,16 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
     c.skip(8); // tv_nsec
     let flags = c.u32()?;
     let inode = c.u64()?;
+    // ATTR_CMN_ADDEDTIME comes after ATTR_CMN_FILEID (the parent's ID and the
+    // full path between them aren't asked for); packed as zeros where it
+    // isn't valid, which the returned set says.
+    let added = c.i64()?;
+    c.skip(8); // tv_nsec
+    let added = if ret_common & ATTR_CMN_ADDEDTIME != 0 {
+        added
+    } else {
+        0
+    };
     // A folder carries the folder group and no file group; anything else the
     // other way round.
     let (mount_point, nlink, logical, allocated) = if objtype == VDIR {
@@ -311,6 +328,7 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
         crtime,
         mtime,
         atime,
+        added,
         flags,
         inode,
         nlink,
@@ -490,6 +508,25 @@ mod tests {
             assert_eq!(entry(&entries, "sub").kind, Kind::Dir);
             assert_eq!(entry(&entries, "z.bin").logical, 16);
         }
+    }
+
+    #[test]
+    fn a_file_moved_in_says_when_it_was_put_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(from.join("f.bin"), b"x").unwrap();
+        fs::write(to.join("made.bin"), b"y").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::rename(from.join("f.bin"), to.join("f.bin")).unwrap();
+        let entries = read_dir(&to).unwrap();
+        let (moved, made) = (entry(&entries, "f.bin"), entry(&entries, "made.bin"));
+        // Made before, put here after; one made here was put here then.
+        assert!(moved.added > moved.crtime, "{moved:?}");
+        assert!((made.added - made.crtime).abs() <= 1, "{made:?}");
+        // What follows it is read where it is.
+        assert_eq!((moved.logical, made.logical, moved.nlink), (1, 1, 1));
     }
 
     #[test]
