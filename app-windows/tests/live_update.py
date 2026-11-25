@@ -12,7 +12,7 @@ The live workflow (windows-live.yml) runs it on its runners: it installs for
 the user running it and changes what starts at sign-in, so not on a PC of
 your own.
 """
-import json, os, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request, winreg
 import websocket  # websocket-client, installed by the workflow
 from live_release import download, latest_and_previous, version
 
@@ -64,8 +64,14 @@ assert mdif_version() == start, f'mdif {mdif_version()} after installing {start}
 subprocess.run([mdif, 'agent', 'install'], check=True)
 wait('the watcher', lambda: agent()['running'])
 
-# The app as sign-in opens it, its window's page open to remote debugging.
-env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f'--remote-debugging-port={PORT}')
+# The app as sign-in opens it, its window's page open to remote debugging:
+# WebView2 takes extra arguments from the environment, and from a policy
+# for the program (the runner is thrown away afterwards).
+ARGS = f'--remote-debugging-port={PORT}'
+with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                      r'Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments') as k:
+    winreg.SetValueEx(k, 'MyDiskIsFull.exe', 0, winreg.REG_SZ, ARGS)
+env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=ARGS)
 subprocess.Popen([exe, '--background'], env=env)
 wait('the app to read the disk', lambda: os.path.isfile(announced))
 
@@ -75,7 +81,14 @@ def page():
         return next(t for t in json.load(r) if t['type'] == 'page')
 
 
-wait("the app's window", page)
+try:
+    wait("the app's window", page)
+except SystemExit:
+    print(subprocess.run(['powershell', '-NoProfile', '-Command',
+                          "Get-CimInstance Win32_Process | Where-Object { $_.Name -match "
+                          "'MyDiskIsFull|msedgewebview2' } | Format-List Name,ProcessId,CommandLine "
+                          "| Out-String -Width 400"], capture_output=True, text=True).stdout)
+    raise
 ws = websocket.create_connection(page()['webSocketDebuggerUrl'], timeout=120)
 asked = 0
 

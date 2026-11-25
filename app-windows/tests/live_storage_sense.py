@@ -22,8 +22,10 @@ TASK = r'\Microsoft\Windows\DiskFootprint\StorageSense'
 
 
 def ps(cmd):
-    return subprocess.run(['powershell', '-NoProfile', '-Command', cmd],
-                          check=True, capture_output=True, text=True).stdout
+    r = subprocess.run(['powershell', '-NoProfile', '-Command', cmd], capture_output=True, text=True)
+    if r.returncode or r.stderr.strip():
+        sys.exit(f'{cmd}\n{r.stdout}\n{r.stderr}')
+    return r.stdout
 
 
 subprocess.run([mdif, 'tweaks', 'apply', 'recycle-bin-auto-empty', '--db', db], check=True)
@@ -71,8 +73,13 @@ with open(now[files['old.bin'].lower()], 'r+b') as f:
     f.seek(16)
     f.write(struct.pack('<q', filetime))
 
-print(subprocess.run(['schtasks', '/query', '/tn', TASK, '/v', '/fo', 'LIST'],
-                     capture_output=True, text=True).stdout)
+# Its task waits for the PC to be idle, which a runner never is: that
+# condition is lifted (the runner is thrown away afterwards).
+print(ps(r"$t = Get-ScheduledTask -TaskPath '\Microsoft\Windows\DiskFootprint\' -TaskName StorageSense; "
+         r"$t.Settings.RunOnlyIfIdle = $false; $t.Settings.DisallowStartIfOnBatteries = $false; "
+         r"$t.Settings.StopIfGoingOnBatteries = $false; "
+         r"Set-ScheduledTask -InputObject $t | Out-Null; "
+         r"Export-ScheduledTask -TaskPath '\Microsoft\Windows\DiskFootprint\' -TaskName StorageSense"))
 subprocess.run(['schtasks', '/run', '/tn', TASK], check=True)
 end = time.time() + 600
 while files['old.bin'].lower() in binned():
