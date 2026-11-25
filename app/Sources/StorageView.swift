@@ -515,7 +515,8 @@ struct FileIcon: View {
         if ext == "app" {
             // One that isn't installed (left out of the backups by name)
             // would be a blank page.
-            image = FileManager.default.fileExists(atPath: path)
+            // Nor is one where looking would ask for permission.
+            image = !Format.mayPrompt(path) && FileManager.default.fileExists(atPath: path)
                 ? NSWorkspace.shared.icon(forFile: path) : NSWorkspace.shared.icon(for: .applicationBundle)
         } else {
             image = NSWorkspace.shared.icon(for: type ?? (folder ? .folder : .data))

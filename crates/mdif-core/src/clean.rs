@@ -336,6 +336,16 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     display(app, home)
                 ));
             }
+            // One of them, the one writing: WebKit runs a page process per
+            // tab, and ending them all would reload every tab.
+            let pids: Vec<i32> = match pids.as_slice() {
+                [one] => vec![*one],
+                many => {
+                    let before = writes(many);
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    busiest(&before, &writes(many)).into_iter().collect()
+                }
+            };
             for &pid in &pids {
                 let _ = terminate(pid);
             }
@@ -1413,6 +1423,27 @@ fn ended(pids: &[i32], wait: std::time::Duration) -> bool {
 }
 
 /// The processes named `name` that work for the app at `app`.
+/// What each of `pids` has written so far.
+fn writes(pids: &[i32]) -> Vec<(i32, u64)> {
+    mdif_macos::proc::own_processes()
+        .into_iter()
+        .filter(|p| pids.contains(&p.pid))
+        .map(|p| (p.pid, p.bytes_written))
+        .collect()
+}
+
+/// The process that wrote the most between `before` and `after`, or,
+/// when none wrote then, the one that has written the most.
+fn busiest(before: &[(i32, u64)], after: &[(i32, u64)]) -> Option<i32> {
+    after
+        .iter()
+        .max_by_key(|&&(pid, w)| {
+            let was = before.iter().find(|b| b.0 == pid).map_or(w, |b| b.1);
+            (w.saturating_sub(was), w)
+        })
+        .map(|&(pid, _)| pid)
+}
+
 fn helpers_of(name: &str, app: &Path) -> Vec<i32> {
     mdif_macos::proc::own_processes()
         .into_iter()
@@ -1453,6 +1484,20 @@ fn running(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_ends_the_helper_writing_not_every_one_of_that_name() {
+        // Three page processes: the second writes now, the third has
+        // written the most in its life.
+        let before = [(1, 100), (2, 200), (3, 9000)];
+        let after = [(1, 100), (2, 700), (3, 9000)];
+        assert_eq!(busiest(&before, &after), Some(2));
+        // None writing now: the one that wrote the most.
+        assert_eq!(busiest(&after, &after), Some(3));
+        // One ended meanwhile: not picked.
+        assert_eq!(busiest(&before, &[(1, 100), (3, 9000)]), Some(3));
+        assert_eq!(busiest(&before, &[]), None);
+    }
 
     #[test]
     fn nothing_is_deleted_through_a_link_on_the_way() {

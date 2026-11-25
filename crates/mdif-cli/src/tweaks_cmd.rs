@@ -195,6 +195,16 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
     if let Status::Absent(why) = t.status(&home)? {
         bail!("{id} doesn't apply to this Mac: {why}.");
     }
+    // It has an app clear out its folders: not what you keep.
+    let keep = crate::keep_cmd::load(db)?;
+    if let Some(entry) = t.kept(&home, &keep) {
+        bail!(
+            "\"{}\" stays off: you keep {}, in what it would clear out ({}).",
+            t.title,
+            printable(entry),
+            t.what
+        );
+    }
     let steps = if dry_run {
         t.plan(&home)?
     } else {

@@ -125,6 +125,13 @@ fn load(dir: &Path) -> Saved {
 /// Atomically, readable by its owner only, and kept out of the backups
 /// (the mark is the file's, so each new one gets it).
 fn save(dir: &Path, s: &Saved) -> Result<()> {
+    reserve(dir, s, 0)?;
+    finish(dir)
+}
+
+/// What [`save`] renames into place: `s`, with `spare` bytes of room after
+/// it, on disk.
+fn reserve(dir: &Path, s: &Saved, spare: usize) -> Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{FILE}.new"));
     let _ = std::fs::remove_file(&tmp);
@@ -133,12 +140,37 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(s)?)?;
+    let _ = mdif_macos::fs::set_excluded_from_backup(&tmp, true);
+    let mut body = serde_json::to_vec_pretty(s)?;
+    // JSON may end in spaces.
+    body.resize(body.len() + spare, b' ');
+    let written = f.write_all(&body).and_then(|()| f.sync_all());
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(f)
+}
+
+/// `s` written over a [`reserve`]d file, in the room made then.
+fn rewrite(mut f: std::fs::File, s: &Saved) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let body = serde_json::to_vec_pretty(s)?;
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&body)?;
+    f.set_len(body.len() as u64)?;
     f.sync_all()?;
-    std::fs::rename(&tmp, dir.join(FILE))?;
+    Ok(())
+}
+
+fn finish(dir: &Path) -> Result<()> {
+    std::fs::rename(dir.join(format!(".{FILE}.new")), dir.join(FILE))?;
     let _ = mdif_macos::fs::set_excluded_from_backup(&dir.join(FILE), true);
     Ok(())
 }
+
+/// Room for the renewed tokens, more than they take.
+const ROOM: usize = 16 * 1024;
 
 /// `f` while no other process does: a refresh changes the refresh token,
 /// and two at once would spend it twice, which ends the sign-in.
@@ -727,7 +759,17 @@ fn access(dir: &Path, ends: &Endpoints, force: bool) -> Result<String> {
         if (!force && t.expires - now > EARLY) || (now < t.earliest_refresh && t.expires > now) {
             return Ok(t.access);
         }
-        let r = http(
+        // Renewing spends the refresh token: the new one has to be kept,
+        // so the room for it is made first. A full disk leaves the old one,
+        // still good, instead of ending the sign-in.
+        let room = reserve(dir, &s, ROOM).context(
+            "The sign-in with ChatGPT can't be renewed while the disk is full: free some space, \
+             then try again",
+        )?;
+        let drop_room = || {
+            let _ = std::fs::remove_file(dir.join(format!(".{FILE}.new")));
+        };
+        let r = match http(
             &format!("{}/api/accounts/oauth/token", ends.auth),
             None,
             Some((
@@ -740,19 +782,37 @@ fn access(dir: &Path, ends: &Endpoints, force: bool) -> Result<String> {
                 ]),
             )),
             60,
-        )?;
-        if r.status == 200 {
-            let reply: TokenReply = serde_json::from_str(&r.body)
-                .context("OpenAI's answer to renewing the sign-in was unexpected")?;
-            if let Some(id) = &reply.id_token {
-                s.id_token = Some(id.clone());
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                drop_room();
+                return Err(e);
             }
-            let fresh = reply.tokens(Some(t.refresh), Some(t.scopes), now)?;
+        };
+        if r.status == 200 {
+            let fresh = serde_json::from_str::<TokenReply>(&r.body)
+                .context("OpenAI's answer to renewing the sign-in was unexpected")
+                .and_then(|reply| {
+                    if let Some(id) = &reply.id_token {
+                        s.id_token = Some(id.clone());
+                    }
+                    reply.tokens(Some(t.refresh), Some(t.scopes), now)
+                });
+            let fresh = match fresh {
+                Ok(f) => f,
+                Err(e) => {
+                    drop_room();
+                    return Err(e);
+                }
+            };
             let access = fresh.access.clone();
             s.tokens = Some(fresh);
-            save(dir, &s)?;
+            rewrite(room, &s)?;
+            finish(dir)?;
             return Ok(access);
         }
+        drop(room);
+        drop_room();
         let (code, _) = error_of(&r.body);
         let code = code.unwrap_or_default();
         if ENDED.contains(&code.as_str()) || code == "invalid_client" {
@@ -1420,6 +1480,18 @@ mod tests {
         world.lock().unwrap().stale.push("access-2".into());
         respond(d, &ends, "i", "q", &schema).unwrap();
         assert_eq!(world.lock().unwrap().refreshes, ["refresh-1", "refresh-2"]);
+        assert!(!d.join(format!(".{FILE}.new")).exists());
+
+        // No room to keep a renewed token (a full disk, here a folder in
+        // the way): it isn't renewed, and the one there is stays.
+        std::fs::create_dir(d.join(format!(".{FILE}.new"))).unwrap();
+        world.lock().unwrap().stale.push("access-3".into());
+        let e = respond(d, &ends, "i", "q", &schema).unwrap_err();
+        assert!(e.to_string().contains("disk is full"), "{e}");
+        assert_eq!(world.lock().unwrap().refreshes, ["refresh-1", "refresh-2"]);
+        assert_eq!(load(d).tokens.unwrap().refresh, "refresh-3");
+        std::fs::remove_dir(d.join(format!(".{FILE}.new"))).unwrap();
+        world.lock().unwrap().stale.clear();
 
         // The route turns down a field: asked again without it, once.
         world.lock().unwrap().respond_error = Some((

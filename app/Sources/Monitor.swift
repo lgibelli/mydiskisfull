@@ -34,6 +34,10 @@ final class Monitor: ObservableObject {
     @Published private(set) var backupChanging: Set<String> = []
     @Published private(set) var backupStarting = false
     private var timeMachineAt: Date?
+    /// Changes made here to what Time Machine skips, and a full look asked
+    /// for while one ran: a look that ends after either looks again.
+    private var timeMachineChanges = 0
+    private var timeMachineAgain = false
     /// Being switched or run, by id.
     @Published private(set) var tidyBusy: Set<String> = []
     /// Where the space goes, from a whole-disk scan `mdif` caches.
@@ -339,17 +343,34 @@ final class Monitor: ObservableObject {
     }
 
     private func lookAtTimeMachine(quick: Bool) async {
-        guard !timeMachineLoading else { return }
+        guard !timeMachineLoading else {
+            // A full look asked for meanwhile (after a change) is one
+            // more, once this one ends, not none.
+            if !quick { timeMachineAgain = true }
+            return
+        }
         timeMachineLoading = true
         defer { timeMachineLoading = false }
-        // The quick look runs when a window comes forward: nobody there to
-        // answer a privacy prompt.
-        let args = ["timemachine"] + (quick ? ["--quick", "--unattended"] : [])
-        guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
-        if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
-            timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
-        } else {
-            timeMachine = r
+        var quick = quick
+        while true {
+            timeMachineAgain = false
+            let changes = timeMachineChanges
+            // The quick look runs when a window comes forward: nobody there to
+            // answer a privacy prompt.
+            let args = ["timemachine"] + (quick ? ["--quick", "--unattended"] : [])
+            guard let r = try? await Core.json(TimeMachineReport.self, args, timeout: 180) else { return }
+            // A folder kept out or let in while it looked: what it read may
+            // be from before, and would undo what's shown. Looked again.
+            if changes != timeMachineChanges || timeMachineAgain {
+                quick = quick && !timeMachineAgain
+                continue
+            }
+            if quick, let full = timeMachine, !full.rebuildable.isEmpty || !full.changes.isEmpty {
+                timeMachine = r.with(changes: full.changes, rebuildable: full.rebuildable)
+            } else {
+                timeMachine = r
+            }
+            return
         }
     }
 
@@ -369,6 +390,7 @@ final class Monitor: ObservableObject {
                     Notices.shared.post(ok: false, backedUp ? "Not backed up again" : "Not kept out",
                                         r.refused.map { "• \($0.why)" }.joined(separator: "\n"))
                 }
+                timeMachineChanges += 1
                 timeMachine = timeMachine?.marking(r.done, backedUp: backedUp)
                 // Those kept out weren't measured: their sizes, now.
                 if backedUp, !r.done.isEmpty { await loadTimeMachine() }

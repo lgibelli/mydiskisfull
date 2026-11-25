@@ -563,9 +563,10 @@ private struct SkippedSection: View {
     }
 
     /// An app left out by name that isn't on this Mac (only apps are
-    /// looked for: a folder in Desktop would ask for permission).
+    /// looked for, and not where looking would ask for permission: one in
+    /// Downloads isn't said to be missing).
     private func missingApp(_ path: String) -> Bool {
-        path.hasSuffix(".app") && !FileManager.default.fileExists(atPath: path)
+        path.hasSuffix(".app") && !Format.mayPrompt(path) && !FileManager.default.fileExists(atPath: path)
     }
 }
 #endif

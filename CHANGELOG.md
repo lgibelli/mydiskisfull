@@ -118,6 +118,26 @@ All notable changes to this project are documented here. The format is based on
 - Folders typed in another case (`/users/me/documents`) slipped past the checks that keep
   MyDiskIsFull out of protected folders, and Ask AI could have sent such a path with your
   account's name in it.
+- Renewing the ChatGPT sign-in on a full disk spent the refresh token without keeping the new
+  one, which ended the sign-in. It now makes room first, and keeps the old one when it can't.
+- A tweak's undo rewrote a JSON settings file laid out its own way (four spaces, tabs, one line)
+  in two-space layout, and applying one to a settings file linked to a dotfiles file that wasn't
+  made yet replaced the link with a file.
+- A tweak whose app would clear out something on your keep list could still be applied from the
+  command line or the Prevention page: it's refused, with what you keep.
+- Restarting a helper that keeps rewriting the disk ended every process of that name (one per
+  tab for WebKit's page helper): it ends the one writing.
+- A deletion that stopped part-way after freeing space wasn't counted as a clean-up, so the
+  forecast took the drop for the disk filling less.
+- A file or folder whose details macOS couldn't read during a scan counted as empty: it counts
+  as unreadable.
+- A folder you let back into Time Machine was kept out again once its tool deleted and made it
+  again (`cargo clean`), and letting one in said done while System Settings' own list still
+  kept it out.
+- A full Time Machine look that ended after you kept a folder out or let one in showed it as
+  before, and the look asked for after the change was dropped.
+- Storage and Time Machine looked for apps in Downloads and other protected folders while
+  drawing the window, where a permission prompt held it up.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.

@@ -465,8 +465,17 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
 
     let mut blocks = Blocks::default();
     let mut subdirs = Vec::new();
+    let mut unreadable = Vec::new();
     for e in entries {
         match e.kind {
+            // Listed, but its attributes couldn't be read: not a 0-byte
+            // file, nor a folder with nothing in it, but unknown.
+            _ if e.error != 0 => {
+                base.unreadable_dirs += 1;
+                if unreadable.len() < UNREADABLE_SAMPLE {
+                    unreadable.push(dir.join(&e.name));
+                }
+            }
             // Another volume: by its device, or mounted here though it
             // shows the covered folder's (`/Volumes/*`, a disk image).
             Kind::Dir if e.dev != ctx.dev || e.mount_point => base.other_volumes += 1,
@@ -498,7 +507,6 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         .map(|d| walk(d, depth + 1, ctx))
         .collect();
     let mut children = Vec::new();
-    let mut unreadable = Vec::new();
     for w in walked {
         base.add(&w.base);
         blocks.merge(w.blocks);

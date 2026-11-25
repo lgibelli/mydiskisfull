@@ -148,6 +148,9 @@ pub fn clean(
             Err(why) => failed.extend(paths.into_iter().map(|p| (p, why.clone()))),
         }
     }
+    // Started and not finished (a deletion that stopped part-way): what it
+    // removed before is gone all the same.
+    let mut broke_off: Vec<PathBuf> = Vec::new();
     for s in &steps {
         // What goes to the Trash still takes its space there.
         let size = matches!(s, Step::Trash { .. })
@@ -160,7 +163,18 @@ pub fn clean(
                 }
                 done.push((d, size))
             }
-            Err(why) => failed.push((s.path().to_path_buf(), why)),
+            Err(why) => {
+                if matches!(
+                    s,
+                    Step::Delete(_)
+                        | Step::Empty { .. }
+                        | Step::EmptyTrash(_)
+                        | Step::Docker { .. }
+                ) {
+                    broke_off.push(s.path().to_path_buf());
+                }
+                failed.push((s.path().to_path_buf(), why))
+            }
         }
     }
     // Docker Desktop gives back what went from its disk image a few seconds
@@ -171,18 +185,20 @@ pub fn clean(
         docker::settle(&home, disk);
     }
     // Nothing done frees nothing, whatever else changed on the disk meanwhile.
-    let freed = if done.is_empty() {
-        0
-    } else {
+    let touched = !done.is_empty() || !broke_off.is_empty();
+    let freed = if touched {
         mdif_macos::fs::statfs(volume)?.avail.saturating_sub(before)
+    } else {
+        0
     };
-    if !done.is_empty() {
+    if touched {
         crate::watch_cmd::record_clean(db, freed);
         // What went to the Trash is there now too.
         let mut changed: Vec<PathBuf> = done
             .iter()
             .filter(|(d, _)| !d.how.starts_with("docker"))
             .map(|(d, _)| d.path.clone())
+            .chain(broke_off.iter().filter(|p| p.is_absolute()).cloned())
             .collect();
         if done.iter().any(|(d, _)| d.how == "trashed") {
             changed.push(home.join(".Trash"));
@@ -234,7 +250,7 @@ pub fn clean(
         for (_, why) in &failed {
             println!("Not done: {}", printable(why));
         }
-        if !done.is_empty() {
+        if !done.is_empty() || freed > 0 {
             println!("The disk has {} more free.", bytes(freed));
         }
     }

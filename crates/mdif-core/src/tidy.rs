@@ -460,8 +460,7 @@ fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     let mut o = Outcome::default();
     // The marks first: they're reads, git only for what isn't marked yet.
     fn unmarked(d: &Path) -> bool {
-        !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true)
-            && !mdif_macos::fs::has_mark(d, crate::timemachine::LET_IN).unwrap_or(true)
+        !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true) && !crate::timemachine::let_in(d)
     }
     let mut found = artifact_dirs(home, |d| {
         unmarked(d) && crate::timemachine::rebuildable(d).is_some()

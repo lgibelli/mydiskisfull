@@ -316,6 +316,14 @@ impl Tweak {
         (self.targets)(home)
     }
 
+    /// The keep-list entry this goes against: the setting has an app clear
+    /// out its targets, and something in them is kept.
+    pub fn kept<'k>(&self, home: &Path, keep: &'k crate::keep::Keep) -> Option<&'k str> {
+        self.targets(home)
+            .iter()
+            .find_map(|p| keep.covering(p).or_else(|| keep.inside(p)))
+    }
+
     /// What its targets hold now, every file once (`None` when there's
     /// nothing to measure or one can't be read).
     pub fn size(&self, home: &Path) -> Option<u64> {
@@ -987,6 +995,21 @@ mod tests {
         let mut keys = ai_keys(&d);
         keys.sort();
         assert_eq!(keys, ["109547227", "545129924", "auto_opt_in"]);
+    }
+
+    #[test]
+    fn a_tweak_that_would_clear_out_something_kept_says_what() {
+        let home = Path::new("/Users/me");
+        let t = find("claude-transcripts").unwrap();
+        let none = crate::keep::Keep::parse("~/Movies\n", home);
+        assert_eq!(t.kept(home, &none), None);
+        let inside = crate::keep::Keep::parse("~/.claude/projects/-Users-me-shop\n", home);
+        assert_eq!(
+            t.kept(home, &inside),
+            Some("~/.claude/projects/-Users-me-shop")
+        );
+        let around = crate::keep::Keep::parse("~/.claude\n", home);
+        assert_eq!(t.kept(home, &around), Some("~/.claude"));
     }
 
     #[test]

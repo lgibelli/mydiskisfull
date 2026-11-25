@@ -52,6 +52,40 @@ pub const CACHE_MIN: u64 = 10_000_000;
 /// The mark on a folder you let back into the backups, so the tidy-up
 /// doesn't keep it out again; it goes where the folder goes.
 pub const LET_IN: &str = "io.github.lgibelli.mydiskisfull.backed-up";
+
+/// The same, on the folder it's in, by name: a build tool deletes and
+/// makes again `target` (`cargo clean`), and the mark on it goes with it.
+fn let_in_child(name: &std::ffi::OsStr) -> Option<String> {
+    let mark = format!("{LET_IN}.{}", name.to_str()?);
+    // An extended attribute's name has 127 bytes at most.
+    (mark.len() <= 127).then_some(mark)
+}
+
+/// Whether you let `dir` back into the backups, by its mark or the one its
+/// folder keeps for it. When that can't be read, it counts as yes: nothing
+/// is kept out on a guess.
+pub fn let_in(dir: &Path) -> bool {
+    if mdif_macos::fs::has_mark(dir, LET_IN).unwrap_or(true) {
+        return true;
+    }
+    match (dir.parent(), dir.file_name().and_then(let_in_child)) {
+        (Some(parent), Some(mark)) => mdif_macos::fs::has_mark(parent, &mark).unwrap_or(true),
+        _ => false,
+    }
+}
+
+/// System Settings' own list of folders kept out (`SkipPaths`), as paths:
+/// it writes the ones you add as `~/Downloads`.
+fn settings_skips(skip: &[String], home: &Path) -> Vec<PathBuf> {
+    skip.iter()
+        .map(|p| match p.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                PathBuf::from(format!("{}{rest}", home.to_string_lossy()))
+            }
+            _ => PathBuf::from(p),
+        })
+        .collect()
+}
 const CHANGES: usize = 8;
 
 /// What Time Machine's settings say.
@@ -660,16 +694,9 @@ pub fn glance(home: &Path, now: i64) -> Report {
         None
     };
 
-    // System Settings writes the ones you add as `~/Downloads`.
-    let skipped = prefs
-        .skip
-        .iter()
-        .map(|p| match p.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-                format!("{}{rest}", home.to_string_lossy())
-            }
-            _ => p.clone(),
-        })
+    let skipped = settings_skips(&prefs.skip, home)
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
 
     Report {
@@ -918,12 +945,32 @@ fn kept_out(dir: &Path, folders: &[Folder]) -> usize {
 /// keep or what has something you keep in it. Any folder Time Machine
 /// skips may come back in, one that no longer looks made again too (a
 /// `dist` renamed to keep a release). One let back in is marked
-/// ([`LET_IN`]). Each comes back done, or refused and why.
+/// ([`LET_IN`]), and so is the name on its folder. One System Settings
+/// keeps out isn't let in: its list wins. Each comes back done, or refused
+/// and why.
 pub fn set_excluded(
     paths: &[PathBuf],
     exclude: bool,
     keep: &Keep,
     home: &Path,
+) -> Vec<(PathBuf, Result<(), String>)> {
+    let skips = match exclude {
+        true => Vec::new(),
+        false => prefs()
+            .ok()
+            .flatten()
+            .map(|p| settings_skips(&p.skip, home))
+            .unwrap_or_default(),
+    };
+    set_excluded_with(paths, exclude, keep, home, &skips)
+}
+
+fn set_excluded_with(
+    paths: &[PathBuf],
+    exclude: bool,
+    keep: &Keep,
+    home: &Path,
+    skips: &[PathBuf],
 ) -> Vec<(PathBuf, Result<(), String>)> {
     paths
         .iter()
@@ -935,6 +982,12 @@ pub fn set_excluded(
             };
             let done = if exclude && keep.covering(p).is_some() {
                 Err(format!("{shown} is on your keep list."))
+            } else if let Some(s) = skips.iter().find(|s| p.starts_with(s)) {
+                Err(format!(
+                    "Time Machine's own settings keep {} out: take it off the list in System \
+                     Settings › General › Time Machine › Options.",
+                    crate::text::printable(&s.to_string_lossy())
+                ))
             } else if exclude && keep.touches(p) {
                 Err(format!("{shown} has something on your keep list in it."))
             } else if rebuildable(p).is_none()
@@ -948,6 +1001,13 @@ pub fn set_excluded(
                 mdif_macos::fs::set_excluded_from_backup(p, exclude)
                     .and_then(|()| mdif_macos::fs::set_mark(p, LET_IN, !exclude))
                     .map_err(|e| format!("{shown}: {e}"))
+                    .inspect(|()| {
+                        if let (Some(parent), Some(mark)) =
+                            (p.parent(), p.file_name().and_then(let_in_child))
+                        {
+                            let _ = mdif_macos::fs::set_mark(parent, &mark, !exclude);
+                        }
+                    })
             };
             (p.clone(), done)
         })
@@ -1507,6 +1567,24 @@ mod tests {
         // One Time Machine backs up isn't marked for it by name.
         let r = set_excluded(&[app.join("notes")], false, &none, &home);
         assert!(r[0].1.is_err());
+        // Let back in, then deleted and made again by the next build: still
+        // let in, by the name its folder keeps.
+        std::fs::rename(&release, &target).unwrap();
+        let r = set_excluded(std::slice::from_ref(&target), true, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        assert!(!let_in(&target));
+        let r = set_excluded(std::slice::from_ref(&target), false, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::create_dir_all(target.join("release")).unwrap();
+        assert!(let_in(&target));
+        assert!(!let_in(&app.join("notes")));
+        // System Settings' own list keeps it out: not let in, and said where.
+        let skips = settings_skips(&["~/devel/app".into()], &home);
+        assert_eq!(skips, [home.join("devel/app")]);
+        let r = set_excluded_with(std::slice::from_ref(&target), false, &none, &home, &skips);
+        let why = r[0].1.as_ref().unwrap_err();
+        assert!(why.contains("System Settings"), "{why}");
     }
 
     #[test]
