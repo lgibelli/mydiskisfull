@@ -52,12 +52,12 @@ const DEFAULTS: &[&str] = &[
     "refs/remotes/origin/master",
 ];
 
-/// Real git binaries. `/usr/bin/git` is left out: without the developer
-/// tools it offers to install them, in a dialog.
 /// The longest a git that reads may take: the watcher's tidies run it on
 /// the sampling thread, which mustn't wait on a stuck one.
 const GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Real git binaries. `/usr/bin/git` is left out: without the developer
+/// tools it offers to install them, in a dialog.
 const GITS: &[&str] = &[
     "/Library/Developer/CommandLineTools/usr/bin/git",
     "/Applications/Xcode.app/Contents/Developer/usr/bin/git",

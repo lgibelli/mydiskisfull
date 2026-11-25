@@ -86,6 +86,7 @@ fn settings_skips(skip: &[String], home: &Path) -> Vec<PathBuf> {
         })
         .collect()
 }
+
 const CHANGES: usize = 8;
 
 /// What Time Machine's settings say.
@@ -378,8 +379,6 @@ pub struct Snapshot {
     pub reference: bool,
 }
 
-/// Time Machine's own among `names`, oldest first, with the reference
-/// marked (within a minute of `reference`).
 /// The moment a local wall-clock time names (`wall`: its fields read as if
 /// UTC). The offset is the one at that moment, not at `wall` taken as UTC:
 /// in the hours around a change of summer time those differ.
@@ -388,6 +387,8 @@ fn from_wall(wall: i64) -> i64 {
     wall - mdif_macos::sys::utc_offset(guess)
 }
 
+/// Time Machine's own among `names`, oldest first, each backup disk's
+/// reference marked (within a minute of one of `references`).
 pub fn snapshots(names: &[String], references: &[i64]) -> Vec<Snapshot> {
     let mut out: Vec<Snapshot> = names
         .iter()
