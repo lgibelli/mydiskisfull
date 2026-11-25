@@ -1,7 +1,7 @@
 """The bin tweak doing what it says: with the latest release's mdif,
 `recycle-bin-auto-empty` is applied, two files are sent to the Recycle Bin,
-one of them dated as deleted 40 days ago, and Storage Sense is run as its
-scheduled task runs it. The old one must go and the new one stay.
+one of them dated as deleted 40 days ago, and Settings' Run Storage Sense
+now is pressed. The old one must go and the new one stay.
 
     python app-windows/tests/live_storage_sense.py x64|arm64
 
@@ -10,6 +10,7 @@ Storage Sense on and empties part of the Recycle Bin, so not on a PC of your
 own.
 """
 import datetime, json, os, struct, subprocess, sys, time
+import live_ui as ui
 from live_release import download, latest_and_previous
 
 arch = sys.argv[1]
@@ -18,7 +19,6 @@ setup = download(latest, arch, os.environ['RUNNER_TEMP'])
 subprocess.run([setup, '/S'], check=True, timeout=300)
 mdif = os.path.join(os.environ['LOCALAPPDATA'], 'MyDiskIsFull', 'mdif.exe')
 db = os.path.join(os.environ['RUNNER_TEMP'], 'tweaks.sqlite3')
-TASK = r'\Microsoft\Windows\DiskFootprint\StorageSense'
 
 
 def ps(cmd):
@@ -73,20 +73,21 @@ with open(now[files['old.bin'].lower()], 'r+b') as f:
     f.seek(16)
     f.write(struct.pack('<q', filetime))
 
-# Its task waits for the PC to be idle, which a runner never is: that
-# condition is lifted (the runner is thrown away afterwards).
-print(ps(r"$t = Get-ScheduledTask -TaskPath '\Microsoft\Windows\DiskFootprint\' -TaskName StorageSense; "
-         r"$t.Settings.RunOnlyIfIdle = $false; $t.Settings.DisallowStartIfOnBatteries = $false; "
-         r"$t.Settings.StopIfGoingOnBatteries = $false; "
-         r"Set-ScheduledTask -InputObject $t | Out-Null; "
-         r"Export-ScheduledTask -TaskPath '\Microsoft\Windows\DiskFootprint\' -TaskName StorageSense"))
-subprocess.run(['schtasks', '/run', '/tn', TASK], check=True)
+# Run now, as Settings → System → Storage → Storage Sense offers it: its
+# scheduled task waits for an idle PC and a sign-out the runner can't give.
+shots = os.path.join(os.environ['RUNNER_TEMP'], 'shots')
+os.makedirs(shots, exist_ok=True)
+os.startfile('ms-settings:storagepolicies')
+window = ui.wait_window('Settings')
+time.sleep(5)
+ui.shot(os.path.join(shots, 'storage-sense.png'))
+ui.press(window, 'Run Storage Sense now', secs=120)
 end = time.time() + 600
 while files['old.bin'].lower() in binned():
     if time.time() > end:
-        print(subprocess.run(['schtasks', '/query', '/tn', TASK, '/v', '/fo', 'LIST'],
-                             capture_output=True, text=True).stdout)
+        ui.shot(os.path.join(shots, 'storage-sense-after.png'))
         sys.exit('Storage Sense left the file deleted 40 days ago in the bin')
     time.sleep(5)
+ui.shot(os.path.join(shots, 'storage-sense-after.png'))
 assert files['new.bin'].lower() in binned(), 'Storage Sense also emptied the file deleted today'
 print(json.dumps({'emptied': 'old.bin', 'kept': 'new.bin'}))

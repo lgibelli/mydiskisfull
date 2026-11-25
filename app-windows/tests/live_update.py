@@ -1,7 +1,8 @@
 """The app updating itself, as a person would have it: the release before the
-latest is installed with its watcher, the app is opened, and its own Check Now
-and Install and Restart (the window's `check_updates` and `install_update`)
-are run in its window, through WebView2's remote debugging. The live feed is
+latest is installed, the app is opened, its welcome's Start and Get Started
+pressed, and its own Check Now
+and Install and Restart are pressed in its window, through UI Automation,
+after a look at each page (a screenshot of each, none saying it couldn't). The live feed is
 read, the latest release is downloaded, checked and installed, and then it
 must be the latest everywhere: mdif, the app opened again, the watcher back,
 nothing left staged.
@@ -12,8 +13,8 @@ The live workflow (windows-live.yml) runs it on its runners: it installs for
 the user running it and changes what starts at sign-in, so not on a PC of
 your own.
 """
-import json, os, subprocess, sys, time, urllib.request, winreg
-import websocket  # websocket-client, installed by the workflow
+import json, os, subprocess, sys, time
+import live_ui as ui
 from live_release import download, latest_and_previous, version
 
 arch = sys.argv[1]
@@ -26,7 +27,6 @@ exe = os.path.join(home, 'MyDiskIsFull.exe')
 mdif = os.path.join(home, 'mdif.exe')
 staging = os.path.join(os.environ['LOCALAPPDATA'], 'io.github.lgibelli.mydiskisfull', 'updates')
 announced = os.path.join(os.environ['APPDATA'], 'io.github.lgibelli.mydiskisfull', 'announced.json')
-PORT = 9229
 
 
 def wait(what, test, secs=120):
@@ -61,75 +61,36 @@ def running(image):
 setup = download(previous, arch, os.environ['RUNNER_TEMP'])
 subprocess.run([setup, '/S'], check=True, timeout=300)
 assert mdif_version() == start, f'mdif {mdif_version()} after installing {start}'
-subprocess.run([mdif, 'agent', 'install'], check=True)
-wait('the watcher', lambda: agent()['running'])
 
-# The app as sign-in opens it, its window's page open to remote debugging:
-# WebView2 takes extra arguments from the environment, and from a policy
-# for the program (the runner is thrown away afterwards).
-ARGS = f'--remote-debugging-port={PORT}'
-with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                      r'Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments') as k:
-    winreg.SetValueEx(k, 'MyDiskIsFull.exe', 0, winreg.REG_SZ, ARGS)
-env = dict(os.environ, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=ARGS)
-subprocess.Popen([exe, '--background'], env=env)
+# The app opened as a person opens it, and its window used through UI
+# Automation (WebView2 shows the page's buttons to it by their names).
+subprocess.Popen([exe])
 wait('the app to read the disk', lambda: os.path.isfile(announced))
-
-
-def page():
-    with urllib.request.urlopen(f'http://127.0.0.1:{PORT}/json', timeout=5) as r:
-        return next(t for t in json.load(r) if t['type'] == 'page')
-
-
-try:
-    wait("the app's window", page)
-except SystemExit:
-    print(subprocess.run(['powershell', '-NoProfile', '-Command',
-                          "Get-CimInstance Win32_Process | Where-Object { $_.Name -match "
-                          "'MyDiskIsFull|msedgewebview2' } | Format-List Name,ProcessId,CommandLine "
-                          "| Out-String -Width 400"], capture_output=True, text=True).stdout)
-    raise
-ws = websocket.create_connection(page()['webSocketDebuggerUrl'], timeout=120)
-asked = 0
-
-
-def run(js):
-    global asked
-    asked += 1
-    ws.send(json.dumps({'id': asked, 'method': 'Runtime.evaluate', 'params': {
-        'expression': js, 'awaitPromise': True, 'returnByValue': True}}))
-    while True:
-        reply = json.loads(ws.recv())
-        if reply.get('id') == asked:
-            res = reply['result']
-            if 'exceptionDetails' in res:
-                sys.exit(f'{js}: {res["exceptionDetails"]}')
-            return res['result'].get('value')
-
-
-# Check Now: what the window shows comes from here.
-found = run("window.__TAURI__.core.invoke('check_updates')")
-print(f'Check Now found: {found}')
-assert found and found['version'] == target, f'offered {found}, not {target}'
-# Install and Restart. It ends the app once the installer is started, so
-# what it returns may never come: an error it gives is kept and read back.
-run("window.__TAURI__.core.invoke('install_update', {version: %s})"
-    ".catch(e => { window.__installError = String(e); }); 'started'" % json.dumps(target))
-end = time.time() + 120
-while time.time() < end:
-    try:
-        err = run('window.__installError || null')
-    except Exception:
-        break  # the app has gone: the installer runs
-    if err:
-        sys.exit(f'Install and Restart: {err}')
-    time.sleep(2)
-else:
-    sys.exit('the app was still open two minutes after Install and Restart')
-ws.close()
-
+shots = os.path.join(os.environ['RUNNER_TEMP'], 'shots')
+os.makedirs(shots, exist_ok=True)
+window = ui.wait_window('MyDiskIsFull')
+ui.shot(os.path.join(shots, f'{start}-welcome.png'))
+# The welcome: the watcher started from it, then the pages.
+ui.press(window, 'Start')
+wait('the watcher', lambda: agent()['running'])
+ui.press(window, 'Get Started')
+# Each page, as the sidebar opens it: none may say it couldn't do something.
+for page in ['Overview', 'Storage', 'Old Files', 'History', 'Prevention', 'Settings']:
+    ui.press(window, page)
+    time.sleep(4)
+    ui.shot(os.path.join(shots, f'{start}-{page}.png'))
+    failed = ui.named(window, lambda n: n.startswith("Couldn't"))
+    assert not failed, f'{page}: {failed}'
+# Settings → Updates: Check Now, then Install and Restart.
+ui.press(window, 'Check Now')
+ui.find(window, 'Install and Restart', secs=120)
+ui.shot(os.path.join(shots, f'{start}-offered.png'))
+ui.press(window, 'Install and Restart')
+# The app ends once the installer has started.
+wait('the app to close for the installer', lambda: not running('MyDiskIsFull.exe'), secs=300)
 wait(f'mdif {target}', lambda: mdif_version() == target, secs=600)
 wait('the app to open again', lambda: running('MyDiskIsFull.exe'), secs=180)
+ui.shot(os.path.join(shots, f'{target}-after.png'))
 wait('the watcher to be back', lambda: (a := agent())['running'] and not a['stopped']
      and not a['stopped_by_installer'], secs=180)
 wait('the staged installer to be tidied', lambda: not any(
