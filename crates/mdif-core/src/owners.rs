@@ -1030,23 +1030,22 @@ impl Tracker {
 
     /// `root` isn't where it was. What was known of it and below it moves to
     /// where it is now, and to that place's owner, or is freed if it was
-    /// deleted. Where it is now can't always be asked (privacy prompts are
-    /// avoided, or the volume can't be asked by number): then the period
-    /// decides, when it ends ([`Tracker::unresolved`]), so that a listing of
-    /// its new place meanwhile finds it moved rather than deleted.
+    /// deleted. Where it is now isn't always found (privacy prompts are
+    /// avoided, the volume can't be asked by number, or no folder in it was
+    /// found): then the period decides, when it ends
+    /// ([`Tracker::unresolved`]), so that a listing of its new place
+    /// meanwhile finds it moved rather than deleted.
     fn gone(&mut self, root: &Path, deltas: &mut HashMap<PathBuf, i64>) {
-        if self.fsid.is_none() || privacy::avoiding() {
-            if !self.unresolved.iter().any(|u| root.starts_with(u)) {
-                self.unresolved.push(root.to_path_buf());
-            }
-            return;
-        }
         let below = self.below(root);
-        let to = self.now_at(root, &below);
-        if to.as_deref() == Some(root) {
-            return;
+        match self.now_at(root, &below) {
+            Some(to) if to == root => {}
+            Some(to) => self.relocate(root, below, Some(&to), deltas),
+            None => {
+                if !self.unresolved.iter().any(|u| root.starts_with(u)) {
+                    self.unresolved.push(root.to_path_buf());
+                }
+            }
         }
-        self.relocate(root, below, to.as_deref(), deltas);
     }
 
     /// The folders known at `root` and below it.
@@ -1072,8 +1071,10 @@ impl Tracker {
         {
             return None;
         }
-        let still_there = privacy::may_open(from)
-            && std::fs::symlink_metadata(from)
+        // Where that can't be checked (it may show a privacy prompt), it
+        // stays: taking a folder still there for moved frees it there.
+        let still_there = !privacy::may_open(from)
+            || std::fs::symlink_metadata(from)
                 .is_ok_and(|m| crate::portable::file_id(from, &m) == inode);
         (!still_there).then(|| from.clone())
     }
