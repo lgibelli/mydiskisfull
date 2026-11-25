@@ -18,6 +18,12 @@ name: Release (signed DMG, draft; Lite to App Store Connect)
 #
 #   gh workflow run release.yml --ref main -f lite=false
 #
+# The Windows installers (x64 and ARM64, unsigned until a certificate is
+# chosen: docs/RELEASING.md) go on the same draft only when asked for, since
+# the Windows edition isn't released yet:
+#
+#   gh workflow run release.yml --ref main -f windows=true
+#
 # Secrets (Settings → Secrets and variables → Actions):
 #   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD   the Developer ID Application
 #                                                certificate, exported as .p12
@@ -40,6 +46,10 @@ on:
         description: Upload MyDiskIsFull Lite to App Store Connect too
         type: boolean
         default: true
+      windows:
+        description: Put the Windows installers (unsigned) on the draft too
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -126,6 +136,53 @@ jobs:
       - name: Remove the keys
         if: always()
         run: rm -f "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/sparkle-key"
+
+  # The Windows installers, built as CI builds them, attested, and put on the
+  # draft the release job made. Never on a push to release/**: only by hand.
+  windows:
+    if: inputs.windows
+    needs: release
+    runs-on: windows-latest
+    environment: release
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      # rustup is on the runner: no third-party action in a release job, and no
+      # cache, which another workflow's run could have written.
+      - name: Rust, with the ARM64 target
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --target aarch64-pc-windows-msvc
+          rustup default stable
+          rustc --version
+      - name: Tauri's command line
+        env:
+          RUSTFLAGS: ""
+        run: cargo install tauri-cli --version 2.12.5 --locked
+      - name: Build the installers
+        run: |
+          app-windows/build.sh
+          app-windows/build.sh aarch64-pc-windows-msvc
+          mkdir -p build/windows
+          cp app-windows/src-tauri/target/*-pc-windows-msvc/release/bundle/nsis/*-setup.exe build/windows/
+          cd build/windows && sha256sum *-setup.exe > SHA256SUMS-windows.txt && cat SHA256SUMS-windows.txt
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: build/windows/*-setup.exe
+      - name: Put them on the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="v$version"
+          # A published release's files are what people downloaded.
+          [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true ] \
+            || { echo "::error::$tag isn't a draft: bump the version for a new build"; exit 1; }
+          gh release upload "$tag" --clobber build/windows/*-setup.exe build/windows/SHA256SUMS-windows.txt
+          gh release view "$tag" --json url,assets --jq '"\(.url): \([.assets[].name] | join(", "))"'
 
   # MyDiskIsFull Lite, for TestFlight and the Mac App Store. The build number
   # comes from the version (0.1.2 is 102), so each version uploads once.

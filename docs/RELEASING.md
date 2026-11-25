@@ -3,7 +3,8 @@
 A release is the full edition of the app as a universal disk image (Developer ID signed,
 notarized, stapled), the command line on its own, and the Sparkle feed that tells installed
 copies about it, all on a GitHub release; and MyDiskIsFull Lite, the App Store edition, uploaded
-to App Store Connect from the same commit, for TestFlight and review.
+to App Store Connect from the same commit, for TestFlight and review. The Windows edition isn't
+released yet: "The Windows edition" below says what it takes.
 
 ## How installed copies update
 
@@ -93,6 +94,40 @@ BUILD_NUMBER=102.1 app/app-store.sh --upload   # 0.1.2 again: each build number 
 
 Then, in App Store Connect, pick the build for the version and submit it for review. Releasing
 it once it's approved is the author's call, like publishing a GitHub release.
+
+## The Windows edition (not released yet)
+
+The Windows app (`app-windows/`, Tauri) ships as a per-user NSIS installer holding the app,
+`mdif.exe` and `mdif-watch.exe`; nothing needs an administrator. Its version is the workspace's:
+`app-windows/src-tauri/Cargo.toml` names the same one as `Cargo.toml` (a test checks they agree),
+and `tauri.conf.json` names none, so the installer and the app take it from there. Bump both.
+
+```sh
+app-windows/build.sh                           # x64, on Windows or cross-built from a Mac
+app-windows/build.sh aarch64-pc-windows-msvc   # ARM64
+```
+
+It lands in `app-windows/src-tauri/target/<target>/release/bundle/nsis/MyDiskIsFull_<version>_<arch>-setup.exe`.
+On Windows it needs Rust and the Tauri CLI (`cargo install tauri-cli --version 2.12.5 --locked`);
+from a Mac also `cargo install cargo-xwin` and `brew install makensis llvm`. CI's `windows-app`
+job builds the x64 one, installs, updates and uninstalls it on the runner, and keeps it as the
+`MyDiskIsFull-windows-x64-setup` artifact; then it builds the ARM64 one and keeps it as
+`MyDiskIsFull-windows-arm64-setup`, which `windows-app-arm` installs, updates and uninstalls on a
+Windows on ARM runner (both with `app-windows/tests/install.py`). The installer stops the watcher before it replaces its
+program and starts it after (`app-windows/src-tauri/windows/hooks.nsh`).
+
+Still to decide before a first release (`FINISH-UP-PLAN.md`, Phase 7):
+
+- **Signing.** The programs and the installer are unsigned, so SmartScreen warns on download
+  ("Windows protected your PC", More info → Run anyway). A code-signing certificate or Azure
+  Trusted Signing goes in `bundle > windows > signCommand`.
+- **Updates.** None yet: installed copies don't hear of a new version. `tauri-plugin-updater` is
+  the way, with a key made once (as the Sparkle one is), its public half in `tauri.conf.json`, and
+  a `latest.json` on the latest published release, so that publishing ships, as on the Mac.
+- **The release job.** `release.yml`'s `windows` job builds both installers (unsigned), attests
+  them and puts them, with `SHA256SUMS-windows.txt`, on the draft the macOS job made; only when
+  asked: `gh workflow run release.yml --ref main -f windows=true`, never on a push to
+  `release/**`. It has never run. Signing goes in before it's turned on for a real release.
 
 ## After publishing
 

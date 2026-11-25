@@ -90,6 +90,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked
       - run: cargo test --locked --no-fail-fast
+      # Moving to the Recycle Bin, for real on the runner: a file and a folder
+      # go to its bin; a file reached through a share (no bin) is refused and
+      # stays, never deleted for good; so is one bigger than the bin takes
+      # (its size set to 4 MB for a moment, then put back), and anything when
+      # the bin is set to delete at once.
+      - run: cargo test --locked -p mdif-windows -- --ignored recycle --nocapture
       - run: cargo build --release --locked
       - name: Smoke test on the runner's own disk
         run: |
@@ -109,11 +115,98 @@ jobs:
       - name: What waits for Windows is refused
         run: |
           mdif=./target/release/mdif.exe
-          for c in clean docker space suggest tidy timemachine tweaks writers; do
+          for c in docker timemachine writers; do
             if out=$($mdif $c 2>&1); then echo "mdif $c should be refused"; exit 1; fi
             echo "$out" | grep -q "isn't available on this operating system yet" \
               || { echo "mdif $c: $out"; exit 1; }
           done
+
+      # The runner is thrown away afterwards, so a real tweak can be applied to
+      # it: Storage Sense's values in the registry, set, then put back exactly.
+      - name: Apply and revert a tweak on the runner
+        run: |
+          db="$RUNNER_TEMP/tweaks.sqlite3"
+          mdif=./target/release/mdif.exe
+          cat > "$RUNNER_TEMP/storage_sense.py" <<'PY'
+          import winreg
+          key = r"Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy"
+          out = []
+          for name in ("01", "08", "256", "2048"):
+              try:
+                  with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                      out.append(f"{name}={winreg.QueryValueEx(k, name)[0]}")
+              except FileNotFoundError:
+                  out.append(f"{name}=unset")
+          print(" ".join(out))
+          PY
+          # Python ends its lines with \r\n here, and $(...) keeps the \r.
+          read_it() { python3 "$RUNNER_TEMP/storage_sense.py" | tr -d '\r'; }
+          before=$(read_it); echo "before: $before"
+          $mdif tweaks --db "$db"
+          $mdif tweaks apply recycle-bin-auto-empty --dry-run --db "$db"
+          test "$(read_it)" = "$before"
+          $mdif tweaks apply recycle-bin-auto-empty --db "$db"
+          after=$(read_it); echo "applied: $after"
+          echo "$after" | grep -Eq '^01=1 08=1 256=(1|14|30) 2048=(1|7)$'
+          $mdif tweaks --json --db "$db" | jq -e '.[] | select(.id == "recycle-bin-auto-empty")
+            | .status == "applied" and .applied != null'
+          $mdif tweaks revert recycle-bin-auto-empty --json --db "$db" | jq -e '.sign_out == true'
+          test "$(read_it)" = "$before"
+          # Nothing left to revert: refused.
+          if $mdif tweaks revert recycle-bin-auto-empty --db "$db"; then exit 1; fi
+
+      # Tidy-ups in the runner's own home: a Rust build's incremental caches no
+      # build used for 40 days go, for real; a fresh build's stay. Builds and
+      # node_modules are offered only where Windows records when a file was last
+      # opened, as the registry says it does or doesn't here.
+      - name: Tidy-ups on the runner
+        run: |
+          db="$RUNNER_TEMP/tidy.sqlite3"
+          mdif=./target/release/mdif.exe
+          home=$(cygpath -u "$USERPROFILE")
+          old="$home/devel/tidy-old"; fresh="$home/devel/tidy-fresh"
+          for p in "$old" "$fresh"; do
+            mkdir -p "$p/target/debug/incremental/app-1x2y/s-abc"
+            echo '[package]' > "$p/Cargo.toml"
+            head -c 200000 /dev/zero > "$p/target/debug/incremental/app-1x2y/s-abc/query-cache.bin"
+          done
+          python3 - "$old" <<'PY'
+          import os, sys, time
+          then = time.time() - 40 * 86400
+          for root, dirs, files in os.walk(sys.argv[1], topdown=False):
+              for name in files + dirs:
+                  os.utime(os.path.join(root, name), (then, then))
+          os.utime(sys.argv[1], (then, then))
+          PY
+          $mdif tidy --db "$db"
+          $mdif tidy --json --db "$db" | jq -e '[.tidies[].id] == ["builds", "node-modules", "incremental"]'
+          cat > "$RUNNER_TEMP/last_access.py" <<'PY'
+          import sys, winreg
+          try:
+              with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+                  v = winreg.QueryValueEx(k, "NtfsDisableLastAccessUpdate")[0]
+          except FileNotFoundError:
+              v = None
+          print(f"NtfsDisableLastAccessUpdate: {v!r}", file=sys.stderr)
+          print("true" if v in (0, 0x80000000, 0x80000002) else "false")
+          PY
+          recorded=$(python3 "$RUNNER_TEMP/last_access.py" | tr -d '\r'); echo "last access recorded: $recorded"
+          $mdif tidy --json --db "$db" | jq -e --argjson r "$recorded" \
+            '[.tidies[] | select(.id == "builds" or .id == "node-modules") | .available == $r] == [true, true]
+             and (.tidies[] | select(.id == "incremental") | .available)'
+          $mdif tidy run incremental --dry-run --json --db "$db" \
+            | jq -e '.dry_run and ([.done[].path | test("tidy-old")] == [true]) and .freed > 0'
+          test -d "$old/target/debug/incremental"
+          $mdif tidy run incremental --json --db "$db" | jq -e '(.done | length) == 1 and .failed == []'
+          test ! -e "$old/target/debug/incremental"
+          test -d "$fresh/target/debug/incremental"
+          # The run was recorded; a switch turned on stays on.
+          $mdif tidy on incremental --json --db "$db" \
+            | jq -e '.tidies[] | select(.id == "incremental") | .on and .last.done == 1'
+          $mdif tidy off incremental --json --db "$db" | jq -e '[.tidies[].on] == [false, false, false]'
+          # The Mac's own aren't here.
+          if out=$($mdif tidy run simulators --db "$db" 2>&1); then echo "$out"; exit 1; fi
+          echo "$out" | grep -q "no tidy-up called simulators" || { echo "$out"; exit 1; }
 
       # The watcher at sign-in: the Run key, a program with no console window,
       # one instance at a time, and the sample it takes at once.
@@ -131,16 +224,41 @@ jobs:
           PY
           out=$($mdif agent status); echo "$out"
           echo "$out" | grep -q "Starts at sign-in: no"
-          $mdif agent install --interval 60
+          # Installed by a program that reads what it says (as the app does),
+          # the watcher it starts must not hold that output open: the program
+          # would wait for its end until the watcher quits.
+          python3 - "$mdif" <<'PY'
+          import os, subprocess, sys, threading
+          p = subprocess.Popen([os.path.abspath(sys.argv[1]), 'agent', 'install', '--interval', '60'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          out = []
+          reader = threading.Thread(target=lambda: out.append(p.stdout.read()), daemon=True)
+          reader.start()
+          p.wait(timeout=60)
+          reader.join(timeout=10)
+          if reader.is_alive():
+              sys.exit('mdif agent install ended, but its output stayed open: the watcher it started holds it')
+          print(out[0].decode(errors='replace'), end='')
+          sys.exit(p.returncode)
+          PY
           out=$($mdif agent status); echo "$out"
           echo "$out" | grep -q "Watcher: running"
           echo "$out" | grep -q "Starts at sign-in: yes"
+          # As the Windows app reads it.
+          $mdif agent status --json | jq -e '.at_sign_in == "yes" and .running == true and (.command | test("mdif-watch"))'
           # The first sample is taken at once, in the default history.
           $mdif forecast --json | jq -e '.samples >= 1'
           # A second watcher refuses to run beside it.
           if out=$(timeout 30 $mdif watch --interval 60 2>&1); then echo "a second watcher ran"; exit 1; fi
           echo "$out" | grep -q "already running" || { echo "$out"; exit 1; }
+          # Stopped on purpose (as the installer does before an update), it says
+          # so until it next starts, and the app leaves it stopped meanwhile.
+          $mdif agent stop
+          $mdif agent status --json | jq -e '.at_sign_in == "yes" and .running == false and .stopped == true'
+          $mdif agent start
+          $mdif agent status --json | jq -e '.running == true and .stopped == false'
           $mdif agent uninstall
+          $mdif agent status --json | jq -e '.at_sign_in == "no" and .running == false and .stopped == false'
           out=$($mdif agent status); echo "$out"
           echo "$out" | grep -q "Watcher: not running"
           echo "$out" | grep -q "Starts at sign-in: no"
@@ -186,6 +304,105 @@ jobs:
           jq -e '.scan.real >= 8000000 and .scan.real < 9000000 and (.scan.root.children | length) == 2' "$RUNNER_TEMP/map.json"
           rm -rf "$dir"
 
+      # Where the runner's Windows drive goes: every kind, Windows' own files as
+      # items, what the scan couldn't see in System data, and no clean-up offered
+      # but deleting build output. The measurement is kept and shown again while
+      # it's young.
+      - name: The space report sorts the Windows drive
+        run: |
+          mdif=./target/release/mdif.exe
+          db="$RUNNER_TEMP/space.sqlite3"
+          timeout 1200 $mdif space --db "$db"
+          $mdif space --json --max-age 3600 --db "$db" > "$RUNNER_TEMP/space.json"
+          jq -e '.volume.total > 0 and .volume.used > 0' "$RUNNER_TEMP/space.json"
+          jq -e '[.kinds[] | select(.id == "macos" and .title == "Windows")] | length == 1' "$RUNNER_TEMP/space.json"
+          # The kinds add up to what the drive has in use, within what changed while it was scanned.
+          jq -e '([.kinds[].bytes] | add) as $k | ($k - .volume.used | fabs) < .volume.used / 20' "$RUNNER_TEMP/space.json"
+          jq -e '[.kinds[] | select(.id == "apps") | .items[]] | length > 0' "$RUNNER_TEMP/space.json"
+          # Only build output and a project's packages are offered there so far.
+          jq -e '[.kinds[].items[] | select(.action != null and .action.kind != "delete")] | length == 0' "$RUNNER_TEMP/space.json"
+          jq -e '.old_files == []' "$RUNNER_TEMP/space.json"
+          jq -r '.kinds[] | "\(.title): \(.bytes) \([.items[:3][] | .name] | join(", "))"' "$RUNNER_TEMP/space.json"
+
+      # `mdif clean` on Windows: a project's build output and packages are
+      # deleted, after a dry run that does nothing; what isn't either, a link on
+      # the way, and what it can't do there yet are refused, and left as they were.
+      - name: Clean deletes build output and refuses the rest
+        run: |
+          mdif=./target/release/mdif.exe
+          db="$RUNNER_TEMP/clean.sqlite3"
+          app="$USERPROFILE/devel/mdif-ci-clean"
+          rm -rf "$app"; mkdir -p "$app/target/debug" "$app/src" "$app/node_modules/left-pad"
+          echo '[package]' > "$app/Cargo.toml"
+          echo '{}' > "$app/package.json"
+          echo '{}' > "$app/package-lock.json"
+          head -c 3000000 /dev/urandom > "$app/target/debug/app.exe"
+          echo 'x' > "$app/node_modules/left-pad/index.js"
+          echo 'fn main() {}' > "$app/src/main.rs"
+          win() { cygpath -w "$1"; }
+          $mdif clean --dry-run --json --db "$db" "$(win "$app/target")" > "$RUNNER_TEMP/dry.json"
+          cat "$RUNNER_TEMP/dry.json"
+          jq -e '.would == [{"path": .would[0].path, "how": "delete"}]' "$RUNNER_TEMP/dry.json"
+          [ -f "$app/target/debug/app.exe" ]
+          $mdif clean --json --db "$db" "$(win "$app/target")" "$(win "$app/node_modules")" \
+            "$(win "$app/src")" "$(win "$USERPROFILE")" 'docker:old' > "$RUNNER_TEMP/clean.json" || true
+          cat "$RUNNER_TEMP/clean.json"
+          jq -e '[.done[].how] == ["deleted", "deleted"] and (.failed | length) == 3' "$RUNNER_TEMP/clean.json"
+          [ ! -e "$app/target" ] && [ ! -e "$app/node_modules" ]
+          [ -f "$app/src/main.rs" ] && [ -f "$app/Cargo.toml" ]
+          rm -rf "$app"
+          # .NET's bin and obj go beside a project file; a bin of scripts stays.
+          net="$USERPROFILE/source/repos/MdifCi/MdifCi.Web"
+          tools="$USERPROFILE/devel/mdif-ci-tools"
+          rm -rf "$net" "$tools"; mkdir -p "$net/bin/Debug/net8.0" "$net/obj" "$tools/bin"
+          echo '<Project Sdk="Microsoft.NET.Sdk" />' > "$net/MdifCi.Web.csproj"
+          head -c 2000000 /dev/urandom > "$net/bin/Debug/net8.0/MdifCi.Web.dll"
+          echo '{}' > "$net/obj/project.assets.json"
+          echo 'echo hi' > "$tools/bin/hi.cmd"
+          $mdif clean --json --db "$db" "$(win "$net/bin")" "$(win "$net/obj")" "$(win "$tools/bin")" \
+            > "$RUNNER_TEMP/dotnet.json" || true
+          cat "$RUNNER_TEMP/dotnet.json"
+          jq -e '[.done[].how] == ["deleted", "deleted"] and (.failed | length) == 1' "$RUNNER_TEMP/dotnet.json"
+          [ ! -e "$net/bin" ] && [ ! -e "$net/obj" ]
+          [ -f "$net/MdifCi.Web.csproj" ] && [ -f "$tools/bin/hi.cmd" ]
+          rm -rf "$USERPROFILE/source/repos/MdifCi" "$tools"
+
+      # A drive's Recycle Bin (the runner's own) is emptied, after a dry run
+      # that leaves it as it is; a folder inside it, or of its name elsewhere,
+      # is refused; an empty bin is emptied again without a fuss.
+      - name: Clean empties the Recycle Bin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mdif = (Resolve-Path ./target/release/mdif.exe).Path
+          $db = Join-Path $env:RUNNER_TEMP 'bin.sqlite3'
+          $probe = Join-Path $env:USERPROFILE 'mdif-ci-bin-probe.bin'
+          [IO.File]::WriteAllBytes($probe, (New-Object byte[] 3000000))
+          Add-Type -AssemblyName Microsoft.VisualBasic
+          [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($probe, 'OnlyErrorDialogs', 'SendToRecycleBin')
+          if (Test-Path $probe) { throw 'the probe is still where it was' }
+          function InBin {
+            @((New-Object -ComObject Shell.Application).NameSpace(10).Items() |
+              Where-Object { $_.Name -like 'mdif-ci-bin-probe*' }).Count
+          }
+          if ((InBin) -lt 1) { throw 'the probe is not in the Recycle Bin' }
+          $bin = (Split-Path -Qualifier $probe) + '\$Recycle.Bin'
+          $dry = & $mdif clean --dry-run --json --db $db $bin
+          $dry
+          if (($dry | ConvertFrom-Json).would[0].how -ne 'empty-trash') { throw 'the dry run would not empty it' }
+          if ((InBin) -lt 1) { throw 'the dry run emptied it' }
+          $out = & $mdif clean --json --db $db $bin "$bin\S-1-5-18" "$env:USERPROFILE\`$Recycle.Bin"
+          $out
+          $r = $out | ConvertFrom-Json
+          if (@($r.done).Count -ne 1 -or $r.done[0].how -ne 'erased') { throw 'the bin was not emptied' }
+          if (@($r.failed).Count -ne 2) { throw 'what is not a drive''s bin was not refused' }
+          if ((InBin) -ne 0) { throw 'the probe is still in the Recycle Bin' }
+          $again = & $mdif clean --json --db $db $bin | ConvertFrom-Json
+          if ($again.done[0].how -ne 'erased') { throw 'emptying an empty bin failed' }
+          if (-not (& $mdif clean --db $db $bin | Select-String -Quiet 'Emptied the Recycle Bin')) {
+            throw 'what it said is not about the Recycle Bin'
+          }
+
       # The watcher's own budget: under 1 s of CPU and 1 MB written an hour at the
       # defaults (a sample every 5 minutes, folders every 30), measured here with
       # one folder update every 6 samples, as on the Mac.
@@ -214,6 +431,17 @@ jobs:
               and .cpu_us_per_sample * 12 + .cpu_us_per_period * 2 < 1000000
               and .written_per_sample * 12 < 1000000'
 
+      # `mdif suggest` on Windows: what the watcher found and finished worktrees,
+      # with nothing of a Mac's in it (no Trash, Finder, tmutil or ~/Library).
+      - name: Suggest says nothing of a Mac's
+        run: |
+          mdif=./target/release/mdif.exe
+          $mdif suggest --db "$RUNNER_TEMP/budget.sqlite3"
+          $mdif suggest --json --db "$RUNNER_TEMP/budget.sqlite3" > "$RUNNER_TEMP/suggest.json"
+          jq -e 'type == "array"' "$RUNNER_TEMP/suggest.json"
+          jq -e '[.[] | select(.action != null and (.action.kind | IN("delete", "worktrees") | not))] | length == 0' "$RUNNER_TEMP/suggest.json"
+          if grep -E 'Trash|Finder|tmutil|Library/|defaults write' "$RUNNER_TEMP/suggest.json"; then exit 1; fi
+
       # A real filler on a real NTFS volume (a VHDX mounted in a folder: the
       # runner is an administrator), through the whole watcher.
       - name: End to end on an NTFS volume
@@ -238,6 +466,85 @@ jobs:
           targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked --target aarch64-pc-windows-msvc
+
+  windows-app:
+    name: app (Windows installer)
+    if: ${{ !inputs.spikes }}
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            app-windows/src-tauri -> target
+      # What the window works out from mdif's output, against the Mac app's
+      # test files: the same output read the same way.
+      - name: The window's logic
+        run: node --test app-windows/ui/tests/
+      - name: The app's own code
+        working-directory: app-windows/src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked
+          cargo test --locked
+      - name: Tauri's command line
+        env:
+          # Its own warnings aren't ours to fail on.
+          RUSTFLAGS: ""
+        run: cargo install tauri-cli --version 2.12.5 --locked
+      - name: Build the installer
+        run: app-windows/build.sh
+      # As a user would: installed silently for this user, then the app, the
+      # watcher, an update over the running watcher, and the uninstall, each
+      # checked where Windows keeps it.
+      - name: Install, update over a running watcher, uninstall
+        run: |
+          setup=$(ls app-windows/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)
+          python3 app-windows/tests/install.py "$setup"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyDiskIsFull-windows-x64-setup
+          path: app-windows/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+      # The installer for Windows on ARM, built the same way from this x64
+      # runner (MSVC's ARM64 tools compile SQLite): built here, not run.
+      - name: Build the ARM64 installer
+        run: app-windows/build.sh aarch64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyDiskIsFull-windows-arm64-setup
+          path: app-windows/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  # The ARM64 installer windows-app built, used on ARM hardware as the x64 one
+  # is on x64: installed, updated over its running watcher, uninstalled.
+  windows-app-arm:
+    name: app (Windows on ARM installer, run)
+    if: ${{ !inputs.spikes }}
+    needs: windows-app
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: MyDiskIsFull-windows-arm64-setup
+          path: setup
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install, update over a running watcher, uninstall
+        shell: pwsh
+        run: python app-windows/tests/install.py (Get-ChildItem setup/*-setup.exe).FullName
 
   e2e:
     name: e2e (real filler, churner, cleanup)
