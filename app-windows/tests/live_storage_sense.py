@@ -82,6 +82,12 @@ os.makedirs(shots, exist_ok=True)
 subprocess.run(['taskkill', '/f', '/im', 'WWAHost.exe'], capture_output=True)
 subprocess.run(['reg', 'add', r'HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE', '/v',
                 'DisablePrivacyExperience', '/t', 'REG_DWORD', '/d', '1', '/f'], capture_output=True)
+# The runner's image turns Windows' Storage Service off, and with it Storage
+# Sense ("An administrator has disabled the Storage Service"): on again.
+print(ps("Get-Service StorSvc | Format-List Name,Status,StartType | Out-String; "
+         r"Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense' "
+         "-ErrorAction SilentlyContinue | Format-List | Out-String"))
+ps("Set-Service StorSvc -StartupType Manual; Start-Service StorSvc")
 os.startfile('ms-settings:storagepolicies')
 window = ui.wait_window('Settings')
 time.sleep(5)
