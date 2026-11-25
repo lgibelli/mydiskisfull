@@ -1066,8 +1066,20 @@ fn classify(path: &Path, home: &Path, up: &Up, allocated: u64) -> Option<Class> 
     {
         return None;
     }
+    // Folders a project often keeps in git (CocoaPods' `Pods`, a library's
+    // `dist`, electron-builder's `build` with its icons): part of the project
+    // when git keeps files in them, not build output the next build makes.
+    if class.is_some_and(|c| c.what == What::Artifact)
+        && COMMITTED.contains(&&*name)
+        && crate::worktrees::tracks_files_in(path) == Some(true)
+    {
+        return None;
+    }
     class
 }
+
+/// Build output's names that projects also commit (see [`classify`]).
+const COMMITTED: &[&str] = &["dist", "Pods", "build"];
 
 fn names(p: &Path) -> Vec<String> {
     p.components()
@@ -4592,5 +4604,53 @@ mod dotnet_tests {
             sorted(&home.join(r"devel\app\target")),
             Some((Kind::Build, What::Artifact))
         );
+    }
+}
+
+/// A `dist`, `Pods` or `build` git keeps files in is part of the project.
+#[cfg(test)]
+mod committed_tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_git_keeps_files_in_is_not_build_output() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        let app = home.join("devel").join("app");
+        for dir in ["Pods", "dist", "build", "target"] {
+            std::fs::create_dir_all(app.join(dir)).unwrap();
+            std::fs::write(app.join(dir).join("f"), "x").unwrap();
+        }
+        let top = Up {
+            what: What::Plain,
+            item: None,
+        };
+        let sorted = |p: &Path| classify(p, home, &top, 1 << 30).map(|c| (c.kind, c.what));
+        let build = Some((Kind::Build, What::Artifact));
+        // No repository: sorted by name.
+        assert_eq!(sorted(&app.join("Pods")), build);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(["-c", "init.defaultBranch=main"])
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(app.join(".gitignore"), "dist/\ntarget/\n").unwrap();
+        git(&["add", ".gitignore", "Pods", "build"]);
+        // Kept in git: the project's own.
+        assert_eq!(sorted(&app.join("Pods")), None);
+        assert_eq!(sorted(&app.join("build")), None);
+        // Ignored: what a build makes.
+        assert_eq!(sorted(&app.join("dist")), build);
+        // Not asked about: git keeping a `target` is too rare to ask.
+        assert_eq!(sorted(&app.join("target")), build);
     }
 }

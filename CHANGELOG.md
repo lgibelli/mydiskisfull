@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## Unreleased
 
 ### Fixed
+- A `dist`, `Pods` or `build` folder git keeps files in (CocoaPods' `Pods` committed, a
+  library's `dist`) was labelled build output in what the disk is made of. It's part of the
+  project.
 - `mdif map` on a Mac showed "not measured" below zero when it counted more than the disk uses
   (clones whose shared blocks couldn't be told apart, files that grew while it ran). It says how
   much was counted twice, as on Windows.
