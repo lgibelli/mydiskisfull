@@ -591,8 +591,14 @@ pub(crate) fn hresult(hr: i32) -> io::Error {
 }
 
 /// How many items the Recycle Bin of the drive whose root is `root` (`C:\`)
-/// holds for this user, as the shell counts them from the bin's index.
-fn recycle_bin_items(root: &[u16]) -> io::Result<i64> {
+/// holds for this user, as the shell counts them from the bin's index:
+/// nothing in it is walked.
+pub fn recycle_bin_items(root: &Path) -> io::Result<u64> {
+    let n = query_recycle_bin(&wide(root.as_os_str()))?.i64NumItems;
+    Ok(n.max(0) as u64)
+}
+
+fn query_recycle_bin(root: &[u16]) -> io::Result<windows_sys::Win32::UI::Shell::SHQUERYRBINFO> {
     use windows_sys::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
     let mut info = SHQUERYRBINFO {
         cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
@@ -603,7 +609,7 @@ fn recycle_bin_items(root: &[u16]) -> io::Result<i64> {
     if hr < 0 {
         return Err(hresult(hr));
     }
-    Ok(info.i64NumItems)
+    Ok(info)
 }
 
 /// Empties the Recycle Bin of the drive whose root is `root` (`C:\`), for
@@ -619,7 +625,7 @@ pub fn empty_recycle_bin(root: &Path) -> io::Result<()> {
     };
     let root = wide(root.as_os_str());
     // An empty bin is a failure to the call: nothing to do.
-    if recycle_bin_items(&root)? == 0 {
+    if query_recycle_bin(&root)?.i64NumItems == 0 {
         return Ok(());
     }
     // The shell may reach the bin through COM: this thread joins it for the
@@ -964,11 +970,23 @@ mod recycle_tests {
             to.get(1..)
                 .is_some_and(|t| t.starts_with(r":\$recycle.bin"))
         };
+        // The drive's bin, as its own index says what it holds.
+        let root = {
+            let p = plain(std::path::absolute(dir.path()).unwrap());
+            PathBuf::from(format!(r"{}\", &p.to_string_lossy()[..2]))
+        };
+        let before = recycle_bin_items(&root).unwrap();
         let file = dir.path().join("mdif-recycle-probe.txt");
         std::fs::write(&file, b"probe").unwrap();
         let to = trash(&file).unwrap();
         assert!(!file.exists(), "still where it was");
         assert!(to.exists() && in_bin(&to), "{}", to.display());
+        let after = recycle_bin_items(&root).unwrap();
+        println!(
+            "the bin of {}: {before} items, then {after}",
+            root.display()
+        );
+        assert!(after > before, "{before} then {after}");
         let folder = dir.path().join("mdif-recycle-folder");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("inside.txt"), b"x").unwrap();

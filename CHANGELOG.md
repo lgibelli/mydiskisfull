@@ -37,8 +37,8 @@ All notable changes to this project are documented here. The format is based on
   alone too, git never fetches, and a worktree with submodules is never finished (git refuses to
   remove one).
 - Emptying the Trash honours what you keep: a kept file in it stays, and so does the Trash.
-- A folder git tracks counted as untracked build output when its name's case differed from git's
-  (`Build` on disk, `build` in git), and could be deleted.
+- A folder git tracks counted as untracked build output when its name's case, or a folder's above
+  it, differed from git's (`Build` on disk, `build` in git), and could be deleted.
 - Ask AI sends no folder whose name has your account's in it.
 - Docker's clean-ups (Remove Old Leftovers and the daily tidy) followed the shell's Docker
   context, which could be a remote engine: they now always reach this Mac's Docker Desktop.

@@ -342,12 +342,17 @@ fn fixed(name: &str) -> bool {
 }
 
 /// Whether a folder's name has the account's in it (an app's folder for
-/// each account, `ProgramData\App\jane`): the home folder's name, whole, or
-/// inside another one when it's long enough not to be there by chance.
+/// each account, `ProgramData\App\jane`): the home folder's name, whole, as
+/// a word of its own (`amy-sync`), or inside another word when it's long
+/// enough not to be there by chance (`me` is in `Media`).
 fn names_account(name: &str, account: &str) -> bool {
     let (name, account) = (name.to_lowercase(), account.to_lowercase());
     !account.is_empty()
-        && (name == account || (account.chars().count() >= 4 && name.contains(&account)))
+        && (name == account
+            || name
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == account)
+            || (account.chars().count() >= 4 && name.contains(&account)))
 }
 
 /// A name made for one Mac (a UUID, a long number) would tell it apart
@@ -811,6 +816,12 @@ mod tests {
             ("Code", "me", false),
             ("Media", "me", false),
             ("Docker", "", false),
+            // A short one as a word of its own, not inside another.
+            ("amy-sync", "amy", true),
+            ("Amy Notes", "amy", true),
+            ("me.backup", "me", true),
+            ("Amygdala", "amy", false),
+            ("summer_me2", "me", false),
         ] {
             assert_eq!(names_account(name, account), says, "{name} {account}");
         }

@@ -226,6 +226,15 @@ pub fn trash(path: &Path) -> io::Result<std::path::PathBuf> {
         .ok_or_else(|| io::Error::other("the Trash didn't say where it went"))
 }
 
+/// A drive's Recycle Bin is Windows'. A Mac's Trash is a folder, measured
+/// as one.
+pub fn recycle_bin_items(_root: &Path) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the Recycle Bin is Windows'; a Mac's Trash is measured as a folder",
+    ))
+}
+
 /// A drive's Recycle Bin is Windows'. A Mac's Trash is a folder, emptied as
 /// one (`clean::empty`).
 pub fn empty_recycle_bin(_root: &Path) -> io::Result<()> {

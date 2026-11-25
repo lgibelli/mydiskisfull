@@ -2850,9 +2850,14 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     // The Trash as it is now, not as it was at the scan: emptying it in
     // Finder shows at once. On Windows the Recycle Bins the tree keeps were
     // measured again; this account's, if the scan found it too small to
-    // keep, is measured now, as it may have filled since.
+    // keep, is measured now, as it may have filled since: walked, for what
+    // its files take on the disk (what emptying frees; the bin's own index
+    // counts their sizes, more than a sparse or compressed one takes), unless
+    // the index says it's empty.
     let trash = if cfg!(windows) {
-        let own = if b.own_bin_listed {
+        let own = if b.own_bin_listed
+            || crate::os::fs::recycle_bin_items(&tree_base(m)).is_ok_and(|n| n == 0)
+        {
             0
         } else {
             own_recycle_bin(m)
