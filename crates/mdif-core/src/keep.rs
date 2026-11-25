@@ -351,6 +351,8 @@ mod tests {
         Keep::parse(text, Path::new(HOME))
     }
 
+    // A Mac's disk takes both forms for one name; NTFS keeps them apart.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_name_typed_composed_keeps_the_one_finder_wrote_decomposed() {
         let k = keep("~/Vid\u{e9}os\n");
@@ -399,6 +401,8 @@ mod tests {
         assert!(k.covering(Path::new("/Volumes/Archive2")).is_none());
     }
 
+    // A Mac's paths; on Windows a path from the root is on a drive.
+    #[cfg(not(windows))]
     #[test]
     fn an_entry_with_dot_dot_keeps_what_it_names() {
         let home = Path::new(HOME);

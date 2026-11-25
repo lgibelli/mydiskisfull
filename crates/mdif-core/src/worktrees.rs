@@ -1262,7 +1262,9 @@ mod tests {
         // A change git was told not to look at: status doesn't show it.
         run(&wt("hidden"), &["update-index", "--skip-worktree", "a.txt"]);
         put(wt("hidden").join("a.txt"), "edited, hidden\n");
-        // A session still open in it, quiet for hours.
+        // A session still open in it, quiet for hours. Windows can't tell
+        // one ([`crate::os::proc::working_in`]).
+        #[cfg(target_os = "macos")]
         let mut session = Command::new("/bin/sleep")
             .arg("600")
             .current_dir(wt("busy"))
@@ -1301,20 +1303,26 @@ mod tests {
         };
         // Everything was just touched: nothing is finished yet.
         assert_eq!(found(now), []);
-        let agents = [
+        let mut agents = vec![
             ("ff", true),
             ("generated", true),
             ("ignored", true),
             ("squash", true),
         ];
+        if !cfg!(target_os = "macos") {
+            agents.insert(0, ("busy", true));
+        }
         assert_eq!(found(now + QUIET + 60), named(&agents));
         // The one made by hand waits longer.
         let mut all = agents.to_vec();
         all.insert(0, ("app-editor", false));
         assert_eq!(found(now + IDLE + 60), named(&all));
 
-        session.kill().unwrap();
-        session.wait().unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            session.kill().unwrap();
+            session.wait().unwrap();
+        }
         // Its session ended: the busy one is finished.
         assert!(found(now + QUIET + 60).contains(&("busy".to_string(), "main".to_string(), true)));
 

@@ -1441,12 +1441,13 @@ mod windows_tests {
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
         let said = steps(&file);
         assert!(said.starts_with(&format!("{name} keeps growing")), "{said}");
-        // Commands are PowerShell's: single quotes, no `&&`.
+        // Commands are PowerShell's: single quotes, no `&&`. Build output is
+        // a project's in a code folder.
         let t = tempfile::tempdir().unwrap();
-        let app = t.path().join("app");
+        let app = t.path().join(r"source\repos\app");
         std::fs::create_dir_all(app.join("target")).unwrap();
         std::fs::write(app.join("Cargo.toml"), "").unwrap();
-        let Fix::Run { command, .. } = for_folder(&app.join("target"), home) else {
+        let Fix::Run { command, .. } = for_folder(&app.join("target"), t.path()) else {
             panic!("no command");
         };
         assert!(

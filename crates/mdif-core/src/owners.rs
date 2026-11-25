@@ -1247,6 +1247,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn owners_are_folders_a_person_recognises() {
         assert_eq!(

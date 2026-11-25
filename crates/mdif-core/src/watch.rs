@@ -1151,6 +1151,8 @@ mod tests {
         }
     }
 
+    // Probes are macOS's (TCC); Windows has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn full_disk_access_is_recorded_at_every_sample() {
         // A sample without access switches prompts off for the process.
