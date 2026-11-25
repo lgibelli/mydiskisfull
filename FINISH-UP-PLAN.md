@@ -57,8 +57,9 @@ never the user's real settings.
   Local/Roaming, Packages, Temp, browsers' caches), dev folders, WSL and Docker, VMs, cloud
   folders, Outlook. What can't be read goes to "System data". Still open: its actions (they come
   with `clean`), app "last opened" dates (UserAssist, to verify first), names for Store packages (`Microsoft.WindowsTerminal_8wekyb3d8bbwe`).
-  .NET's `bin`/`obj` are build output beside a project file (see `clean`). Not yet run on a real
-  Windows PC.
+  .NET's `bin`/`obj` are build output beside a project file (see `clean`). Run read-only on a
+  real Windows 11 PC: the kinds add up to what the drive has in use, with `Windows.old`, the page
+  file and the component store among Windows'; no .NET project was there to see.
 - **`handlers`**: **started**: `handlers::WINDOWS`, looked up on Windows only and matched whatever
   the case: OneDrive, iCloud Drive and Dropbox, iPhone backups (both places), Spotify, Slack,
   Telegram, the new Teams; their way said, nothing emptied, moved or opened yet. Still open: mail
@@ -131,9 +132,10 @@ never the user's real settings.
 
 ## Open in Phase 2 (known gaps, all listed in `docs/WINDOWS.md`)
 
-- Moving to the Recycle Bin (`fs::trash`): written (`shell.rs`), to be run on a real runner,
-  the too-big refusal included (its default size is Windows' documented one, from 2014: a bin
-  never yet set has no `MaxCapacity`).
+- Moving to the Recycle Bin (`fs::trash`, `shell.rs`): run on a real runner (CI's `--ignored
+  recycle`), the too-big refusal included, with the bin set to take 4 MB. Still unchecked: a bin
+  never yet set has no `MaxCapacity`, and its size is then taken as Windows' documented default,
+  from 2014.
 - Empty Trash / Empty Recycle Bin is refused while you keep something in it (`clean::plan`), but
   both apps still offer the button by its size alone: a click asks, then says why it's refused.
   The report would need to say it can't be emptied (`comes_back`), and both apps to read that.
@@ -203,7 +205,9 @@ programs x64, the watcher and the app GUI programs, `mdif` a console one). `src-
 stops the watcher before an update and starts it after (`mdif agent stop|start`), and runs
 `mdif agent uninstall` on an uninstall; "Delete the application data" also removes the history.
 CI's `windows-app` job installs, updates over a running watcher and uninstalls it, and keeps the
-installer.
+installer; `windows-app-arm` does the same with the ARM64 one on a Windows on ARM runner
+(`windows-11-arm`). `build.sh aarch64-pc-windows-msvc` also builds that one from a Mac (ARM64
+programs, checked by their PE headers; x64 runs emulated on Windows on ARM).
 
 Still open: Authenticode signing (the author picks a certificate or Azure Trusted Signing, then
 `bundle > windows > signCommand`); the updater (`tauri-plugin-updater` 2.14.1 is in the cache; its
@@ -211,8 +215,7 @@ key is generated once by the author, like the Sparkle one, the private key kept 
 the public key in `tauri.conf.json`; every update artifact signed in `release.yml`); the feed
 (`latest.json`) on the latest *published* release, so only publishing ships; a `release.yml`
 Windows job that uploads a draft; a Windows section in the README and the site (`docs/RELEASING.md`
-has one: building, the version, what's still to decide); the ARM64 installer run on ARM hardware (CI's `windows-app` builds it
-from its x64 runner and `windows-app-arm` runs it on `windows-11-arm`: written, not run yet; `build.sh aarch64-pc-windows-msvc` builds it from a Mac: ARM64 programs, checked by their PE headers; x64 runs emulated on Windows on ARM). A Microsoft Store (MSIX) edition
+has one: building, the version, what's still to decide). A Microsoft Store (MSIX) edition
 is out of scope for the first release.
 
 ## How to work on it

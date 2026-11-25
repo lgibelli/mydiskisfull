@@ -76,8 +76,13 @@ fn detect() -> Detect {
         },
         churn: ChurnParams {
             min_written: 64 * MB,
-            // The filler's growth counts against what the churner keeps.
-            max_kept: 0.25,
+            // The filler's growth (some 25 MB a window, and a rewrite in
+            // flight) counts against what the churner keeps. A runner's slow
+            // disk image had the churner write as little as 114 MB in a
+            // window, where a quarter closed its episode for a while and it
+            // opened again: only under about 73 MB does this. The defaults'
+            // tenth is the unit tests'.
+            max_kept: 0.4,
             ..ChurnParams::default()
         },
     }

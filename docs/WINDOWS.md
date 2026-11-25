@@ -67,9 +67,10 @@ count, as which of Storage Sense's keys is whose isn't known: only Group Policy'
 nor runs it weekly where it runs less often and such a clean-up is on, nor where Group Policy decides
 (`storage_sense_refusal`). Undo
 puts back every value it replaced, as on a Mac. Windows reads it at the next sign-in. Unit tests
-use a scratch key; CI applies the real tweak on its runner and puts it back. Nobody has yet
-checked on a PC that Storage Sense then empties the bin, nor what a PC signed in to OneDrive has
-under those keys.
+use a scratch key; CI applies the real tweak on its runner and puts it back. On a PC that syncs
+OneDrive and never set Storage Sense (no `StoragePolicy` key, no policy) it's refused, as Windows'
+default would make OneDrive's files online-only. Nobody has yet checked on a PC that Storage Sense
+then empties the bin, nor what such a PC has under those keys once Storage Sense is set.
 
 | Phase | What | State |
 |---|---|---|
@@ -312,9 +313,10 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
     (`tauri-plugin-updater` is in the cache; it needs a signing key of the author's). CI builds
     both installers on x64 and runs each where it belongs: `windows-app` the x64 one,
     `windows-app-arm` the ARM64 one on a Windows on ARM runner (`windows-11-arm`), with the same
-    script (`app-windows/tests/install.py`). The ARM64 one (`app-windows/build.sh
-    aarch64-pc-windows-msvc`, also cross-built from a Mac: its three programs are ARM64, the
-    installer itself x86 as NSIS's always is) hasn't run on ARM hardware until those jobs do.
+    script (`app-windows/tests/install.py`): each installs, updates over a running watcher and
+    uninstalls on its runner. The ARM64 one (`app-windows/build.sh aarch64-pc-windows-msvc`,
+    also cross-built from a Mac: its three programs are ARM64, the installer itself x86 as
+    NSIS's always is) has run on ARM hardware only there.
   - Pages not ported yet: Backups. Prevention is (the automatic clean-ups as switches, with what
     each did last and Tidy Now; its tweaks as switches, each applied after a look at what it
     changes, undone by putting back what it replaced). Ask AI is (Settings →

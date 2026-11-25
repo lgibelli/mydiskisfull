@@ -313,16 +313,18 @@ jobs:
           mdif=./target/release/mdif.exe
           db="$RUNNER_TEMP/space.sqlite3"
           timeout 1200 $mdif space --db "$db"
-          $mdif space --json --max-age 3600 --db "$db" > "$RUNNER_TEMP/space.json"
-          jq -e '.volume.total > 0 and .volume.used > 0' "$RUNNER_TEMP/space.json"
-          jq -e '[.kinds[] | select(.id == "macos" and .title == "Windows")] | length == 1' "$RUNNER_TEMP/space.json"
+          # Not space.json: that's the measurement kept beside the database, which
+          # the redirect would empty before mdif reads it.
+          $mdif space --json --max-age 3600 --db "$db" > "$RUNNER_TEMP/space-report.json"
+          jq -e '.volume.total > 0 and .volume.used > 0' "$RUNNER_TEMP/space-report.json"
+          jq -e '[.kinds[] | select(.id == "macos" and .title == "Windows")] | length == 1' "$RUNNER_TEMP/space-report.json"
           # The kinds add up to what the drive has in use, within what changed while it was scanned.
-          jq -e '([.kinds[].bytes] | add) as $k | ($k - .volume.used | fabs) < .volume.used / 20' "$RUNNER_TEMP/space.json"
-          jq -e '[.kinds[] | select(.id == "apps") | .items[]] | length > 0' "$RUNNER_TEMP/space.json"
+          jq -e '([.kinds[].bytes] | add) as $k | ($k - .volume.used | fabs) < .volume.used / 20' "$RUNNER_TEMP/space-report.json"
+          jq -e '[.kinds[] | select(.id == "apps") | .items[]] | length > 0' "$RUNNER_TEMP/space-report.json"
           # Only build output and a project's packages are offered there so far.
-          jq -e '[.kinds[].items[] | select(.action != null and .action.kind != "delete")] | length == 0' "$RUNNER_TEMP/space.json"
-          jq -e '.old_files == []' "$RUNNER_TEMP/space.json"
-          jq -r '.kinds[] | "\(.title): \(.bytes) \([.items[:3][] | .name] | join(", "))"' "$RUNNER_TEMP/space.json"
+          jq -e '[.kinds[].items[] | select(.action != null and .action.kind != "delete")] | length == 0' "$RUNNER_TEMP/space-report.json"
+          jq -e '.old_files == []' "$RUNNER_TEMP/space-report.json"
+          jq -r '.kinds[] | "\(.title): \(.bytes) \([.items[:3][] | .name] | join(", "))"' "$RUNNER_TEMP/space-report.json"
 
       # `mdif clean` on Windows: a project's build output and packages are
       # deleted, after a dry run that does nothing; what isn't either, a link on
