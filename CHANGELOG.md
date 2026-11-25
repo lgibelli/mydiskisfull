@@ -6,7 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.6] - 2026-11-25
+
 ### Added
+- A Windows edition, for x64 and ARM64 PCs, not yet signed (Windows' SmartScreen asks before the
+  first run: More info, then Run anyway; the README says how to check a download). It watches
+  the disk and forecasts when it fills, shows what it's made of, Old Files, a clean-up, Automatic
+  Clean-ups, Prevention and Ask AI, from the tray, and updates itself, signed, from GitHub. Not
+  in it yet: a Backups page, Docker's clean-ups and what each program writes.
 - `mdif space --cached`: the last measurement, however old, without measuring the disk again (it
   fails when there is none yet).
 
@@ -779,6 +786,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.6]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.6
 [0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5
 [0.1.4]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.4
 [0.1.3]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.3
