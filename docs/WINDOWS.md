@@ -22,7 +22,7 @@ count, owner, file modes). The rest of `mdif-core` is one copy of the code on bo
 
 The CLI is `mdif` / `mdif.exe` with the same commands and JSON. The Windows app
 (`app-windows/`, Tauri) runs it the way the Mac app does, and `app/Tests` holds the contract: the
-window's logic is tested against those files (`node --test app-windows/ui/tests`).
+window's logic is tested against those files (`node --test app-windows/ui/tests/*.test.mjs`).
 
 ## Where it stands
 
@@ -59,11 +59,17 @@ which is Storage Sense's, set in the user's registry (`Setting::Registry`,
 on, "08" on, "256" 30 days unless a shorter wait is in effect, "2048" weekly unless it already runs
 daily or weekly. The value names aren't documented by Microsoft; they're as Settings writes them
 and as published lists have them (`tweaks::STORAGE_POLICY`). MyDiskIsFull never turns Storage
-Sense on where that would start a clean-up of the user's own files set before (Downloads, or
-OneDrive's files made online-only), nor where Group Policy decides (`storage_sense_refusal`). Undo
+Sense on where that would start a clean-up of the user's own files (Downloads, or OneDrive's files
+made online-only: as set in Settings; by Group Policy where it sets the days, 0 being never; or by
+Windows' default since 11 22H2, after 30 days, wherever OneDrive syncs an account, told by OneDrive's
+`UserFolder` under `HKCU\Software\Microsoft\OneDrive\Accounts`. There an account's own Never doesn't
+count, as which of Storage Sense's keys is whose isn't known: only Group Policy's 0 lets it through),
+nor runs it weekly where it runs less often and such a clean-up is on, nor where Group Policy decides
+(`storage_sense_refusal`). Undo
 puts back every value it replaced, as on a Mac. Windows reads it at the next sign-in. Unit tests
 use a scratch key; CI applies the real tweak on its runner and puts it back. Nobody has yet
-checked on a PC that Storage Sense then empties the bin.
+checked on a PC that Storage Sense then empties the bin, nor what a PC signed in to OneDrive has
+under those keys.
 
 | Phase | What | State |
 |---|---|---|
@@ -182,7 +188,9 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
 - The owner tracker on Windows:
   - A file directly in a folder above where owners are (the profile folder, a drive's root,
     `AppData\Local`) is an owner of its own from 1 MiB (`C:\pagefile.sys`, `~\huge.log`), at most
-    the 1,024 biggest per folder; smaller ones aren't counted anywhere.
+    the 1,024 biggest per folder (one that comes in among them counts at least what it grew past
+    the smallest followed, one that drops out what it changed by); smaller ones aren't counted
+    anywhere.
   - A folder seen for the first time credits only the files made since the last period, unless
     it was made since then itself (then all it holds). So a file moved into an old folder the
     watcher hasn't listed yet (the Recycle Bin's, the first deletion after the watcher starts)

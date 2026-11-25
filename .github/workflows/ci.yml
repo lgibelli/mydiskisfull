@@ -489,7 +489,9 @@ jobs:
       # What the window works out from mdif's output, against the Mac app's
       # test files: the same output read the same way.
       - name: The window's logic
-        run: node --test app-windows/ui/tests/
+        # The files, not the folder: Node 22 (the runner's) runs a folder
+        # named to it as one test file.
+        run: node --test app-windows/ui/tests/*.test.mjs
       - name: The app's own code
         working-directory: app-windows/src-tauri
         run: |

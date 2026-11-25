@@ -1407,12 +1407,14 @@ mod windows_tests {
         assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Temp")).contains("Temporary files"));
         assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Spotify")).starts_with("Open Spotify"));
         // A file is said as one (a file directly in the profile folder is an
-        // owner of its own).
-        let t = tempfile::tempdir().unwrap();
-        let log = t.path().join("huge.log");
-        std::fs::write(&log, "x").unwrap();
-        assert!(steps(&log).starts_with("huge.log keeps growing"));
+        // owner of its own). This test's own program: a file made for it would
+        // be in the temporary folder, and said as temporary files.
+        let file = std::env::current_exe().unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let said = steps(&file);
+        assert!(said.starts_with(&format!("{name} keeps growing")), "{said}");
         // Commands are PowerShell's: single quotes, no `&&`.
+        let t = tempfile::tempdir().unwrap();
         let app = t.path().join("app");
         std::fs::create_dir_all(app.join("target")).unwrap();
         std::fs::write(app.join("Cargo.toml"), "").unwrap();

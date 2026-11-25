@@ -712,6 +712,7 @@ mod report_tests {
                                 )],
                             ),
                             d("Videos", 15 * GB, vec![]),
+                            d("OneDrive", 12 * GB, vec![]),
                             d(
                                 "source",
                                 0,
@@ -787,8 +788,26 @@ mod report_tests {
                 .all(|i| i.action.is_none())
         );
         assert!(r.old_files.is_empty());
+        // An app's folder found in the tree from the drive's root: what its
+        // handler says comes with it.
+        let about = r.kinds.iter().flat_map(|k| &k.items).find_map(|i| {
+            i.about
+                .as_ref()
+                .filter(|a| a.title == "OneDrive's downloads")
+        });
+        assert_eq!(
+            about.map(|a| a.path.as_str()),
+            Some(r"C:\Users\me\OneDrive")
+        );
         let layers = strata(&r);
         assert!(layers.contains(&("trash", 3 * GB)), "{layers:?}");
+        // The bin the scan found too small to keep is measured where it is
+        // now: the account's folder in the drive's.
+        let sid = crate::os::sys::user_sid().unwrap();
+        assert_eq!(
+            crate::space::own_recycle_bin(&m),
+            Some(std::path::PathBuf::from(r"C:\$Recycle.Bin").join(sid))
+        );
         assert!(layers.contains(&("unseen", unseen)), "{layers:?}");
     }
 }

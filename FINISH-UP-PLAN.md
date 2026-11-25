@@ -134,6 +134,9 @@ never the user's real settings.
 - Moving to the Recycle Bin (`fs::trash`): written (`shell.rs`), to be run on a real runner,
   the too-big refusal included (its default size is Windows' documented one, from 2014: a bin
   never yet set has no `MaxCapacity`).
+- Empty Trash / Empty Recycle Bin is refused while you keep something in it (`clean::plan`), but
+  both apps still offer the button by its size alone: a click asks, then says why it's refused.
+  The report would need to say it can't be emptied (`comes_back`), and both apps to read that.
 - Children are opened by path (`dir.join(name)`) for link counts and the held-open refresh, not
   relative to the checked folder handle (`NtCreateFile` with a root directory).
 - ReFS: 128-bit file IDs, version-3 journal records, block clones.
@@ -177,7 +180,7 @@ measured while on screen; `map.js` tested) and Settings
 a watcher that ended though it's set to start at sign-in is started again (`Supervisor`: seen ended
 twice two minutes apart, at most hourly, never one stopped on purpose with `mdif agent stop`, whose
 `stopped` marker any start clears; CI kills the watcher and sees the app start it). Tests: `cargo test` in
-`app-windows/src-tauri`, `node --test app-windows/ui/tests` (the window's logic against
+`app-windows/src-tauri`, `node --test app-windows/ui/tests/*.test.mjs` (the window's logic against
 `app/Tests`, and `pages.test.mjs`, which builds the Prevention page on a stand-in document: a
 click on a switch's row must flip the switch, never press Tidy Now); both were checked by breaking
 what they guard. Seen offscreen in headless Chrome
@@ -224,7 +227,7 @@ is out of scope for the first release.
 - The app, from `app-windows/src-tauri`: `cargo fmt --check`, `cargo clippy --offline --all-targets
   -- -D warnings`, `cargo test --offline`; for Windows the same clippy with `--target
   x86_64-pc-windows-msvc` (and `aarch64`) and LLVM's `llvm-rc` on the `PATH`. The window:
-  `node --test app-windows/ui/tests`, and the page in a browser (any static server at the repo's
+  `node --test app-windows/ui/tests/*.test.mjs`, and the page in a browser (any static server at the repo's
   root, then `app-windows/ui/index.html`, with `?fixtures=` for other test files). The installer:
   `app-windows/build.sh`.
 - Real Windows: `git push origin windows-port` (SSH), then `gh workflow run ci.yml --ref windows-port`

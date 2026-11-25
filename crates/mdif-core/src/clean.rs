@@ -232,12 +232,6 @@ pub fn plan(
             })
             .ok_or_else(|| format!("{shown}: none of its helpers keeps rewriting the disk now."));
     }
-    if mac && path == home.join(".Trash") {
-        return deletable(path, home).map(|()| Step::EmptyTrash(path.to_path_buf()));
-    }
-    if !mac && recycle_bin_root(path).is_some() {
-        return Ok(Step::EmptyTrash(path.to_path_buf()));
-    }
     // The checks below, what you keep included, know folders by their full
     // names: nothing in the home folder is cleaned through a short one.
     if !mac && let Some(short) = short_name_below(path, home) {
@@ -246,11 +240,18 @@ pub fn plan(
              full names."
         ));
     }
+    // Nor emptied: something you keep in the Trash stays there.
     if let Some(entry) = keep.covering(path).or_else(|| keep.inside(path)) {
         return Err(format!(
             "{shown}: you keep {}, so it isn't touched.",
             crate::text::printable(entry)
         ));
+    }
+    if mac && path == home.join(".Trash") {
+        return deletable(path, home).map(|()| Step::EmptyTrash(path.to_path_buf()));
+    }
+    if !mac && recycle_bin_root(path).is_some() {
+        return Ok(Step::EmptyTrash(path.to_path_buf()));
     }
     if mac && relocated(path, Path::new(SHARED)) {
         return Ok(Step::FinderTrash(path.to_path_buf()));
@@ -1558,6 +1559,13 @@ mod windows_tests {
                 plan(bin)
             );
         }
+        // Not while you keep something in it.
+        let kept = Keep::parse(
+            "C:\\$Recycle.Bin\\S-1-5-21-1-2-3-1001\\$RABC123.mkv\n",
+            &home,
+        );
+        let err = super::plan(Path::new(r"C:\$Recycle.Bin"), &home, &kept, &[], &[]).unwrap_err();
+        assert!(err.contains("you keep"), "{err}");
         for (bin, root) in [
             (r"d:\$Recycle.Bin", r"D:\"),
             (r"\\?\C:\$RECYCLE.BIN", r"C:\"),
@@ -1849,6 +1857,11 @@ mod tests {
         std::fs::write(trash.join("a.zip"), "x").unwrap();
         let step = plan(&trash, h, &Keep::default(), &[], &[]).unwrap();
         assert!(matches!(step, Step::EmptyTrash(_)));
+        // Not while you keep something in it.
+        for kept in ["~/.Trash/a.zip\n", "~/.Trash\n"] {
+            let err = plan(&trash, h, &Keep::parse(kept, h), &[], &[]).unwrap_err();
+            assert!(err.contains("you keep"), "{kept}: {err}");
+        }
         assert_eq!(run(&step, h).unwrap().how, "erased");
         assert!(trash.is_dir() && std::fs::read_dir(&trash).unwrap().count() == 0);
     }

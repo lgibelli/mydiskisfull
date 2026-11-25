@@ -24,7 +24,9 @@ use windows_sys::core::{GUID, PWSTR};
 use crate::unsupported;
 
 pub use crate::private::user_sid;
-pub use crate::registry::{machine_number, set_user_number, user_number, user_subkeys};
+pub use crate::registry::{
+    get_string as user_text, machine_number, set_user_number, user_number, user_subkeys,
+};
 
 /// Windows asks nothing before a program opens a folder (there's no TCC), so
 /// there's nothing to probe.
@@ -66,13 +68,16 @@ pub fn local_app_data() -> Option<PathBuf> {
     known_folder(&FOLDERID_LocalAppData)
 }
 
+/// Where Windows says which it is.
+const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+
 /// Which Windows this is, as Settings → System → About says it: "11 24H2",
 /// "10 22H2" (an older one without a feature update's name: its build).
 pub fn windows_version() -> io::Result<String> {
-    const KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
-    let build = registry_text(KEY, "CurrentBuildNumber")
+    let build = registry_text(CURRENT_VERSION, "CurrentBuildNumber")
         .ok_or_else(|| io::Error::other("Windows' build number isn't in the registry"))?;
-    let feature = registry_text(KEY, "DisplayVersion").or_else(|| registry_text(KEY, "ReleaseId"));
+    let feature = registry_text(CURRENT_VERSION, "DisplayVersion")
+        .or_else(|| registry_text(CURRENT_VERSION, "ReleaseId"));
     Ok(version_named(&build, feature.as_deref()))
 }
 
@@ -85,6 +90,14 @@ fn version_named(build: &str, feature: Option<&str>) -> String {
         Some(f) => format!("{product} {f}"),
         None => format!("{product} (build {n})"),
     }
+}
+
+/// Windows' build (26100 for 11 24H2), if the registry says.
+pub fn windows_build() -> Option<u32> {
+    registry_text(CURRENT_VERSION, "CurrentBuildNumber")?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// A text value under `HKEY_LOCAL_MACHINE`, if it's there.
@@ -211,6 +224,8 @@ mod tests {
         let here = windows_version().unwrap();
         println!("Windows {here}");
         assert!(here.starts_with("10 ") || here.starts_with("11 "), "{here}");
+        let build = windows_build().unwrap();
+        assert_eq!(here.starts_with("11 "), build >= 22_000, "{here} {build}");
     }
 
     #[test]

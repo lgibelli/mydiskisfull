@@ -10,6 +10,11 @@ All notable changes to this project are documented here. The format is based on
 - `mdif space --cached`: the last measurement, however old, without measuring the disk again (it
   fails when there is none yet).
 
+### Changed
+- A file of a megabyte or more right in a folder whose folders are each followed (the home
+  folder, Movies, Documents, `~/Library/Caches`) is followed as itself: the one that keeps growing
+  is named, not the whole folder. Where there are more than 1,024 of them, the biggest are.
+
 ### Fixed
 - Clean Up kept what you ticked and unticked only until the disk was measured again: a measure
   that finished while it was open put the ticks back, and Clean Up then ran what you had unticked.
@@ -31,8 +36,10 @@ All notable changes to this project are documented here. The format is based on
   without opening it (it may be in a folder that asks for permission). A partial clone is left
   alone too, git never fetches, and a worktree with submodules is never finished (git refuses to
   remove one).
+- Emptying the Trash honours what you keep: a kept file in it stays, and so does the Trash.
 - A folder git tracks counted as untracked build output when its name's case differed from git's
   (`Build` on disk, `build` in git), and could be deleted.
+- Ask AI sends no folder whose name has your account's in it.
 - Docker's clean-ups (Remove Old Leftovers and the daily tidy) followed the shell's Docker
   context, which could be a remote engine: they now always reach this Mac's Docker Desktop.
 - `mdif clean` of a link given with a trailing slash (`link/`) emptied what the link points to.

@@ -498,6 +498,9 @@ pub struct Tracker {
     /// The files directly in folders above where owners are, each an owner
     /// ([`Rules::above_owners`]): their sizes as last listed.
     loose: HashMap<PathBuf, BTreeMap<OsString, u64>>,
+    /// Of those, the folders with more such files than are followed
+    /// ([`MAX_LOOSE`]) when last listed: the smallest followed then.
+    loose_cut: HashMap<PathBuf, u64>,
     /// Seconds per period, the unit of deferral.
     period: i64,
     /// Entries a period lists before folders seen before wait.
@@ -520,6 +523,7 @@ impl Tracker {
             pending: BTreeSet::new(),
             followed: BTreeSet::new(),
             loose: HashMap::new(),
+            loose_cut: HashMap::new(),
             period,
             budget: PERIOD_ENTRIES,
             rescan: MAX_RESCAN,
@@ -728,10 +732,15 @@ impl Tracker {
                             self.gone(&child, deltas);
                         }
                     }
+                    let before = self.dirs.get(&dir).copied();
+                    // Made since it was last listed (it may have waited
+                    // periods), or, seen for the first time, since the last
+                    // period.
+                    let since = before.map_or(created_after, |b| b.seen);
                     let (mut own, mut created) = (0u64, 0u64);
                     let mut written = false;
                     let above = self.rules.above_owners(&dir);
-                    // Each an owner (name, size, new since the last period).
+                    // Each an owner (name, size, made since).
                     let mut loose: Vec<(&OsStr, u64, bool)> = Vec::new();
                     for e in &entries {
                         if e.kind == Kind::Dir {
@@ -752,7 +761,7 @@ impl Tracker {
                         }
                         written |= e.mtime > created_after;
                         if above && size >= LOOSE_MIN {
-                            loose.push((e.name.as_os_str(), size, e.crtime > created_after));
+                            loose.push((e.name.as_os_str(), size, e.crtime > since));
                         }
                     }
                     let meta = std::fs::symlink_metadata(&dir).ok();
@@ -770,7 +779,6 @@ impl Tracker {
                         steady: 0,
                         inode: meta.map_or(0, |m| crate::portable::file_id(&dir, &m)),
                     };
-                    let before = self.dirs.get(&dir).copied();
                     if let Some(b) = before {
                         let periods = ((now - b.seen + self.period / 2) / self.period).max(1);
                         if own.abs_diff(b.own) < self.steady * periods as u64 {
@@ -826,7 +834,8 @@ impl Tracker {
     /// Credits each file directly in `dir`, a folder above where owners are, to
     /// itself: what it grew since `dir` was last listed (`known`), or, the
     /// first time, its size if it's new since the last period. A file no
-    /// longer there (or now under [`LOOSE_MIN`]) is freed.
+    /// longer there (or now under [`LOOSE_MIN`]) is freed. Each file is
+    /// `(name, size, made since dir was last listed)`.
     fn credit_loose(
         &mut self,
         dir: &Path,
@@ -834,15 +843,35 @@ impl Tracker {
         mut files: Vec<(&OsStr, u64, bool)>,
         deltas: &mut HashMap<PathBuf, i64>,
     ) {
+        // The biggest are followed. One there but not among them when last
+        // listed was at most the smallest followed then, unless it's made
+        // since: one that comes in grew at least past that. One that drops
+        // out changed by what it's listed at now, and isn't followed after.
+        let before = self.loose.remove(dir).filter(|_| known);
+        let was_cut = self.loose_cut.remove(dir).filter(|_| before.is_some());
+        // Of the files followed before, what each is at now: one may drop out.
+        let mut listed: HashMap<&OsStr, u64> = HashMap::new();
+        let mut cutoff = None;
         if files.len() > MAX_LOOSE {
+            if let Some(b) = &before {
+                listed = files
+                    .iter()
+                    .filter(|f| b.contains_key(f.0))
+                    .map(|f| (f.0, f.1))
+                    .collect();
+            }
             files.sort_by_key(|f| Reverse(f.1));
             files.truncate(MAX_LOOSE);
+            cutoff = files.last().map(|f| f.1);
         }
-        let before = self.loose.remove(dir).filter(|_| known);
         let mut now = BTreeMap::new();
         for (name, size, new) in files {
             let was = match &before {
-                Some(b) => b.get(name).copied().unwrap_or(0),
+                Some(b) => match (b.get(name), was_cut) {
+                    (Some(&was), _) => was,
+                    (None, Some(smallest)) if !new => size.min(smallest),
+                    (None, _) => 0,
+                },
                 None if new => 0,
                 None => size,
             };
@@ -851,10 +880,17 @@ impl Tracker {
             }
             now.insert(name.to_os_string(), size);
         }
-        for (name, size) in before.into_iter().flatten() {
+        for (name, was) in before.into_iter().flatten() {
             if !now.contains_key(&name) {
-                *deltas.entry(dir.join(&name)).or_default() -= size as i64;
+                // Gone, or under LOOSE_MIN, if it isn't listed below them.
+                let size = listed.get(name.as_os_str()).copied().unwrap_or(0);
+                if size != was {
+                    *deltas.entry(dir.join(&name)).or_default() += size as i64 - was as i64;
+                }
             }
+        }
+        if let Some(smallest) = cutoff {
+            self.loose_cut.insert(dir.to_path_buf(), smallest);
         }
         self.loose.insert(dir.to_path_buf(), now);
     }
@@ -907,6 +943,7 @@ impl Tracker {
             let followed = self.followed.remove(&p);
             // Its files each an owner, or all its folder's.
             let loose = self.loose.remove(&p);
+            let cutoff = self.loose_cut.remove(&p);
             match &loose {
                 Some(files) => {
                     for (name, size) in files {
@@ -927,6 +964,9 @@ impl Tracker {
                     Some(files) => {
                         for (name, size) in &files {
                             *deltas.entry(moved.join(name)).or_default() += *size as i64;
+                        }
+                        if let Some(smallest) = cutoff {
+                            self.loose_cut.insert(moved.clone(), smallest);
                         }
                         self.loose.insert(moved.clone(), files);
                     }
@@ -972,6 +1012,8 @@ impl Tracker {
         self.followed.retain(|p| pending.contains(p));
         let dirs = &self.dirs;
         self.loose.retain(|p, _| dirs.contains_key(p));
+        let loose = &self.loose;
+        self.loose_cut.retain(|p, _| loose.contains_key(p));
     }
 }
 
@@ -1362,6 +1404,73 @@ mod tests {
     }
 
     #[test]
+    fn a_file_into_or_out_of_the_biggest_followed_is_credited_what_is_known() {
+        let mut tr = Tracker::new(Rules::default(), None, 1);
+        let dir = Path::new("/above");
+        let names: Vec<OsString> = (0..=MAX_LOOSE + 1)
+            .map(|i| OsString::from(format!("f{i}")))
+            .collect();
+        // `n` files, f0 the smallest, `new` the ones made since.
+        let listing = |sizes: &[u64], new: &[usize]| -> Vec<(&OsStr, u64, bool)> {
+            names
+                .iter()
+                .zip(sizes)
+                .enumerate()
+                .filter(|(_, (_, s))| **s > 0)
+                .map(|(i, (n, s))| (n.as_os_str(), *s, new.contains(&i)))
+                .collect()
+        };
+        let at =
+            |deltas: &HashMap<PathBuf, i64>, i: usize| deltas.get(&dir.join(&names[i])).copied();
+        let mut sizes: Vec<u64> = (0..=MAX_LOOSE as u64).map(|i| (2 + i) * MB).collect();
+        let mut deltas = HashMap::new();
+        tr.credit_loose(dir, false, listing(&sizes, &[]), &mut deltas);
+        assert!(deltas.is_empty(), "{deltas:?}");
+        // f0, not followed, becomes the biggest: it was at most the smallest
+        // followed (f1, 3 MB), so it grew at least past that. f1 isn't
+        // followed any more, and didn't change.
+        sizes[0] = 5_000 * MB;
+        tr.credit_loose(dir, true, listing(&sizes, &[]), &mut deltas);
+        assert_eq!(at(&deltas, 0), Some(4_997 * MB as i64));
+        assert_eq!(deltas.len(), 1, "{deltas:?}");
+        // A file made since is new; one deleted is freed.
+        deltas.clear();
+        sizes.push(3_000 * MB);
+        let deleted = sizes[MAX_LOOSE];
+        sizes[MAX_LOOSE] = 0;
+        tr.credit_loose(dir, true, listing(&sizes, &[MAX_LOOSE + 1]), &mut deltas);
+        assert_eq!(at(&deltas, MAX_LOOSE + 1), Some(3_000 * MB as i64));
+        assert_eq!(at(&deltas, MAX_LOOSE), Some(-(deleted as i64)));
+        assert_eq!(deltas.len(), 2, "{deltas:?}");
+        // One that shrinks out of the biggest freed what it shrank by; f1,
+        // which comes in again as it was, didn't grow.
+        deltas.clear();
+        let was = sizes[MAX_LOOSE - 1];
+        sizes[MAX_LOOSE - 1] = 3 * MB / 2;
+        tr.credit_loose(dir, true, listing(&sizes, &[]), &mut deltas);
+        assert_eq!(
+            at(&deltas, MAX_LOOSE - 1),
+            Some(sizes[MAX_LOOSE - 1] as i64 - was as i64)
+        );
+        assert_eq!(deltas.len(), 1, "{deltas:?}");
+
+        // Exactly as many as are followed is all of them: one that grows past
+        // the smallest that count, and comes in, grew.
+        let mut tr = Tracker::new(Rules::default(), None, 1);
+        let mut deltas = HashMap::new();
+        let mut sizes: Vec<u64> = (0..MAX_LOOSE as u64).map(|i| (2 + i) * MB).collect();
+        tr.credit_loose(dir, false, listing(&sizes, &[]), &mut deltas);
+        sizes.push(4_000 * MB);
+        tr.credit_loose(dir, true, listing(&sizes, &[]), &mut deltas);
+        assert_eq!(
+            at(&deltas, MAX_LOOSE),
+            Some(4_000 * MB as i64),
+            "{deltas:?}"
+        );
+        assert_eq!(deltas.len(), 1, "{deltas:?}");
+    }
+
+    #[test]
     fn a_restart_goes_on_following_a_growing_folder() {
         // A download kept open: the journal says nothing more of it until
         // it's closed, so a watcher that restarts must remember its folder.
@@ -1398,11 +1507,19 @@ mod tests {
         // Without what was kept, nothing would have listed it.
         let mut forgetful = Tracker::new(rules(), None, 1);
         assert_eq!(forgetful.apply(&[], i64::MAX, 200).listed, 0);
-        // A followed folder that's gone isn't followed any more.
+        // A followed folder that's gone isn't followed any more. (On Windows
+        // the folder that held it, listed for the first time, is followed for
+        // a period: a file kept open in it would say nothing.)
         fs::remove_dir_all(&film).unwrap();
         tr.apply(&[], i64::MAX, 400);
         tr.apply(&[event(&root.join("Storage"))], i64::MAX, 500);
-        assert!(tr.following().is_empty(), "{:?}", tr.following());
+        let following = tr.following();
+        assert!(!following.contains(&film), "{following:?}");
+        if cfg!(windows) {
+            assert_eq!(following, [root.join("Storage")]);
+        } else {
+            assert!(following.is_empty(), "{following:?}");
+        }
     }
 
     // Follows a moved folder by its number, which only macOS can do so far.

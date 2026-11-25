@@ -1,5 +1,5 @@
 // What the window works out from `mdif`'s output, tested without a window:
-// `node --test app-windows/ui/tests`. The fixtures are the Mac app's
+// `node --test app-windows/ui/tests/*.test.mjs`. The fixtures are the Mac app's
 // (app/Tests), so both apps read the same output the same way.
 
 import assert from "node:assert/strict";

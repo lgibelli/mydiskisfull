@@ -309,7 +309,45 @@ const STANDARD: &[&str] = &[
 /// [`generic_on_windows`] says.
 pub fn generic(path: &Path, home: &Path) -> Option<String> {
     let name = generic_name(path, home)?;
-    (!name.split(['/', '\\']).any(identifies)).then_some(name)
+    let account = home
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    (!name
+        .split(['/', '\\'])
+        .any(|n| identifies(n) || (!fixed(n) && names_account(n, account))))
+    .then_some(name)
+}
+
+/// The names generic ones are made of, the same for every account
+/// (`Application Support`, `AppData\Local`): one that has the account's in
+/// it (an account called `support`) says nothing about it.
+fn fixed(name: &str) -> bool {
+    const PLACES: &[&str] = &[
+        "Library",
+        "Containers",
+        "Group Containers",
+        "Application Support",
+        "Caches",
+        "Developer",
+        "AppData",
+        "Local",
+        "Roaming",
+        "LocalLow",
+        "Temp",
+    ];
+    [PLACES, STANDARD, VENDORS, WINDOWS_PLACES]
+        .iter()
+        .any(|list| list.iter().any(|f| f.eq_ignore_ascii_case(name)))
+}
+
+/// Whether a folder's name has the account's in it (an app's folder for
+/// each account, `ProgramData\App\jane`): the home folder's name, whole, or
+/// inside another one when it's long enough not to be there by chance.
+fn names_account(name: &str, account: &str) -> bool {
+    let (name, account) = (name.to_lowercase(), account.to_lowercase());
+    !account.is_empty()
+        && (name == account || (account.chars().count() >= 4 && name.contains(&account)))
 }
 
 /// A name made for one Mac (a UUID, a long number) would tell it apart
@@ -530,13 +568,20 @@ const WINDOWS_PLACES: &[&str] = &[
 ];
 
 /// The generic part of a folder on a drive (`n`: its names below the
-/// root): in one of [`WINDOWS_PLACES`], three names at most.
+/// root): in one of [`WINDOWS_PLACES`], three names at most. Some stop at
+/// themselves, as what's in them is named by whoever made it: the last
+/// Windows' `Users` with each account's name, the Recycle Bin's folder for
+/// each account (its SID), temporary files.
 fn on_drive(n: &[String]) -> Option<Vec<String>> {
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
     let first = n.first()?;
-    WINDOWS_PLACES
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(first))
-        .then(|| n.iter().take(3).cloned().collect())
+    let place = WINDOWS_PLACES.iter().find(|p| is(p, first))?;
+    let take = match *place {
+        "Windows.old" | "$Recycle.Bin" => 1,
+        "Windows" if n.get(1).is_some_and(|x| is(x, "Temp")) => 2,
+        _ => 3,
+    };
+    Some(n.iter().take(take).cloned().collect())
 }
 
 /// Checks a copy and its signature, as `mdif knowledge check` does before
@@ -742,8 +787,32 @@ mod tests {
             drive("windows\\SoftwareDistribution").as_deref(),
             Some("windows\\SoftwareDistribution")
         );
+        for (p, want) in [
+            ("Windows.old\\Users\\jane\\Documents", "Windows.old"),
+            (
+                "$Recycle.Bin\\S-1-5-21-3623811015-3361044348-30300820-1013",
+                "$Recycle.Bin",
+            ),
+            ("Windows\\Temp\\jane-setup", "Windows\\Temp"),
+            (
+                "Windows\\System32\\DriverStore\\FileRepository",
+                "Windows\\System32\\DriverStore",
+            ),
+        ] {
+            assert_eq!(drive(p).as_deref(), Some(want), "{p}");
+        }
         for p in ["Users\\other\\AppData", "Projects\\Acme", "Users", ""] {
             assert_eq!(drive(p), None, "{p}");
+        }
+        // Nothing with the account's name in it.
+        for (name, account, says) in [
+            ("jane", "jane", true),
+            ("Jane-backups", "jane", true),
+            ("Code", "me", false),
+            ("Media", "me", false),
+            ("Docker", "", false),
+        ] {
+            assert_eq!(names_account(name, account), says, "{name} {account}");
         }
         // A SID, a user's folder in the Recycle Bin, says who it is.
         assert!(identifies("S-1-5-21-3623811015-3361044348-30300820-1013"));
@@ -780,6 +849,39 @@ mod tests {
         );
         assert_eq!(g("Library/CloudStorage/OneDrive-Jane Doe"), None);
         assert_eq!(g("Library/Mail/V10/jane@example.com"), None);
+        // Or an app's folder named for the account.
+        let jane = Path::new("/Users/jane");
+        assert_eq!(
+            generic(Path::new("/Library/Application Support/jane-sync"), jane),
+            None
+        );
+        assert_eq!(
+            generic(Path::new("/Library/Application Support/Sync"), jane).as_deref(),
+            Some("/Library/Application Support/Sync")
+        );
+        // The names generic ones are made of aren't the account's, whatever
+        // it's called; an app's or a tool's own name may be.
+        let support = Path::new("/Users/support");
+        assert_eq!(
+            generic(&support.join("Library/Application Support/Foo"), support).as_deref(),
+            Some("~/Library/Application Support/Foo")
+        );
+        assert_eq!(
+            generic(
+                &support.join("Library/Application Support/support-sync"),
+                support
+            ),
+            None
+        );
+        let developer = Path::new("/Users/developer");
+        assert_eq!(
+            generic(
+                &developer.join("Library/Developer/Xcode/DerivedData"),
+                developer
+            )
+            .as_deref(),
+            Some("~/Library/Developer/Xcode/DerivedData")
+        );
         // A tool's folder, and its own folders in it, not a project's.
         assert_eq!(g(".dartServer").as_deref(), Some("~/.dartServer"));
         assert_eq!(

@@ -701,19 +701,27 @@ fn chrome_policy(
 const STORAGE_POLICY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy";
 
+/// OneDrive's own record of the accounts it syncs: a key each (`Personal`,
+/// `Business1`), the folder it syncs in `UserFolder`.
+#[cfg_attr(not(windows), allow(dead_code))]
+const ONEDRIVE_ACCOUNTS: &str = r"Software\Microsoft\OneDrive\Accounts";
+
 /// Group Policy's Storage Sense settings (`HKEY_LOCAL_MACHINE`), which win
 /// over the user's.
 #[cfg_attr(not(windows), allow(dead_code))]
 const STORAGE_SENSE_POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows\StorageSense";
 
 /// Storage Sense as it is set: the user's values, each OneDrive account's
-/// ("02" and "128" of each subkey), and Group Policy's.
+/// ("02" and "128" of each subkey), and Group Policy's; and whether
+/// Windows' own default makes OneDrive's files online-only (OneDrive syncs
+/// an account here, on Windows 11 22H2 or later).
 #[derive(Debug, Default)]
 #[cfg_attr(not(windows), allow(dead_code))]
 struct StorageSense {
     user: Vec<(&'static str, u32)>,
     accounts: Vec<(Option<u32>, Option<u32>)>,
     policy: Vec<(&'static str, u32)>,
+    onedrive_default: bool,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -734,7 +742,7 @@ impl StorageSense {
 /// number) fails it all, since a clean-up nobody can see might start.
 #[cfg(windows)]
 fn storage_sense_now() -> Result<StorageSense> {
-    use crate::os::sys::{machine_number, user_number, user_subkeys};
+    use crate::os::sys::{machine_number, user_number, user_subkeys, user_text, windows_build};
     let mut now = StorageSense::default();
     for v in ["01", "02", "04", "08", "32", "128", "256", "512", "2048"] {
         if let Some(n) = user_number(STORAGE_POLICY, v)? {
@@ -746,6 +754,13 @@ fn storage_sense_now() -> Result<StorageSense> {
         now.accounts
             .push((user_number(&key, "02")?, user_number(&key, "128")?));
     }
+    let mut synced = false;
+    for account in user_subkeys(ONEDRIVE_ACCOUNTS)? {
+        let folder = user_text(&format!(r"{ONEDRIVE_ACCOUNTS}\{account}"), "UserFolder")?;
+        synced |= folder.is_some_and(|f| !f.trim().is_empty());
+    }
+    // 22H2 is build 22621; one that can't be read counts as later.
+    now.onedrive_default = synced && windows_build().is_none_or(|b| b >= 22_621);
     for v in [
         "AllowStorageSenseGlobal",
         "ConfigStorageSenseGlobalCadence",
@@ -761,10 +776,13 @@ fn storage_sense_now() -> Result<StorageSense> {
 }
 
 /// Why turning the Recycle Bin's clean-up on doesn't apply, if it doesn't:
-/// Group Policy decides it, or turning Storage Sense on would also start a
+/// Group Policy decides it, or turning Storage Sense on, or running it
+/// weekly where it runs less often now, would also start or hasten a
 /// clean-up of your own files set before, in Settings or by Group Policy
-/// (Downloads, or OneDrive's files made online-only). MyDiskIsFull never
-/// starts those.
+/// (Downloads, or OneDrive's files made online-only), or Windows' own (since
+/// Windows 11 22H2, OneDrive's files unopened for 30 days are made
+/// online-only unless that's set to never). MyDiskIsFull never starts those,
+/// nor runs them sooner.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn storage_sense_refusal(now: &StorageSense) -> Option<&'static str> {
     if now.policy("AllowStorageSenseGlobal") == Some(0) {
@@ -782,32 +800,63 @@ fn storage_sense_refusal(now: &StorageSense) -> Option<&'static str> {
     {
         return Some("your organization sets when Storage Sense runs");
     }
-    if now.user("01") == Some(1) || now.policy("AllowStorageSenseGlobal") == Some(1) {
-        // Already on: the Recycle Bin's clean-up starts nothing else.
+    let on = now.user("01") == Some(1) || now.policy("AllowStorageSenseGlobal") == Some(1);
+    // Weekly at least ([`storage_sense_changes`]): sooner than now, unless it
+    // runs daily or weekly already, or Group Policy says so (as above).
+    let sooner = !matches!(now.user("2048"), Some(1 | 7))
+        && now.policy("ConfigStorageSenseGlobalCadence").is_none();
+    if on && !sooner {
+        // Already on, as often: the Recycle Bin's clean-up starts nothing else.
         return None;
     }
-    let set = |n: Option<u32>| n.is_some_and(|n| n != 0);
-    // Set by hand in Settings, or by Group Policy.
-    if set(now.user("32"))
-        || set(now.user("512"))
-        || set(now.policy("ConfigStorageSenseDownloadsCleanupThreshold"))
-    {
-        return Some(
+    if cleans(
+        now.policy("ConfigStorageSenseDownloadsCleanupThreshold"),
+        [now.user("32"), now.user("512")],
+    ) {
+        return Some(if on {
+            "Storage Sense also deletes files in your Downloads folder, and this would run it \
+             weekly, more often than now; set how often in Settings → System → Storage if you \
+             want that"
+        } else {
             "Storage Sense, which it turns on, is set to delete files in your Downloads folder \
-             too; turn it on yourself in Settings → System → Storage if you want that",
-        );
+             too; turn it on yourself in Settings → System → Storage if you want that"
+        });
     }
-    if set(now.user("02"))
-        || set(now.user("128"))
-        || now.accounts.iter().any(|(on, days)| set(*on) || set(*days))
-        || set(now.policy("ConfigStorageSenseCloudContentDehydrationThreshold"))
-    {
-        return Some(
-            "Storage Sense, which it turns on, is set to make OneDrive files online-only too; \
-             turn it on yourself in Settings → System → Storage if you want that",
-        );
+    // OneDrive's: Group Policy's where it sets one; else as set in Settings,
+    // for every account or one; else Windows' default wherever OneDrive
+    // syncs. An account's own Never doesn't count: which key here is whose
+    // isn't known, so it may be an account no longer synced.
+    let set = |n: Option<u32>| n.is_some_and(|n| n != 0);
+    let onedrive = match now.policy("ConfigStorageSenseCloudContentDehydrationThreshold") {
+        Some(days) => days != 0,
+        None => {
+            cleans(None, [now.user("02"), now.user("128")])
+                || now.accounts.iter().any(|&(on, days)| set(on) || set(days))
+                || now.onedrive_default
+        }
+    };
+    if onedrive {
+        return Some(if on {
+            "Storage Sense may also make OneDrive files online-only, and this would run it weekly, \
+             more often than now; set how often in Settings → System → Storage if you want that"
+        } else {
+            "Storage Sense, which it turns on, may also make OneDrive files online-only when they \
+             haven't been opened for a while; turn it on yourself in Settings → System → Storage \
+             if you want that"
+        });
     }
     None
+}
+
+/// Whether a clean-up of your own files is set: by Group Policy, where it
+/// sets a number of days (0: never), whatever Settings says; else in
+/// Settings (`user`, any value but 0).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cleans(policy: Option<u32>, user: impl IntoIterator<Item = Option<u32>>) -> bool {
+    match policy {
+        Some(days) => days != 0,
+        None => user.into_iter().any(|n| n.is_some_and(|n| n != 0)),
+    }
 }
 
 /// The values that make Storage Sense delete what has been in the Recycle
@@ -905,6 +954,7 @@ mod storage_sense_tests {
             user: user.to_vec(),
             accounts: accounts.to_vec(),
             policy: policy.to_vec(),
+            onedrive_default: false,
         }
     }
 
@@ -950,18 +1000,65 @@ mod storage_sense_tests {
             &[],
         );
         assert_eq!(storage_sense_refusal(&none), None);
-        // Already on, they're the user's choice in effect, left as they are.
-        let on = sense(
-            &[("01", 1), ("32", 1), ("512", 14)],
+        // Windows' own default (11 22H2 on) where OneDrive syncs: its files
+        // made online-only after 30 days. An account's Never may be another
+        // account's, so only Group Policy's 0 rules it out.
+        let syncing = |accounts: &[(Option<u32>, Option<u32>)], policy| StorageSense {
+            onedrive_default: true,
+            ..sense(&[], accounts, policy)
+        };
+        for s in [syncing(&[], &[]), syncing(&[(Some(0), Some(0))], &[])] {
+            let why = storage_sense_refusal(&s).unwrap_or_default();
+            assert!(why.contains("OneDrive"), "{s:?}");
+        }
+        let ruled_out = syncing(
             &[(Some(1), Some(30))],
-            &[],
+            &[("ConfigStorageSenseCloudContentDehydrationThreshold", 0)],
         );
+        assert_eq!(storage_sense_refusal(&ruled_out), None);
+        // On already and run as often: it changes nothing for them.
+        let on = StorageSense {
+            onedrive_default: true,
+            ..sense(&[("01", 1), ("2048", 7)], &[], &[])
+        };
         assert_eq!(storage_sense_refusal(&on), None);
-        assert!(
-            values(&on)
-                .iter()
-                .all(|(v, _)| !["32", "512", "02", "128"].contains(v))
-        );
+        // Already on, they're the user's choice in effect, left as they are,
+        // and run as often as before.
+        for cadence in [1, 7] {
+            let on = sense(
+                &[("01", 1), ("32", 1), ("512", 14), ("2048", cadence)],
+                &[(Some(1), Some(30))],
+                &[],
+            );
+            assert_eq!(storage_sense_refusal(&on), None);
+            assert!(
+                values(&on)
+                    .iter()
+                    .all(|(v, _)| !["32", "512", "02", "128", "2048"].contains(v))
+            );
+        }
+        // Not run more often: weekly where it runs only when space is low, or
+        // monthly, would delete Downloads or make OneDrive's files
+        // online-only sooner than they're set to.
+        for cadence in [None, Some(0), Some(30)] {
+            let with = |values: &[(&'static str, u32)]| {
+                let mut user = vec![("01", 1)];
+                user.extend(cadence.map(|c| ("2048", c)));
+                user.extend_from_slice(values);
+                sense(&user, &[], &[])
+            };
+            let why = storage_sense_refusal(&with(&[("32", 1)])).unwrap();
+            assert!(
+                why.contains("Downloads") && why.contains("more often"),
+                "{cadence:?}"
+            );
+            let why = storage_sense_refusal(&with(&[("02", 1)])).unwrap();
+            assert!(
+                why.contains("OneDrive") && why.contains("more often"),
+                "{cadence:?}"
+            );
+            assert_eq!(storage_sense_refusal(&with(&[])), None, "{cadence:?}");
+        }
 
         // Group Policy decides.
         for policy in [
@@ -980,9 +1077,29 @@ mod storage_sense_tests {
             storage_sense_refusal(&sense(&[], &[], &[("ConfigStorageSenseGlobalCadence", 7)])),
             None
         );
-        // Forced on by policy, a Downloads clean-up is in effect already.
-        let forced = sense(&[("32", 1)], &[], &[("AllowStorageSenseGlobal", 1)]);
+        // Forced on by policy, a Downloads clean-up is in effect already: run
+        // as often as before, or as Group Policy says.
+        let forced = sense(
+            &[("32", 1), ("2048", 7)],
+            &[],
+            &[("AllowStorageSenseGlobal", 1)],
+        );
         assert_eq!(storage_sense_refusal(&forced), None);
+        let forced = sense(
+            &[("32", 1)],
+            &[],
+            &[
+                ("AllowStorageSenseGlobal", 1),
+                ("ConfigStorageSenseGlobalCadence", 7),
+            ],
+        );
+        assert_eq!(storage_sense_refusal(&forced), None);
+        let forced = sense(&[("32", 1)], &[], &[("AllowStorageSenseGlobal", 1)]);
+        assert!(
+            storage_sense_refusal(&forced)
+                .unwrap()
+                .contains("more often")
+        );
         // Group Policy's own Downloads and cloud clean-ups would start with it.
         let downloads = sense(
             &[],
@@ -1000,22 +1117,34 @@ mod storage_sense_tests {
             &[("ConfigStorageSenseCloudContentDehydrationThreshold", 7)],
         );
         assert!(storage_sense_refusal(&cloud).unwrap().contains("OneDrive"));
-        // Set to never (0), they start nothing; with Storage Sense on, they're in effect.
-        let never = sense(
-            &[],
-            &[],
-            &[
-                ("ConfigStorageSenseDownloadsCleanupThreshold", 0),
-                ("ConfigStorageSenseCloudContentDehydrationThreshold", 0),
-            ],
-        );
-        assert_eq!(storage_sense_refusal(&never), None);
-        let on = sense(
-            &[("01", 1)],
-            &[],
-            &[("ConfigStorageSenseDownloadsCleanupThreshold", 30)],
-        );
-        assert_eq!(storage_sense_refusal(&on), None);
+        // Where Group Policy sets one to 0 it's never, whatever was chosen in
+        // Settings: off, or on and run less often. An account's own OneDrive
+        // choice still counts where the policy is the Downloads one.
+        for (policy, mine) in [
+            ("ConfigStorageSenseDownloadsCleanupThreshold", ("32", 1)),
+            (
+                "ConfigStorageSenseCloudContentDehydrationThreshold",
+                ("02", 1),
+            ),
+        ] {
+            for user in [vec![("01", 0), mine], vec![("01", 1), ("2048", 30), mine]] {
+                assert_eq!(
+                    storage_sense_refusal(&sense(&user, &[], &[(policy, 0)])),
+                    None,
+                    "{policy} {user:?}"
+                );
+                let why =
+                    storage_sense_refusal(&sense(&user, &[(Some(1), Some(30))], &[(policy, 0)]));
+                if policy.contains("Downloads") {
+                    assert!(
+                        why.is_some_and(|w| w.contains("OneDrive")),
+                        "{user:?}: {why:?}"
+                    );
+                } else {
+                    assert_eq!(why, None, "{user:?}");
+                }
+            }
+        }
     }
 
     #[test]

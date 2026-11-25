@@ -571,13 +571,7 @@ pub fn measure(home: &Path) -> Result<Measured> {
 pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
     crate::os::fs::forbid_dataless_materialization()
         .context("disabling cloud downloads for this process")?;
-    // Where the tree's names start: `/` on a Mac (the Data volume's folders
-    // are where you know them), the drive's root on Windows.
-    let base = if cfg!(windows) {
-        PathBuf::from(&m.tree.name)
-    } else {
-        PathBuf::from("/")
-    };
+    let base = tree_base(m);
     let under = |names: &[String]| names.iter().fold(base.clone(), |p, n| p.join(n));
     for p in paths {
         let names: Vec<String> = match p.strip_prefix(&base) {
@@ -1398,10 +1392,12 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
 
     let dates: HashMap<&str, &AppDates> = m.apps.iter().map(|a| (a.path.as_str(), a)).collect();
     let mut kinds: HashMap<Kind, (Vec<Item>, u64, u64, u64)> = HashMap::new();
-    let mut trash = 0;
+    let own_bin = own_recycle_bin(m);
+    let (mut trash, mut own_bin_listed) = (0, false);
     for s in &t.items {
         let (bytes, frees) = size(&s.part);
         if s.what == What::Trash {
+            own_bin_listed |= is_own_bin(&s.path, own_bin.as_deref());
             // A Recycle Bin as it is now, as a Mac's Trash is (`comes_back`):
             // emptying it shows at once, not at the next measurement.
             trash += if cfg!(windows) {
@@ -1526,6 +1522,7 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
             .map(|v| v.bytes)
             .sum(),
         trash,
+        own_bin_listed,
     };
     let unmeasured = if m.quota_limited { 0 } else { unmeasured };
     if unmeasured > 0 {
@@ -1738,7 +1735,11 @@ fn old_files(m: &Measured, keep: &Keep) -> Vec<OldFile> {
         .map(|f| {
             let path = Path::new(&f.path);
             let kept = keep.covering(path).is_some();
+            // A name Windows allows and text can't hold (half a UTF-16 pair)
+            // was written down with U+FFFD in its place: the path may name
+            // another file, so it's shown without the button.
             let trash = !kept
+                && !f.path.contains(char::REPLACEMENT_CHARACTER)
                 && crate::privacy::may_open(path)
                 && matches!(
                     clean::plan(path, &m.home, keep, &[], &[]),
@@ -2078,10 +2079,20 @@ impl Measured {
     }
 }
 
+/// Where the tree's names start: `/` on a Mac (the Data volume's folders
+/// are where you know them), the drive's root on Windows.
+fn tree_base(m: &Measured) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(&m.tree.name)
+    } else {
+        PathBuf::from("/")
+    }
+}
+
 /// The item's folder in the tree.
 fn dir_of<'a>(m: &'a Measured, item: &Path) -> Option<&'a Dir> {
     let mut d = &m.tree;
-    for name in item.strip_prefix("/").ok()?.iter() {
+    for name in item.strip_prefix(tree_base(m)).ok()?.iter() {
         d = d.children.iter().find(|c| *c.name == *name)?;
     }
     Some(d)
@@ -2756,6 +2767,15 @@ fn docker_action() -> Action {
 struct ComingBack {
     swap: u64,
     trash: u64,
+    /// Whether the tree keeps this account's Recycle Bin (`trash` is what
+    /// the bins it keeps hold now).
+    own_bin_listed: bool,
+}
+
+/// Whether `path`, a Recycle Bin the tree keeps, is this account's (`own`):
+/// Windows' names compare without case.
+fn is_own_bin(path: &Path, own: Option<&Path>) -> bool {
+    own.is_some_and(|own| path.as_os_str().eq_ignore_ascii_case(own.as_os_str()))
 }
 
 /// What the disk is made of, in layers for the history (`strata`): each
@@ -2799,6 +2819,19 @@ pub fn strata(r: &Report) -> Vec<(&'static str, u64)> {
 /// there, and deletes them when space is needed); what the scan couldn't
 /// see is mostly macOS's own files and metadata, which stay, so it isn't
 /// here.
+/// The account's folder in the measured drive's Recycle Bin
+/// (`C:\$Recycle.Bin\<SID>`), where what they delete there waits.
+#[cfg(windows)]
+fn own_recycle_bin(m: &Measured) -> Option<PathBuf> {
+    let sid = crate::os::sys::user_sid().ok()?;
+    Some(tree_base(m).join("$Recycle.Bin").join(sid))
+}
+
+#[cfg(not(windows))]
+fn own_recycle_bin(_: &Measured) -> Option<PathBuf> {
+    None
+}
+
 fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     let mut out = vec![
         ComesBack {
@@ -2815,12 +2848,25 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
         },
     ];
     // The Trash as it is now, not as it was at the scan: emptying it in
-    // Finder shows at once.
-    let trash = m.home.join(".Trash");
-    let trash = if crate::privacy::may_open(&trash) && trash.is_dir() {
-        scan::size_of(&trash).unwrap_or(b.trash)
+    // Finder shows at once. On Windows the Recycle Bins the tree keeps were
+    // measured again; this account's, if the scan found it too small to
+    // keep, is measured now, as it may have filled since.
+    let trash = if cfg!(windows) {
+        let own = if b.own_bin_listed {
+            0
+        } else {
+            own_recycle_bin(m)
+                .and_then(|bin| scan::size_of(&bin))
+                .unwrap_or(0)
+        };
+        b.trash + own
     } else {
-        b.trash
+        let trash = m.home.join(".Trash");
+        if crate::privacy::may_open(&trash) && trash.is_dir() {
+            scan::size_of(&trash).unwrap_or(b.trash)
+        } else {
+            b.trash
+        }
     };
     out.push(ComesBack {
         what: "trash",
@@ -4125,6 +4171,17 @@ mod tests {
     }
 
     #[test]
+    fn this_accounts_recycle_bin_is_told_from_anothers() {
+        let own = Path::new(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001");
+        let listed = |p: &str| is_own_bin(Path::new(p), Some(own));
+        assert!(listed(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001"));
+        assert!(listed(r"C:\$RECYCLE.BIN\s-1-5-21-1-2-3-1001"));
+        assert!(!listed(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1002"));
+        assert!(!listed(r"D:\$Recycle.Bin\S-1-5-21-1-2-3-1001"));
+        assert!(!is_own_bin(own, None));
+    }
+
+    #[test]
     fn an_old_file_that_is_there_is_offered_for_the_trash() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
@@ -4167,6 +4224,13 @@ mod tests {
         let keep = Keep::parse(&format!("{}\n", h.join("Movies").display()), h);
         let r = report(&m, &keep, &[]);
         assert!(r.old_files[0].kept && r.old_files[0].action.is_none());
+        // A name written down with U+FFFD in it may be another file's: listed,
+        // no button.
+        let odd = h.join("Movies/old\u{FFFD}.mov");
+        std::fs::rename(&file, &odd).unwrap();
+        m.files[0].path = odd.to_string_lossy().into_owned();
+        let r = report(&m, &Keep::default(), &[]);
+        assert!(!r.old_files[0].kept && r.old_files[0].action.is_none());
     }
 
     #[test]

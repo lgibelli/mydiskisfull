@@ -450,7 +450,11 @@ mod tests {
             bytes: Some(1_700_000_000),
             system: "27.2".into(),
         };
-        assert_eq!(input(&q), "Folder: ~/.x\nSize: 1.7 GB\nmacOS: 27.2");
+        let system = if cfg!(windows) { "Windows" } else { "macOS" };
+        assert_eq!(
+            input(&q),
+            format!("Folder: ~/.x\nSize: 1.7 GB\n{system}: 27.2")
+        );
     }
 
     #[test]

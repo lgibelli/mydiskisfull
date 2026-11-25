@@ -1,5 +1,5 @@
 // Pages built in node, on a stand-in document: what can be checked of how
-// they're put together without a browser. `node --test app-windows/ui/tests`.
+// they're put together without a browser. `node --test app-windows/ui/tests/*.test.mjs`.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
