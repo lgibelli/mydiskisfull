@@ -9,7 +9,8 @@
 # cross-builds with cargo-xwin and makensis (`cargo install cargo-xwin`,
 # `brew install makensis`, and LLVM for llvm-rc, lld-link and clang-cl).
 #
-# The installer lands in app-windows/src-tauri/target/<target>/release/bundle/nsis.
+# The installer lands in app-windows/src-tauri/target/<target>/release/bundle/nsis
+# (with its updater signature, .sig, when TAURI_SIGNING_PRIVATE_KEY is set).
 set -euo pipefail
 
 target=${1:-x86_64-pc-windows-msvc}
@@ -43,6 +44,14 @@ for bin in mdif mdif-watch; do
   cp "$root/target/$target/release/$bin.exe" "$bins/$bin-$target.exe"
 done
 
+# Signed for the updater when its key is set (release.yml, from the release
+# environment's secret): Tauri writes the installer's .sig beside it, which
+# feed.sh puts in latest.json. Without it the installer is the same, unsigned
+# for updates.
+signing=()
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then signing=(--config tauri.updater.json); fi
+
 cd "$here/src-tauri"
-cargo tauri build "${runner[@]}" --target "$target" --config tauri.release.json --bundles nsis
+cargo tauri build ${runner[@]+"${runner[@]}"} --target "$target" --config tauri.release.json \
+  ${signing[@]+"${signing[@]}"} --bundles nsis
 ls -l "target/$target/release/bundle/nsis/"

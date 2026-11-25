@@ -102,6 +102,9 @@ stapler() {
 
 upload() {
     local files=("$DMG" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml" "$CLI" "$CLI.sha256")
+    # keep-feed.sh, after the upload, reads the Windows feed with it: missing,
+    # it would stop with the draft half done.
+    command -v jq >/dev/null || die "jq is needed (it's in macOS 15 and later; or brew install jq)"
     for f in "${files[@]}" "$OUT/notes.md"; do
         [ -f "$f" ] || die "$f is missing: run app/release.sh first"
     done
@@ -125,6 +128,15 @@ upload() {
         say "Creating the draft release $TAG"
         gh release create "$TAG" --repo "$REPO" --draft --target "$head" \
             --title "$APP_NAME $VERSION" --notes-file "$OUT/notes.md" "${files[@]}"
+    fi
+    # The Windows update feed, carried over from the latest release when this
+    # one has no Windows installers of its own. Not when release.yml's windows
+    # job follows (WINDOWS_FEED_FOLLOWS): it uploads a feed of its own, and a
+    # stale one to carry over mustn't stop it.
+    if [ "${WINDOWS_FEED_FOLLOWS:-}" = true ]; then
+        say "The Windows update feed: the windows job uploads its own"
+    else
+        "$ROOT/app-windows/keep-feed.sh" "$TAG" "$REPO"
     fi
     gh release view "$TAG" --repo "$REPO" --json url,isDraft,assets \
         --jq '"\(.url) (draft: \(.isDraft)): \([.assets[].name] | join(", "))"'

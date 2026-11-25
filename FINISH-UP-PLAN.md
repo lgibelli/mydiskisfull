@@ -18,7 +18,7 @@ Actions Windows runner as the only test box, a per-user watcher with an optional
 | 4 | Windows catalogue | **started**: `mdif map` runs; the rest is open |
 | 5 | Optional elevated service | not started |
 | 6 | Tauri app | **started**: tray, notifications, sign-in; Overview, Storage, History, Settings |
-| 7 | Packaging, signing, updater | **started**: the NSIS installer and its hooks, tested by CI; signing and updater open |
+| 7 | Packaging, signing, updater | **started**: the NSIS installer and its hooks, tested by CI; the updater wired (its key made); unsigned for Windows at first; the release job never run |
 
 What runs on Windows today: `watch`, `status`, `forecast`, `alerts`, `keep`, `knowledge` (Ask AI too),
 `agent` (with `stop` and `start`, Windows' own, for the installer), `owners`, `incidents`, `map`, `space` (its only action: Delete for build output and
@@ -135,9 +135,10 @@ never the user's real settings.
 - Moving to the Recycle Bin (`fs::trash`, `shell.rs`): run on a real runner (CI's `--ignored
   recycle`), the too-big refusal included, with the bin set to take 4 MB. A bin never yet set has
   no `MaxCapacity`, and its size is then taken as Windows' documented default, from 2014: CI
-  checks it on a new volume of 50 GB (a VHDX with a letter: past 40 GB, so both parts count;
-  `recycle_takes_what_a_never_set_bin_does`): what Windows writes for that bin, the biggest file
-  the default lets through recycled, one a tenth bigger refused.
+  checks it on a new volume of 50 GB (a VHDX with a letter: past 40 GiB, so both parts count;
+  `recycle_takes_what_a_never_set_bin_does`): what Windows writes for that bin once it's used
+  (4607 MB there, as `bin_takes` counts it in GiB and whole MiB), the biggest file the default
+  lets through recycled, one a tenth bigger refused.
 - Empty Trash / Empty Recycle Bin is refused while you keep something in it (`clean::plan`), but
   both apps still offer the button by its size alone: a click asks, then says why it's refused.
   The report would need to say it can't be emptied (`comes_back`), and both apps to read that.
@@ -211,16 +212,18 @@ installer; `windows-app-arm` does the same with the ARM64 one on a Windows on AR
 (`windows-11-arm`). `build.sh aarch64-pc-windows-msvc` also builds that one from a Mac (ARM64
 programs, checked by their PE headers; x64 runs emulated on Windows on ARM).
 
-Still open: Authenticode signing (the author picks a certificate or Azure Trusted Signing, then
-`bundle > windows > signCommand`); the updater (`tauri-plugin-updater` 2.14.1 is in the cache; its
-key is generated once by the author, like the Sparkle one, the private key kept off the repo and
-the public key in `tauri.conf.json`; every update artifact signed in `release.yml`); the feed
-(`latest.json`) on the latest *published* release, so only publishing ships; the first run of
-`release.yml`'s `windows` job (written: it builds both installers unsigned, attests them and puts
-them on the macOS job's draft, only with `-f windows=true`; its build is the one CI's
-`windows-app` runs, its attestation and upload have never run); the site's page, at the first
-release (the README has a Windows section; `docs/RELEASING.md` has building, the version and
-what's still to decide). A Microsoft Store (MSIX) edition is out of scope for the first release.
+Decided (2026-11-25): the first releases are unsigned for Windows (SmartScreen's warning, and the
+README says how to get past it); Authenticode comes later (a certificate or Azure Artifact
+Signing, then `bundle > windows > signCommand`). The updater is wired (`tauri-plugin-updater`
+2.14.1 with SChannel and no zip: `src-tauri/src/update.rs`, Settings → Updates): its key was made
+on the author's Mac (login keychain, beside Sparkle's), the public half in `tauri.conf.json`;
+`build.sh` signs the installers when `TAURI_SIGNING_PRIVATE_KEY` is set and `feed.sh` writes
+`latest.json`, which `release.yml` puts on the draft, so only publishing ships. No Backups page in
+the first release. Still open: the key in the `release` environment's secrets (the author's
+call); the first run of `release.yml`'s `windows` job (its build is the one CI's `windows-app`
+runs; its signing, feed, attestation and upload have never run); an update installed by the app
+on a real PC; the site's page, at the first release. A Microsoft Store (MSIX) edition is out of
+scope for the first release.
 
 ## How to work on it
 

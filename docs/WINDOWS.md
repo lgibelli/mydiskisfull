@@ -82,7 +82,7 @@ then empties the bin, nor what such a PC has under those keys once Storage Sense
 | 4 | Windows' own catalogue: what fills a disk there, handlers, clean-ups, tidy-ups, tweaks (registry), the backups page | |
 | 5 | An optional elevated service for the journal at full precision and the file table | |
 | 6 | The app (Tauri) | started: tray, notifications, opening at sign-in; Overview, Storage, History, Settings |
-| 7 | Packaging (a per-user installer, signing, updates) | started: the installer builds and is tested on the runner; signing and updates open |
+| 7 | Packaging (a per-user installer, signing, updates) | started: the installer builds and is tested on the runner; updates wired (never installed one yet); unsigned for Windows at first |
 
 ### The app and its installer
 
@@ -262,14 +262,15 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
   bin set to delete at once (`NukeOnDelete` under `BitBucket\Volume\{GUID}`, or the policy
   `NoRecycleFiles`), and a file bigger than the bin takes (`MaxCapacity` there, in MiB, or the
   policy `RecycleBinSize`, a percentage of the quota; with neither, Windows' default, a tenth of
-  the first 40 GB of the user's quota and a twentieth of the rest). A folder too big for the bin
+  the first 40 GiB of the user's quota and a twentieth of the rest, in whole MiB). A folder too big for the bin
   goes item by item, each marked, which the sink refuses. CI moves a file and a folder to the
   runner's bin, checks a share's file is refused, and with the bin set to take 4 MB for a moment
   that a file of 8 MB stays (and that one of 1 MB goes), then with it set to delete at once that
   nothing goes. On a new volume of 50 GB (a VHDX with a letter: past 40 GB, so both parts of the
   default count) whose bin was never set, it checks the default: what Windows writes for that bin
-  takes at least as much, the biggest file the default lets through is recycled, and one a tenth
-  bigger is refused and stays. **Old Files** uses it: the report's `old_files` are big files of yours
+  once it's used is the same within a hundredth and never less (4607 MB, as `bin_takes` counts it:
+  first measured there in GB of 10⁹ bytes, 3% short), the biggest file the default lets through
+  is recycled, and one a tenth bigger is refused and stays. **Old Files** uses it: the report's `old_files` are big files of yours
   (`clean::yours`, with `space::windows::own_file` on Windows: in the profile, in no folder
   sorted as apps' data, apps, a cloud folder (deleting there deletes online: OneDrive's,
   Dropbox's, iCloud's, Creative Cloud's by how their names begin, and the plain-file services'
@@ -311,17 +312,33 @@ Not measured yet: cloud placeholders (needs a sync root), toasts from an unpacka
 - The app and its installer:
   - An update from a build without `mdif agent stop` can't replace a running `mdif-watch.exe`
     (NSIS asks to retry). Nothing released lacks it.
-  - The app's own children are left running if it's ended from outside, so an update that ends
-    the app during a long `mdif space` can't replace `mdif.exe` until that finishes.
-  - The installer and the programs aren't signed, so SmartScreen warns; there is no updater yet
-    (`tauri-plugin-updater` is in the cache; it needs a signing key of the author's). CI builds
+  - The app's own children are left running if it's ended from outside, so an installer run by
+    hand during a long `mdif space` can't replace `mdif.exe` until that finishes. The app's own
+    Install and Restart first lets what runs end (15 s), then stops what only reads
+    (`mdif::stop_all`); a clean-up or a change still under way is never stopped: nothing is
+    installed, and it says to install once it's done. An installer that starts but is cancelled
+    (or can't replace a file) has stopped the watcher and doesn't start it again; the next time
+    the app opens (or sign-in), it runs no `mdif` and installs nothing while that installer's
+    process still runs (it's staged in the app's own `updates` cache folder, emptied after; kept
+    for the next start if it can't be), then starts the watcher as sign-in would, unless the user
+    stopped it (`update::after_update`, with `mdif agent start --after-install`; tried three times,
+    in that run only). The installer's stop is `agent stop --for-install`: its marker says it's the
+    installer's (and never replaces the user's), so the installer's own start, the app's and a
+    retry after a failed install all leave a stop of the user's alone and undo only the
+    installer's. Before it copies anything it waits for the watcher to end (three tries of 20 s),
+    then for `mdif.exe` and `mdif-watch.exe` to be free (a running program's file can't be opened
+    to write; a minute, for `mdif` in a terminal too), or stops with the watcher's stop called off.
+  - The installer and the programs aren't signed, so SmartScreen warns (decided for the first
+    releases). Updates are the app's own (`update.rs`: daily `latest.json` from the latest
+    published release, the installer's minisign signature checked against `tauri.conf.json`'s key,
+    Install and Restart in Settings); none has been installed on a PC yet. CI builds
     both installers on x64 and runs each where it belongs: `windows-app` the x64 one,
     `windows-app-arm` the ARM64 one on a Windows on ARM runner (`windows-11-arm`), with the same
     script (`app-windows/tests/install.py`): each installs, updates over a running watcher and
     uninstalls on its runner. The ARM64 one (`app-windows/build.sh aarch64-pc-windows-msvc`,
     also cross-built from a Mac: its three programs are ARM64, the installer itself x86 as
     NSIS's always is) has run on ARM hardware only there.
-  - Pages not ported yet: Backups. Prevention is (the automatic clean-ups as switches, with what
+  - Pages not ported yet: Backups (not in the first release). Prevention is (the automatic clean-ups as switches, with what
     each did last and Tidy Now; its tweaks as switches, each applied after a look at what it
     changes, undone by putting back what it replaced). Ask AI is (Settings →
     What Folders Are: the switch, Continue with ChatGPT, Sign Out, Manage usage; in Storage, an

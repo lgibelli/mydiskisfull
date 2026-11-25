@@ -337,8 +337,14 @@ with `--upload` it sends it there (see [docs/RELEASING.md](docs/RELEASING.md)).
 Overview, Storage, Old Files, History, Prevention, Clean Up and Ask AI, in a window installed per
 user (nothing needs an administrator), for x64 and ARM64. CI builds both installers, and installs,
 updates and uninstalls each on a GitHub runner (Windows Server for x64, Windows 11 for ARM64); the
-workspace's tests also pass on a Windows 11 PC. Before a first release, signing (SmartScreen warns
-about an unsigned installer) and updates are still to decide.
+workspace's tests also pass on a Windows 11 PC. It updates itself as the Mac app does: once a day
+it reads the latest release's `latest.json` from GitHub (nothing else is sent), and Settings →
+Updates offers Install and Restart; each update is signed, and one that isn't is refused.
+
+The first releases aren't signed for Windows, so SmartScreen stops the installer with "Windows
+protected your PC": click **More info**, then **Run anyway**. Before that, the download can be
+checked against `SHA256SUMS-windows.txt` on the release, and against this repository's build
+with `gh attestation verify MyDiskIsFull_<version>_x64-setup.exe --repo lgibelli/mydiskisfull`.
 
 ```sh
 app-windows/build.sh                           # x64, on Windows or cross-built from a Mac
@@ -346,7 +352,7 @@ app-windows/build.sh aarch64-pc-windows-msvc   # ARM64
 ```
 
 What each needs is in [docs/RELEASING.md](docs/RELEASING.md). Not on Windows yet: a Backups page
-(Time Machine's is a Mac's), Docker's clean-ups, and what each program writes (the write-churn
+(Time Machine's is a Mac's; one for Windows' backups may come later), Docker's clean-ups, and what each program writes (the write-churn
 alert, History's Writes: Windows counts a pipe's traffic as a process's writes).
 [docs/WINDOWS.md](docs/WINDOWS.md) maps each part to Windows and says what's still open.
 
