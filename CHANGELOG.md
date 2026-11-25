@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Added
+- `mdif space --cached`: the last measurement, however old, without measuring the disk again (it
+  fails when there is none yet).
+
 ### Fixed
 - Clean Up kept what you ticked and unticked only until the disk was measured again: a measure
   that finished while it was open put the ticks back, and Clean Up then ran what you had unticked.

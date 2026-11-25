@@ -701,10 +701,14 @@ export const act = {
       if (refresh) {
         store.space = await oneAtATime(() => mdifJson(["space", "--refresh"], 900));
       } else {
-        // However old; measured now only if there's none.
-        store.space = await mdifJson(["space", "--max-age", "2147483647"], 900);
-        render();
-        if (Date.now() / 1000 - store.space.measured > SPACE_MAX_AGE) {
+        // However old, and never measured by this: a measurement waits its
+        // turn with the disk map's. None kept yet, it's measured now.
+        const kept = await mdifJson(["space", "--cached"], 900).catch(() => null);
+        if (kept) {
+          store.space = kept;
+          render();
+        }
+        if (!kept || Date.now() / 1000 - kept.measured > SPACE_MAX_AGE) {
           store.space = await oneAtATime(() => mdifJson(["space", "--max-age", String(SPACE_MAX_AGE)], 3600));
         }
       }

@@ -260,6 +260,11 @@ enum Cmd {
         /// Scan even if the last measurement is young enough
         #[arg(long)]
         refresh: bool,
+        /// Show the last measurement however old, without measuring the
+        /// disk again (the Trash is sized as it is now, as always): fails
+        /// when there is none yet
+        #[arg(long, conflicts_with_all = ["refresh", "max_age"])]
+        cached: bool,
         /// History database (the measurement is kept next to it)
         #[arg(long, default_value_os_t = watch_cmd::default_db())]
         db: PathBuf,
@@ -632,8 +637,9 @@ fn main() -> Result<()> {
             json,
             max_age,
             refresh,
+            cached,
             db,
-        } => space_cmd::space(&db, json, max_age, refresh)?,
+        } => space_cmd::space(&db, json, max_age, refresh, cached)?,
         Cmd::Writers { secs, top } => writers_cmd::writers(secs, top),
     }
     Ok(())

@@ -20,13 +20,25 @@ pub fn file(db: &Path) -> PathBuf {
     db.with_file_name("space.json")
 }
 
-pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> Result<()> {
+pub fn space(
+    db: &Path,
+    json_out: bool,
+    max_age: Option<u64>,
+    refresh: bool,
+    cached: bool,
+) -> Result<()> {
     let keep = crate::keep_cmd::load(db)?;
     let kept = file(db);
     let now = unix_now();
-    let fresh = match max_age {
-        Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
-        _ => None,
+    // `cached`: what's kept, never a scan (the app's first look, which
+    // mustn't start one beside the disk map's).
+    let fresh = if cached {
+        Some(load(&kept).context("Nothing is measured yet: `mdif space` measures the disk.")?)
+    } else {
+        match max_age {
+            Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
+            _ => None,
+        }
     };
     let mut m = match fresh {
         Some(m) => m,
