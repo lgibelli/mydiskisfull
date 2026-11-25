@@ -352,7 +352,7 @@ impl Tweak {
             if holds(&c.setting.read()?, &c.to, c.at_most) {
                 held += 1;
             } else if let Setting::Profile { profile, dir } = &c.setting {
-                pending |= profile.downloaded(dir);
+                pending |= profile.pending(dir, std::time::SystemTime::now());
             }
         }
         Ok(if held == changes.len() {
@@ -371,15 +371,31 @@ impl Tweak {
     /// runs without the shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME`, so
     /// [`Tweak::status`] could look in the wrong place and see it undone.
     pub fn record_status(&self, record: &TweakRecord) -> Result<Status> {
-        let steps: Vec<Step> = serde_json::from_str(&record.steps)
-            .with_context(|| format!("reading the record of {}", self.id))?;
+        self.records_status(std::slice::from_ref(record))
+    }
+
+    /// The same for every record not reverted, the newest first: applied
+    /// again after something undid part of it, the newest names only what
+    /// was set again, and the rest is in the older ones.
+    pub fn records_status(&self, records: &[TweakRecord]) -> Result<Status> {
+        let mut steps: Vec<Step> = Vec::new();
+        for record in records {
+            let these: Vec<Step> = serde_json::from_str(&record.steps)
+                .with_context(|| format!("reading the record of {}", self.id))?;
+            for s in these {
+                // A newer record's step for the same setting wins.
+                if !steps.iter().any(|t| t.setting == s.setting) {
+                    steps.push(s);
+                }
+            }
+        }
         let mut held = 0;
         let mut pending = false;
         for s in &steps {
             if holds(&s.setting.read()?, &s.to, s.at_most) {
                 held += 1;
             } else if let Setting::Profile { profile, dir } = &s.setting {
-                pending |= profile.downloaded(dir);
+                pending |= profile.pending(dir, std::time::SystemTime::now());
             }
         }
         Ok(if held == steps.len() {
@@ -508,7 +524,7 @@ impl Tweak {
         // gone.
         let status = match self.status(home)? {
             gone @ Status::Absent(_) => gone,
-            _ => self.record_status(latest)?,
+            _ => self.records_status(&records)?,
         };
         Ok(Some(Check {
             applied: first.applied,
@@ -862,6 +878,16 @@ mod tests {
         };
         days.write(Some(&json!(30))).unwrap();
         assert_eq!(t.apply(h, &store, 2000).unwrap().len(), 1);
+        // Judged by both records: the newest names one setting, the first
+        // the other; undo the other and it's partial, not applied.
+        let open = store.open_tweaks("test-files").unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(t.records_status(&open).unwrap(), Status::Applied);
+        let init = std::fs::read_to_string(h.join("init.d/x")).unwrap();
+        std::fs::remove_file(h.join("init.d/x")).unwrap();
+        assert_eq!(t.record_status(&open[0]).unwrap(), Status::Applied);
+        assert_eq!(t.records_status(&open).unwrap(), Status::Partial);
+        std::fs::write(h.join("init.d/x"), init).unwrap();
         t.revert(&store, 3000).unwrap();
         assert_eq!(days.read().unwrap(), Some(json!(30)));
         assert!(!h.join("init.d/x").exists());

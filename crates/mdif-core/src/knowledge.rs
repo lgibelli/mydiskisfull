@@ -34,6 +34,9 @@ const MAX: usize = 1_000_000;
 /// The downloaded copy and its signature, in the folder `init` is given.
 const FILE: &str = "folders.json";
 const SIG: &str = "folders.json.sig";
+/// The signature of the last list looked at online that wasn't newer: the
+/// same list isn't downloaded again each day.
+const SEEN: &str = "folders.json.seen";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Knowledge {
@@ -441,13 +444,18 @@ pub fn update(dir: &Path) -> Result<Updated> {
     };
     let sig = String::from_utf8(fetch(&format!("{URL}.sig"), 200)?)
         .context("the signature isn't text")?;
-    if std::fs::read_to_string(dir.join(SIG)).is_ok_and(|s| s == sig) {
+    if [SIG, SEEN]
+        .iter()
+        .any(|f| std::fs::read_to_string(dir.join(f)).is_ok_and(|s| s == sig))
+    {
         return Ok(same);
     }
     let bytes = fetch(URL, MAX)?;
     verify(&bytes, &sig, &key())?;
     let k = parse(&bytes)?;
     if k.version <= now.knowledge.version {
+        std::fs::create_dir_all(dir)?;
+        let _ = std::fs::write(dir.join(SEEN), &sig);
         return Ok(same);
     }
     std::fs::create_dir_all(dir)?;

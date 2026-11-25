@@ -42,6 +42,9 @@ pub struct Profile {
     pub prefs: Map<String, Value>,
 }
 
+/// How long a profile handed to System Settings may wait for approval.
+pub const PENDING_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 86_400);
+
 impl Profile {
     pub fn file_in(&self, dir: &Path) -> PathBuf {
         dir.join(format!("{}.mobileconfig", self.identifier))
@@ -120,6 +123,16 @@ impl Profile {
     /// Saved in `dir` and handed to System Settings, but not installed yet.
     pub fn downloaded(&self, dir: &Path) -> bool {
         self.file_in(dir).exists() && !self.in_effect()
+    }
+
+    /// [`downloaded`](Self::downloaded) lately, so waiting for approval: one
+    /// handed over weeks ago and not in effect was turned down, or removed
+    /// in System Settings since.
+    pub fn pending(&self, dir: &Path, now: std::time::SystemTime) -> bool {
+        self.downloaded(dir)
+            && std::fs::metadata(self.file_in(dir))
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| now.duration_since(at).is_ok_and(|d| d < PENDING_FOR))
     }
 
     /// Save it in `dir`, open it so System Settings offers to install it,
@@ -301,6 +314,19 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert_eq!(&a[14..15], "8");
         assert!(matches!(&a[19..20], "8" | "9" | "A" | "B"), "{a}");
+    }
+
+    #[test]
+    fn a_profile_handed_over_weeks_ago_isnt_waiting_any_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = chrome();
+        let file = p.file_in(dir.path());
+        std::fs::write(&file, "x").unwrap();
+        let now = std::time::SystemTime::now();
+        // Not in effect on this Mac (no such managed preference).
+        assert!(p.pending(dir.path(), now));
+        assert!(!p.pending(dir.path(), now + PENDING_FOR));
+        assert!(p.downloaded(dir.path()));
     }
 
     #[test]

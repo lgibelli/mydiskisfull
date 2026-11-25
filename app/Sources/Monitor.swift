@@ -9,6 +9,7 @@
 
 import AppKit
 import Combine
+import Network
 import UserNotifications
 
 @MainActor
@@ -148,6 +149,24 @@ final class Monitor: ObservableObject {
     }
 
     #if !APP_STORE
+    /// Whether the connection now costs traffic (a phone's hotspot, Low
+    /// Data Mode), as Network says.
+    private static func metered() async -> Bool {
+        final class Once: @unchecked Sendable { var done = false }
+        let once = Once()
+        let queue = DispatchQueue(label: "mydiskisfull.metered")
+        return await withCheckedContinuation { c in
+            let m = NWPathMonitor()
+            m.pathUpdateHandler = { path in
+                guard !once.done else { return }
+                once.done = true
+                m.cancel()
+                c.resume(returning: path.isExpensive || path.isConstrained)
+            }
+            m.start(queue: queue)
+        }
+    }
+
     /// Once a day, a newer list of what's known about folders, unless
     /// Settings turned that off. It goes by itself: what's named and said
     /// from it shows when the disk is measured next.
@@ -156,11 +175,17 @@ final class Monitor: ObservableObject {
         guard d.bool(forKey: "knowledgeUpdates") else { return }
         if let last = d.object(forKey: "knowledgeChecked") as? Date,
            Date().timeIntervalSince(last) < 86_400 { return }
+        // Not over a phone's hotspot or in Low Data Mode: it waits for
+        // another connection.
+        guard !(await Self.metered()) else { return }
+        // Set first, so the refreshes meanwhile don't start one each.
         d.set(Date(), forKey: "knowledgeChecked")
         do {
             let u = try await Core.json(KnowledgeUpdate.self, ["knowledge", "update"], timeout: 60)
             if u.newer { log.notice("knowledge: version \(u.version), \(u.folders) folders") }
         } catch {
+            // Offline, say: tried again in an hour, not a day.
+            d.set(Date().addingTimeInterval(-86_400 + 3_600), forKey: "knowledgeChecked")
             log.info("knowledge: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -239,7 +264,10 @@ final class Monitor: ObservableObject {
             unattended = false
             #if APP_STORE
             // Its tweaks are only advice: no need to read other apps' settings.
-            if let sg = try? await Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos) {
+            // Asked again meanwhile (a clean-up done since it started): what
+            // it found may be cleaned already, and the next run says.
+            if let sg = try? await Core.json([Suggestion].self, ["suggest"] + quiet, timeout: timeout, qos: qos),
+               !measureAgain {
                 suggestions = notKept(sg)
             }
             #else
@@ -252,7 +280,9 @@ final class Monitor: ObservableObject {
                 tweaks = tw
                 tweaksChanging = [:]
             }
-            if let sg { suggestions = notKept(sg) }
+            // Asked again meanwhile (a clean-up done since it started): what
+            // it found may be cleaned already, and the next run says.
+            if let sg, !measureAgain { suggestions = notKept(sg) }
             #endif
             measuredAt = Date()
         } while measureAgain
@@ -506,8 +536,9 @@ final class Monitor: ObservableObject {
         var out: [String: Suggestion] = [:]
         var placed = Set<String>()
         for k in r.kinds {
-            // System data has no path: it's about nothing.
-            for i in k.items where !i.path.isEmpty {
+            // System data has no path: it's about nothing. Nor one you keep:
+            // Overview doesn't list it, and what's placed there wouldn't show.
+            for i in k.items where !i.path.isEmpty && !i.has("kept") {
                 let p = Self.dataless(i.path)
                 if let s = list.first(where: { s in
                     guard let sp = s.path.map(Self.dataless), !placed.contains(s.cause) else { return false }
@@ -579,6 +610,9 @@ final class Monitor: ObservableObject {
             }
             measuredAt = nil
             await measure()
+            // The breakdown as `mdif space` shows it with the list: no
+            // button on what's kept now (`mdif clean` would refuse it).
+            if space != nil { await loadSpace() }
         }
     }
 
@@ -588,6 +622,7 @@ final class Monitor: ObservableObject {
             if let list = try? await Core.json([Kept].self, ["keep", "remove", k.entry]) { kept = list }
             measuredAt = nil
             await measure()
+            if space != nil { await loadSpace() }
         }
     }
 
@@ -709,7 +744,13 @@ final class Monitor: ObservableObject {
         for t in undone where !undoneKnown.contains("\(t.id):\(t.applied)") {
             Notifier.undone(t)
         }
-        let fixed = undoneKnown.subtracting(undoneNow).compactMap { $0.split(separator: ":").first }
+        // Withdrawn once nothing of that tweak is undone: not when an older
+        // record of one undone again is all that went, which would take
+        // back the notification just posted (they share an identifier).
+        let stillUndone = Set(undone.map(\.id))
+        let fixed = undoneKnown.subtracting(undoneNow)
+            .compactMap { $0.split(separator: ":").first.map(String.init) }
+            .filter { !stillUndone.contains($0) }
         Notifier.withdraw(fixed.map { "undone-\($0)" })
         d.set(Array(undoneNow), forKey: Keys.undone)
     }

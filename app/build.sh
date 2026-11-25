@@ -103,7 +103,7 @@ for arch in "${ARCHS[@]}"; do
         -target "$arch-apple-macos14.0" \
         ${FRAMEWORK_FLAGS[@]+"${FRAMEWORK_FLAGS[@]}"} \
         -framework SwiftUI -framework AppKit -framework Charts \
-        -framework UserNotifications -framework ServiceManagement \
+        -framework UserNotifications -framework ServiceManagement -framework Network \
         -o "$SLICES/$APP_NAME-$arch" \
         app/Sources/*.swift
 done

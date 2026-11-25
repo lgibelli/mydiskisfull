@@ -708,7 +708,9 @@ struct SpaceReport: Decodable {
         /// sent to ask (never one of your own folders).
         let unexplained: String?
 
-        var id: String { path }
+        // Several have no path (system data, the volumes macOS keeps): by
+        // name then, or SwiftUI would take them for one row.
+        var id: String { path.isEmpty ? "#" + name : path }
         func has(_ flag: String) -> Bool { flags.contains(flag) }
     }
 

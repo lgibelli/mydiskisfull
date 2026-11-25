@@ -802,7 +802,9 @@ struct AskAI: View {
     private func ask() async {
         step = .asking
         do {
-            let a = try await Core.json(AskAnswer.self, args, timeout: 120)
+            // As long as `mdif` may take: the models (30 s), renewing the
+            // sign-in (60 s) and the answer (180 s), each with a margin.
+            let a = try await Core.json(AskAnswer.self, args, timeout: 330)
             Self.answers[path] = a
             step = .answer(a)
         } catch {

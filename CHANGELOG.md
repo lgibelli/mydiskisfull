@@ -156,6 +156,21 @@ All notable changes to this project are documented here. The format is based on
   and after Delete Snapshots the page still listed them.
 - A tweak's switch could start a second apply or undo while the first asked its question, and a
   tidy that was on but couldn't run here couldn't be turned off.
+- Ask AI gave up after two minutes while an answer may take three, and showed commands the
+  AI wasn't meant to give (`defaults write`, `brew cleanup`, `tmutil`) under What helps.
+- The list of what's known about folders downloaded again every day when the copy online
+  wasn't newer, downloaded over a phone's hotspot or in Low Data Mode, and after a failed
+  try waited a day: it waits for another connection and tries again in an hour.
+- A tweak whose profile you removed in System Settings read "waiting for approval" for good;
+  after a week, it reads as off. A tweak applied again after part of it was undone read as
+  applied while the other part stayed undone.
+- A measurement started before a clean-up could bring back the suggestion it cleaned, a
+  suggestion placed on a folder you keep vanished from Overview, and an undone tweak's
+  notification was taken back as soon as it was posted when it had been undone before.
+- Apply Again from a notification ran with no window, where what it asks and how it went
+  weren't seen, and Keep It left the row's button on Storage until the next measurement.
+- Empty Trash's question quoted the Trash's size when last measured as if it were all that
+  goes, and rows without a folder (system data, macOS's volumes) could be drawn as one.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.
