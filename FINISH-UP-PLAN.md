@@ -215,10 +215,12 @@ Still open: Authenticode signing (the author picks a certificate or Azure Truste
 `bundle > windows > signCommand`); the updater (`tauri-plugin-updater` 2.14.1 is in the cache; its
 key is generated once by the author, like the Sparkle one, the private key kept off the repo and
 the public key in `tauri.conf.json`; every update artifact signed in `release.yml`); the feed
-(`latest.json`) on the latest *published* release, so only publishing ships; a `release.yml`
-Windows job that uploads a draft; a Windows section in the README and the site (`docs/RELEASING.md`
-has one: building, the version, what's still to decide). A Microsoft Store (MSIX) edition
-is out of scope for the first release.
+(`latest.json`) on the latest *published* release, so only publishing ships; the first run of
+`release.yml`'s `windows` job (written: it builds both installers unsigned, attests them and puts
+them on the macOS job's draft, only with `-f windows=true`; its build is the one CI's
+`windows-app` runs, its attestation and upload have never run); the site's page, at the first
+release (the README has a Windows section; `docs/RELEASING.md` has building, the version and
+what's still to decide). A Microsoft Store (MSIX) edition is out of scope for the first release.
 
 ## How to work on it
 

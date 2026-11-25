@@ -27,7 +27,8 @@ window's logic is tested against those files (`node --test app-windows/ui/tests/
 ## Where it stands
 
 Phase 1 (done): the workspace builds, lints and tests on x86_64 Windows (built and run on a
-runner), is type-checked for aarch64 Windows (not run), and the Mac is unchanged. What runs on Windows today is the free-space forecast: `mdif watch`, `status`,
+runner, and on a Windows 11 PC), is type-checked for aarch64 Windows (its tests aren't run there;
+the ARM64 installer and its programs run on a Windows on ARM runner), and the Mac is unchanged. What runs on Windows today is the free-space forecast: `mdif watch`, `status`,
 `forecast`, `alerts` (without write churn's), `keep`, `knowledge` (Ask AI included), `owners`, `incidents` (growth per folder from the NTFS journal), `map`
 (NTFS drives, saying what it can't be exact about), `space` (the Windows drive sorted into kinds:
 see below), `clean` (a project's build output, its packages and finished worktrees, and a
