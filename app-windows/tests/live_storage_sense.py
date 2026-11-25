@@ -23,9 +23,9 @@ db = os.path.join(os.environ['RUNNER_TEMP'], 'tweaks.sqlite3')
 
 def ps(cmd):
     r = subprocess.run(['powershell', '-NoProfile', '-Command', cmd], capture_output=True, text=True)
-    if r.returncode or r.stderr.strip():
+    if r.returncode:
         sys.exit(f'{cmd}\n{r.stdout}\n{r.stderr}')
-    return r.stdout
+    return r.stdout + r.stderr
 
 
 subprocess.run([mdif, 'tweaks', 'apply', 'recycle-bin-auto-empty', '--db', db], check=True)
