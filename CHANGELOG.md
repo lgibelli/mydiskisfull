@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Fixed
+- Clean Up kept what you ticked and unticked only until the disk was measured again: a measure
+  that finished while it was open put the ticks back, and Clean Up then ran what you had unticked.
+  A clean-up that was only partly done now counts as not done at the foot.
+- Clean Up no longer ticks emptying tool caches that don't come back by themselves (Hugging
+  Face's models, Playwright's and Puppeteer's browsers, JetBrains' local history), and emptying
+  one now asks first and keeps Hugging Face's sign-in token and each JetBrains IDE's local history.
+- A `build`, `dist` or `target` folder, or `~/.gradle`, right in the home folder is never build
+  output: a `package.json` left there by `npm install` made it a ticked, permanent delete.
+- Build output that holds a git repository of its own (a deploy clone in `dist`) is left alone,
+  and an npm project's `build` folder counts as build output only when its git ignores it
+  (electron-builder keeps the app's icon and entitlements there).
+- A worktree counted as finished when its ignored files only had the same names as main's, or
+  when it held another worktree still in use: removing it lost what was in them. Every ignored
+  file must now match main's, and a worktree with another inside it is never finished.
+- Worktree checks leave alone a repository whose own git config runs filters or merge drivers
+  (they would run code nobody asked for).
+- Docker's clean-ups (Remove Old Leftovers and the daily tidy) followed the shell's Docker
+  context, which could be a remote engine: they now always reach this Mac's Docker Desktop.
+- `mdif clean` of a link given with a trailing slash (`link/`) emptied what the link points to.
+- `mdif keep add ../target` kept nothing, and `mdif clean src/../target` got past what you keep:
+  `..` is resolved now. A keep list saved with a byte-order mark is read.
+- A disk image or other volume mounted inside a scanned folder was counted with it.
+- Code folders whose names differ only in case (`Projects`, `projects`) were looked at twice:
+  the daily tidy's dry run listed each folder twice, and each finished worktree was suggested
+  twice.
+- After the watcher stopped, the app kept saying the disk would be full within a day, around a
+  date already past.
+- One afternoon of builds could pass the forecast's check that a trend holds without any one
+  day, and raise an alert.
+- Clean-up suggestions planned from the background could open a folder that asks for permission
+  (another app's, a cloud folder's), and a name differing only in case got past that check.
+- Ask AI's requests read `~/.curlrc`, which could send the reply to a file or switch off
+  certificate checks.
+- A period the history couldn't save (the disk full) now shows as a gap.
+
 ## [0.1.5] - 2026-11-10
 
 ### Added

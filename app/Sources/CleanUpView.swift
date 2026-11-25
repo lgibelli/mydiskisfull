@@ -54,13 +54,17 @@ final class CleanUp: ObservableObject {
     var finished: Bool { !running && !states.isEmpty }
 
     /// The list as the disk is now, unless a run is under way or its
-    /// results are on screen.
-    func load(_ m: Monitor, minBytes: Int64, minDays: Int, force: Bool = false) {
+    /// results are on screen. With `keepTicks` (the disk measured again while
+    /// the sheet is open), what the user ticked or unticked stays so: only a
+    /// row new to the list starts ticked or not by itself.
+    func load(_ m: Monitor, minBytes: Int64, minDays: Int, force: Bool = false, keepTicks: Bool = false) {
         guard !running, force || states.isEmpty else { return }
+        let seen = Set(rows.map(\.id))
         states = [:]
         freed = 0
         rows = Self.list(m, minBytes: minBytes, minDays: minDays)
-        chosen = Set(rows.filter(\.safe).map(\.id))
+        let safe = Set(rows.filter(\.safe).map(\.id))
+        chosen = keepTicks ? chosen.intersection(rows.map(\.id)).union(safe.subtracting(seen)) : safe
     }
 
     func run(_ m: Monitor) {
@@ -93,6 +97,8 @@ final class CleanUp: ObservableObject {
                     failed += 1
                 case .success(let r):
                     done.append(row.action)
+                    // Partly done: its row says what wasn't, and so does the notice.
+                    if !r.failed.isEmpty { failed += 1 }
                     freed += r.freed
                     // What it did, without the total: that's at the foot.
                     var said = CleanFlow.said(r).filter { !$0.hasPrefix("The disk has") }
@@ -215,9 +221,9 @@ struct CleanUpSheet: View {
             model.load(monitor, minBytes: Int64(minBytes), minDays: minDays)
         }
         .onDisappear { model.shown = false }
-        // The list follows the disk while nothing has run yet.
+        // The list follows the disk while nothing has run yet, ticks as chosen.
         .onChange(of: monitor.space?.measured) { _, _ in
-            model.load(monitor, minBytes: Int64(minBytes), minDays: minDays)
+            model.load(monitor, minBytes: Int64(minBytes), minDays: minDays, keepTicks: true)
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
             appsChanged += 1
