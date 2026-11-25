@@ -45,9 +45,11 @@ enum Notifier {
     }
 
     /// Asks once; macOS remembers the answer.
-    static func requestAuthorization() {
+    /// `then` once it's answered (or was answered before), on the main actor.
+    static func requestAuthorization(then: (@MainActor () -> Void)? = nil) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             Task { @MainActor in
+                defer { then?() }
                 if let error {
                     log.error("notification authorization: \(error.localizedDescription, privacy: .public)")
                     authorizationProblem = error.localizedDescription

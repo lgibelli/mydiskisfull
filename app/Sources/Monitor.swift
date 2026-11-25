@@ -18,6 +18,8 @@ final class Monitor: ObservableObject {
     @Published private(set) var statusError: String?
     /// The free-space series and what grew and wrote in the last day.
     @Published private(set) var detail: ForecastDetail?
+    /// Why the series couldn't be read, when they couldn't.
+    @Published private(set) var detailError: String?
     @Published private(set) var suggestions: [Suggestion]? { didSet { placed = nil } }
     @Published private(set) var tweaks: [TweakInfo]?
     /// What is never suggested for deleting, cleaning or moving.
@@ -72,6 +74,7 @@ final class Monitor: ObservableObject {
     private var measuredAt: Date?
     private var lookObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var menuObserver: NSObjectProtocol?
     private var watcherChanges: AnyCancellable?
     private var refreshing = false
     /// After a wake the watcher's last sample is old until its next one, so
@@ -101,6 +104,17 @@ final class Monitor: ObservableObject {
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.viewed() }
+        }
+        // The menu bar menu opened (it's a menu, no window comes forward):
+        // what it says is read again if it's older than half a minute, and
+        // shows in the open menu as it comes.
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.lastRefresh.map({ Date().timeIntervalSince($0) > 30 }) ?? true else { return }
+                await self.refresh()
+            }
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -232,8 +246,12 @@ final class Monitor: ObservableObject {
 
     /// The series behind the charts, from the same history: milliseconds.
     func loadDetail() async {
-        if let d = try? await Core.json(ForecastDetail.self, ["forecast", "--series"], timeout: 60) {
-            detail = d
+        do {
+            detail = try await Core.json(ForecastDetail.self, ["forecast", "--series"], timeout: 60)
+            detailError = nil
+        } catch {
+            // Stopped for a newer one (the page's task): that one says.
+            if !Task.isCancelled { detailError = error.localizedDescription }
         }
     }
 

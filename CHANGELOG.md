@@ -179,6 +179,21 @@ All notable changes to this project are documented here. The format is based on
   rotated past a megabyte as they run.
 - The watcher's cost per hour left out the updates it runs early when space comes back, and
   writes per day split the day the clocks change on in two.
+- After a clean-up, the folders above what it cleaned kept their old age, so one could stay
+  "unused" for what had gone; and `mdif space` showing a kept measurement wrote it into the
+  history again at the time it was taken, with the clean-ups since already in it.
+- History said "Not enough history yet" while its chart was still loading or couldn't be read,
+  showed the alert line's key when the line was off the chart, and dated a point on hover
+  by weekday only.
+- Settings showed a blank choice for an alert threshold set with `mdif alerts` to a value not
+  in its list, and the App Store edition's page was called About & Updates with no updates.
+- Welcome showed notifications as allowed when they'd been turned down in the dialog; the menu
+  bar menu could be ten minutes behind when opened; About's CPU figure stayed what it was
+  when the window opened.
+- Map: an automatic map that failed was tried again every minute, the whole disk each time;
+  in the App Store edition a map of a folder no longer chosen was shown as current; the
+  startup disk was always called Macintosh HD; and the caption left out what may be counted
+  twice and what's in use outside any folder shown.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.

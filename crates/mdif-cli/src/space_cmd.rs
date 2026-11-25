@@ -28,6 +28,7 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
         Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
         _ => None,
     };
+    let measured_now = fresh.is_none();
     let mut m = match fresh {
         Some(m) => m,
         None => {
@@ -66,8 +67,13 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
         mdif_core::apfs::local_snapshots(Path::new(mdif_core::map::DATA_ROOT)).unwrap_or_default();
     let r =
         space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
-    // Again for the same measurement replaces it: nothing piles up.
-    record(db, r.measured, &r);
+    // Into the history when measured now. One kept from before is there
+    // already, at its time, and each clean-up patched into it since at
+    // the clean-up's: at its time again, it would say the disk was made
+    // then of what it was after them.
+    if measured_now {
+        record(db, r.measured, &r);
+    }
     if json_out {
         println!("{}", serde_json::to_string_pretty(&r)?);
     } else {

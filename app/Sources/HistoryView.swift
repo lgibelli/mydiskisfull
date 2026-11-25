@@ -27,7 +27,7 @@ struct HistoryPage: View {
                 switch Edition.appStore ? .space : mode {
                 case .space:
                     Form {
-                        FreeSpaceSection(status: s, series: monitor.detail?.series ?? [],
+                        FreeSpaceSection(status: s, series: monitor.detail?.series, error: monitor.detailError,
                                          strata: monitor.detail?.strata ?? [], health: monitor.health, span: span)
                         GrewSections(detail: monitor.detail, span: span)
                     }
@@ -87,7 +87,9 @@ enum Span: String, CaseIterable, Identifiable {
 /// the last hour, day and week.
 private struct FreeSpaceSection: View {
     let status: Status
-    let series: [[Int64]]
+    /// `nil` until they're read: not "not enough history" meanwhile.
+    let series: [[Int64]]?
+    let error: String?
     let strata: [ForecastDetail.Strata]
     let health: Health
     let span: Span
@@ -126,7 +128,13 @@ private struct FreeSpaceSection: View {
             if let p = status.forecast?.paces {
                 PacesRow(paces: p)
             }
-            if points.count < 2 {
+            if series == nil, let error {
+                ContentUnavailableView("Can't read the history", systemImage: "exclamationmark.triangle",
+                                       description: Text(error))
+                    .frame(height: 280)
+            } else if series == nil {
+                ProgressView().frame(maxWidth: .infinity).frame(height: 280)
+            } else if points.count < 2 {
                 ContentUnavailableView("Not enough history yet", systemImage: "chart.xyaxis.line",
                                        description: Text("The chart starts once the watcher has a few samples. It takes one every 5 minutes."))
                     .frame(height: 280)
@@ -134,7 +142,7 @@ private struct FreeSpaceSection: View {
                 VStack(alignment: .leading, spacing: 12) {
                     chart(points, ahead, domain)
                         .frame(height: 300)
-                    legend
+                    legend(domain)
                 }
                 .padding(.vertical, 6)
             }
@@ -298,7 +306,7 @@ private struct FreeSpaceSection: View {
                     .font(.caption)
                     .frame(width: 210)
                 }
-                Text(point.date.formatted(.dateTime.weekday(.abbreviated).hour().minute()))
+                Text(point.date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()))
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10)
@@ -308,7 +316,8 @@ private struct FreeSpaceSection: View {
         }
     }
 
-    private var legend: some View {
+    /// Each key only for what the chart draws (the alert line only within its range).
+    private func legend(_ domain: ClosedRange<Double>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !strata.isEmpty {
                 FlowLayout(spacing: 14, lineSpacing: 5) {
@@ -326,7 +335,7 @@ private struct FreeSpaceSection: View {
                     key(RoundedRectangle(cornerRadius: 2).fill(Color.orange.opacity(0.2)).frame(width: 14, height: 8),
                         "Plausible range")
                 }
-                if floorPct <= 100 {
+                if floorPct <= domain.upperBound {
                     key(Capsule().fill(Color.red.opacity(0.55)).frame(width: 14, height: 1.5),
                         "Alert below \(Format.bytes(status.floor)) free")
                 }
@@ -358,7 +367,7 @@ private struct FreeSpaceSection: View {
 
     private func history() -> [Point] {
         let cutoff = span.seconds.map { Date().timeIntervalSince1970 - $0 } ?? 0
-        return series.compactMap { p in
+        return (series ?? []).compactMap { p in
             guard p.count == 2, Double(p[0]) >= cutoff else { return nil }
             return Point(date: Date(timeIntervalSince1970: TimeInterval(p[0])), pct: used(p[1]))
         }

@@ -561,6 +561,11 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             continue;
         };
         new.name = old.name.clone();
+        // Each folder above's dates, size-weighted, as the new sizes have
+        // them: what went was likely what was old (a clean-up), and the
+        // folder above would stay "unused" as if it were still there.
+        let weight = |d: &Dir| d.mtime.unwrap_or(0) as i128 * d.allocated as i128;
+        let dw = weight(&new) - weight(old);
         let delta = |n: u64, o: u64| n as i128 - o as i128;
         let (da, dp, dc, dk, dt) = (
             delta(new.allocated, old.allocated),
@@ -573,7 +578,9 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
         let apply = |v: &mut u64, d: i128| *v = (*v as i128 + d).max(0) as u64;
         for up in 0..depth {
             if let Some(a) = node_mut(&mut m.tree, &names[..up]) {
+                let w = weight(a) + dw;
                 apply(&mut a.allocated, da);
+                a.mtime = (a.allocated > 0).then(|| (w / a.allocated as i128) as i64);
                 apply(&mut a.private, dp);
                 apply(&mut a.cold, dc);
                 apply(&mut a.cloned, dk);
@@ -3825,11 +3832,18 @@ mod tests {
             .map(|n| n.to_string_lossy().into_owned())
             .collect();
         let mut tree = inner;
+        // Around it, 5 GB a level last changed long ago.
+        const LONG_AGO: i64 = 1_000_000;
+        let mean = |a: (Option<i64>, u64), b: (i64, u64)| {
+            ((a.0.unwrap_or(0) as i128 * a.1 as i128 + b.0 as i128 * b.1 as i128)
+                / (a.1 + b.1) as i128) as i64
+        };
         for n in names[..names.len() - 1].iter().rev() {
             tree = Dir {
                 name: n.clone(),
                 allocated: tree.allocated + 5 * GB,
                 private: tree.private + 5 * GB,
+                mtime: Some(mean((tree.mtime, tree.allocated), (LONG_AGO, 5 * GB))),
                 children: vec![tree],
                 ..Dir::default()
             };
@@ -3851,11 +3865,28 @@ mod tests {
             .unwrap()
             .allocated;
         assert!(gone > 0 && gone < before);
+        let dated = node_mut(&mut m.tree, &names[..names.len() - 1])
+            .unwrap()
+            .mtime
+            .unwrap();
         std::fs::remove_dir_all(&goes).unwrap();
         update(&mut m, &[goes]).unwrap();
         let project = node_mut(&mut m.tree, &names).unwrap();
         assert!(project.children.iter().all(|c| c.name != "goes"));
         assert_eq!(project.allocated, before - gone);
+        // The folder above is dated by what it holds now (to the second:
+        // its mean was rounded).
+        let now = (project.mtime, project.allocated);
+        let above = node_mut(&mut m.tree, &names[..names.len() - 1]).unwrap();
+        let want = mean(now, (LONG_AGO, 5 * GB));
+        assert!(
+            (above.mtime.unwrap() - want).abs() <= 1,
+            "{:?} {want}",
+            above.mtime
+        );
+        // Before, it was dated later than that, by far more than a second:
+        // what went was new, next to 5 GB of old.
+        assert!(dated - want > 10, "{dated} {want}");
         assert_eq!(m.tree.allocated, root_before - gone);
         // Free space is what the disk says now.
         assert_eq!(m.volume.used + m.volume.free, m.volume.total);

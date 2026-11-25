@@ -46,8 +46,11 @@ struct MapContext {
 
     static func name(_ node: Node) -> String {
         let p = userPath(node)
-        return p == "/" ? "Macintosh HD" : URL(fileURLWithPath: p).lastPathComponent
+        return p == "/" ? startupDisk : URL(fileURLWithPath: p).lastPathComponent
     }
+
+    /// The startup disk as Finder names it (it may have been renamed).
+    private static let startupDisk = FileManager.default.displayName(atPath: "/")
 
     /// Red for what grew, green for what shrank, grey for steady or unwatched;
     /// stronger with more bytes (10 MB faint, 10 GB full).
