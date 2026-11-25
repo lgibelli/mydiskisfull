@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.8] - 2026-11-25
+
 ### Added
 - When the daily tidy-up keeps folders out of Time Machine by itself, a notification says which
   ones (up to three by name), and opens the Time Machine page, where one is backed up again.
@@ -824,6 +826,7 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.8]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.8
 [0.1.7]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.7
 [0.1.6]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.6
 [0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5
