@@ -35,11 +35,20 @@ enum TimeMachineText {
         }
     }
 
+    /// "Keeps failing" only when tries didn't finish; overdue (the Mac was
+    /// closed, the disk not plugged in), since when.
+    static func backlogTitle(_ b: TimeMachineReport.Backlog, named: Bool) -> String {
+        if b.failed >= 2 { return named ? "Time Machine keeps failing" : "Backups keep failing" }
+        if let s = b.since { return "No \(named ? "Time Machine " : "")backup since \(when(s))" }
+        return named ? "Time Machine hasn't finished a backup" : "No backup has finished"
+    }
+
     static func backlog(_ b: TimeMachineReport.Backlog) -> String {
         let since = b.since.map { "since \(when($0))" } ?? "yet"
         let tries = b.failed == 0 ? "" : b.failed == 1 ? ": 1 try since didn't finish" : ": \(b.failed) tries since didn't finish"
         let held = b.held > 0 ? " (up to \(Format.bytes(b.held)) now)" : ""
-        return "Time Machine hasn't finished a backup \(since)\(tries). Until one does, it keeps the snapshot it started from, so everything deleted or rewritten since stays on this disk\(held)."
+        let to = b.to.map { " to “\($0)”" } ?? ""
+        return "Time Machine hasn't finished a backup\(to) \(since)\(tries). Until one does, it keeps the snapshot it started from, so everything deleted or rewritten since stays on this disk\(held)."
     }
 
     static func what(_ kind: String) -> String {
@@ -98,6 +107,14 @@ struct TimeMachinePage: View {
                     if !r.changes.isEmpty { ChangesSection(r: r) }
                     RebuildableSection(r: r, monitor: monitor)
                     if !r.skipped.isEmpty { SkippedSection(r: r) }
+                } else if r.unreadable == true {
+                    Section {
+                        ContentUnavailableView {
+                            Label("Time Machine's settings can't be read", systemImage: "lock")
+                        } description: {
+                            Text("Without Full Disk Access, MyDiskIsFull can't tell whether Time Machine has a backup disk, nor what it keeps.")
+                        }
+                    }
                 } else {
                     Section {
                         ContentUnavailableView {
@@ -148,7 +165,7 @@ private struct BackupsSection: View {
         Section {
             if let b = r.backlog {
                 AttentionRow(symbol: "exclamationmark.triangle.fill", color: .orange,
-                             title: "Backups keep failing", text: TimeMachineText.backlog(b)) {
+                             title: TimeMachineText.backlogTitle(b, named: false), text: TimeMachineText.backlog(b)) {
                     EmptyView()
                 }
             }
@@ -407,8 +424,8 @@ private struct RebuildableSection: View {
             }
             if let t = monitor.tidies?.first(where: { $0.id == "backups" }) {
                 Toggle(isOn: Binding(get: { t.on }, set: { monitor.setTidy(t.id, on: $0) })) {
-                    Text("Keep new ones out by themselves")
-                    Text("MyDiskIsFull looks for new ones every 6 hours, agents' worktrees too, and leaves in what you back up. Nothing is deleted.")
+                    Text("Keep them out by themselves")
+                    Text("Every 6 hours MyDiskIsFull keeps out those still backed up, new ones and agents' worktrees too, and leaves in what you let back in. Nothing is deleted.")
                 }
                 .toggleStyle(.switch)
                 .disabled(monitor.tidyBusy.contains(t.id))
@@ -546,9 +563,10 @@ private struct SkippedSection: View {
     }
 
     /// An app left out by name that isn't on this Mac (only apps are
-    /// looked for: a folder in Desktop would ask for permission).
+    /// looked for, and not where looking would ask for permission: one in
+    /// Downloads isn't said to be missing).
     private func missingApp(_ path: String) -> Bool {
-        path.hasSuffix(".app") && !FileManager.default.fileExists(atPath: path)
+        path.hasSuffix(".app") && !Format.mayPrompt(path) && !FileManager.default.fileExists(atPath: path)
     }
 }
 #endif

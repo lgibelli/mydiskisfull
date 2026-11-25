@@ -128,6 +128,13 @@ fn load(dir: &Path) -> Saved {
 /// Atomically, readable by its owner only, and kept out of the backups
 /// (the mark is the file's, so each new one gets it).
 fn save(dir: &Path, s: &Saved) -> Result<()> {
+    reserve(dir, s, 0)?;
+    finish(dir)
+}
+
+/// What [`save`] renames into place: `s`, with `spare` bytes of room after
+/// it, on disk.
+fn reserve(dir: &Path, s: &Saved, spare: usize) -> Result<std::fs::File> {
     ensure_private()?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{FILE}.new"));
@@ -137,12 +144,37 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
         crate::portable::with_mode(options.write(true).create_new(true), 0o600).open(&tmp)?;
     // Before anything is in it (on Windows, its folder's list until now).
     crate::portable::make_private(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(s)?)?;
+    let _ = crate::os::fs::set_excluded_from_backup(&tmp, true);
+    let mut body = serde_json::to_vec_pretty(s)?;
+    // JSON may end in spaces.
+    body.resize(body.len() + spare, b' ');
+    let written = f.write_all(&body).and_then(|()| f.sync_all());
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(f)
+}
+
+/// `s` written over a [`reserve`]d file, in the room made then.
+fn rewrite(mut f: std::fs::File, s: &Saved) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let body = serde_json::to_vec_pretty(s)?;
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&body)?;
+    f.set_len(body.len() as u64)?;
     f.sync_all()?;
-    std::fs::rename(&tmp, dir.join(FILE))?;
+    Ok(())
+}
+
+fn finish(dir: &Path) -> Result<()> {
+    std::fs::rename(dir.join(format!(".{FILE}.new")), dir.join(FILE))?;
     let _ = crate::os::fs::set_excluded_from_backup(&dir.join(FILE), true);
     Ok(())
 }
+
+/// Room for the renewed tokens, more than they take.
+const ROOM: usize = 16 * 1024;
 
 /// `f` while no other process does: a refresh changes the refresh token,
 /// and two at once would spend it twice, which ends the sign-in.
@@ -340,6 +372,21 @@ fn error_of(body: &str) -> (Option<String>, Option<String>) {
 
 // ---------------------------------------------------------------------------
 // Signing in.
+
+/// The sign-in address to print, for when the browser doesn't open: without
+/// the hints that say who signs in (the ID token, with the email and the
+/// plan in it, and the email), which a terminal's scrollback or a screenshot
+/// would keep. They only choose the account in advance.
+pub fn printable_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.starts_with("id_token_hint=") && !kv.starts_with("login_hint="))
+        .collect();
+    format!("{base}?{}", kept.join("&"))
+}
 
 fn authorize_url(
     ends: &Endpoints,
@@ -609,6 +656,19 @@ pub fn sign_in(
     )?;
     if r.status != 200 {
         let (code, _) = error_of(&r.body);
+        if code.as_deref() == Some("invalid_client") && saved.client.is_some() {
+            // This registration isn't OpenAI's any more: forgotten, as a
+            // renewal does, or every try would fail the same way.
+            locked(dir, || {
+                let mut s = load(dir);
+                s.client = None;
+                s.sub = None;
+                s.id_token = None;
+                s.tokens = None;
+                save(dir, &s)
+            })?;
+            bail!("OpenAI no longer knows this Mac's sign-in: sign in again for a new one");
+        }
         bail!(
             "OpenAI didn't finish the sign-in ({}): try again",
             code.unwrap_or_else(|| r.status.to_string())
@@ -654,9 +714,10 @@ pub fn sign_in(
     })
 }
 
-/// Signs out: the refresh token revoked at OpenAI, then the tokens
-/// forgotten here (the registration and the host id stay, for the next
-/// sign-in). False when OpenAI didn't confirm the revocation.
+/// Signs out: the tokens forgotten here first (the registration and the
+/// host id stay, for the next sign-in), so that a revocation that stalls
+/// and is stopped leaves none behind; then the refresh token revoked at
+/// OpenAI. False when OpenAI didn't confirm the revocation.
 pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
     // A token file that can't be trusted here is neither used nor reported as
     // revoked: say what to do with it.
@@ -672,10 +733,13 @@ pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
         let Some(t) = s.tokens.take() else {
             return Ok(true);
         };
-        let revoked = revoke(ends, &t.refresh, s.client.as_deref().unwrap_or_default());
         s.id_token = None;
         save(dir, &s)?;
-        Ok(revoked)
+        Ok(revoke(
+            ends,
+            &t.refresh,
+            s.client.as_deref().unwrap_or_default(),
+        ))
     })
 }
 
@@ -724,7 +788,17 @@ fn access(dir: &Path, ends: &Endpoints, force: bool) -> Result<String> {
         if (!force && t.expires - now > EARLY) || (now < t.earliest_refresh && t.expires > now) {
             return Ok(t.access);
         }
-        let r = http(
+        // Renewing spends the refresh token: the new one has to be kept,
+        // so the room for it is made first. A full disk leaves the old one,
+        // still good, instead of ending the sign-in.
+        let room = reserve(dir, &s, ROOM).context(
+            "The sign-in with ChatGPT can't be renewed while the disk is full: free some space, \
+             then try again",
+        )?;
+        let drop_room = || {
+            let _ = std::fs::remove_file(dir.join(format!(".{FILE}.new")));
+        };
+        let r = match http(
             &format!("{}/api/accounts/oauth/token", ends.auth),
             None,
             Some((
@@ -737,19 +811,37 @@ fn access(dir: &Path, ends: &Endpoints, force: bool) -> Result<String> {
                 ]),
             )),
             60,
-        )?;
-        if r.status == 200 {
-            let reply: TokenReply = serde_json::from_str(&r.body)
-                .context("OpenAI's answer to renewing the sign-in was unexpected")?;
-            if let Some(id) = &reply.id_token {
-                s.id_token = Some(id.clone());
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                drop_room();
+                return Err(e);
             }
-            let fresh = reply.tokens(Some(t.refresh), Some(t.scopes), now)?;
+        };
+        if r.status == 200 {
+            let fresh = serde_json::from_str::<TokenReply>(&r.body)
+                .context("OpenAI's answer to renewing the sign-in was unexpected")
+                .and_then(|reply| {
+                    if let Some(id) = &reply.id_token {
+                        s.id_token = Some(id.clone());
+                    }
+                    reply.tokens(Some(t.refresh), Some(t.scopes), now)
+                });
+            let fresh = match fresh {
+                Ok(f) => f,
+                Err(e) => {
+                    drop_room();
+                    return Err(e);
+                }
+            };
             let access = fresh.access.clone();
             s.tokens = Some(fresh);
-            save(dir, &s)?;
+            rewrite(room, &s)?;
+            finish(dir)?;
             return Ok(access);
         }
+        drop(room);
+        drop_room();
         let (code, _) = error_of(&r.body);
         let code = code.unwrap_or_default();
         if ENDED.contains(&code.as_str()) || code == "invalid_client" {
@@ -1074,6 +1166,22 @@ mod tests {
         assert_eq!(q["client_id"], "oaiapp_1");
         assert!(!q.contains_key("agent_name_hint"));
         assert_eq!(q["id_token_hint"], "a.b.c");
+        // Printed without who it's for; the rest as it is.
+        let url = authorize_url(
+            &ends,
+            &later,
+            "http://127.0.0.1:9/auth/callback",
+            "s",
+            "n",
+            "c",
+        );
+        let shown = printable_url(&url);
+        assert!(
+            !shown.contains("a.b.c") && !shown.contains("login_hint"),
+            "{shown}"
+        );
+        assert!(!shown.contains("example.com"), "{shown}");
+        assert!(shown.contains("client_id=oaiapp_1") && shown.contains("code_challenge="));
         assert_eq!(q["login_hint"], "me@example.com");
         assert_eq!(q["ext_agent_host_id"], "urn:uuid:h");
         assert!(!q.contains_key("prompt"));
@@ -1155,6 +1263,51 @@ mod tests {
         assert!(claims("nonsense", "https://i", "c", "n", 1000).is_err());
     }
 
+    #[test]
+    fn signing_out_forgets_the_tokens_before_asking_openai() {
+        // OpenAI, asked to end the session, finds them gone here already:
+        // a sign-out stopped while it waits for OpenAI leaves none behind.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        let tokens = Tokens {
+            access: "a".into(),
+            refresh: "r".into(),
+            expires: unix_now() + 3600,
+            earliest_refresh: 0,
+            scopes: Vec::new(),
+        };
+        let s = Saved {
+            host: "h".into(),
+            client: Some("oaiapp_1".into()),
+            tokens: Some(tokens),
+            id_token: Some("id".into()),
+            ..Saved::default()
+        };
+        save(&d, &s).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(None));
+        let (seen2, d2) = (seen.clone(), d.clone());
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let mut buf = [0; 4096];
+                let _ = stream.read(&mut buf);
+                let left = load(&d2);
+                *seen2.lock().unwrap() = Some(left.tokens.is_none() && left.id_token.is_none());
+                reply(&mut stream, 500, "text/plain", "down");
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let ends = Endpoints {
+            auth: base.clone(),
+            api: format!("{base}/v1"),
+        };
+        assert!(!sign_out(&d, &ends).unwrap(), "not confirmed");
+        assert_eq!(*seen.lock().unwrap(), Some(true));
+        assert!(load(&d).tokens.is_none());
+        assert_eq!(load(&d).client.as_deref(), Some("oaiapp_1"));
+    }
+
     /// What the stand-in for OpenAI was asked, and how it answers.
     #[derive(Default)]
     struct World {
@@ -1162,6 +1315,8 @@ mod tests {
         /// Refreshes asked for, with the refresh token each sent.
         refreshes: Vec<String>,
         refresh_error: Option<&'static str>,
+        /// What the sign-in's code exchange answers instead of tokens.
+        exchange_error: Option<&'static str>,
         responses: Vec<Value>,
         respond_error: Option<(u16, Value)>,
         revoked: Vec<String>,
@@ -1231,8 +1386,13 @@ mod tests {
                         assert_eq!(f["client_id"], "oaiapp_1");
                         assert_eq!(f["code"], "code-1");
                         assert!(f["code_verifier"].len() >= 43);
-                        let t = token(1, &w);
-                        reply(&mut stream, 200, "application/json", &t);
+                        if let Some(e) = w.exchange_error.take() {
+                            let body = json!({"error": e}).to_string();
+                            reply(&mut stream, 401, "application/json", &body);
+                        } else {
+                            let t = token(1, &w);
+                            reply(&mut stream, 200, "application/json", &t);
+                        }
                     }
                     "/api/accounts/oauth/token" => {
                         assert_eq!(f["grant_type"], "refresh_token");
@@ -1392,6 +1552,18 @@ mod tests {
         world.lock().unwrap().stale.push("access-2".into());
         respond(d, &ends, "i", "q", &schema).unwrap();
         assert_eq!(world.lock().unwrap().refreshes, ["refresh-1", "refresh-2"]);
+        assert!(!d.join(format!(".{FILE}.new")).exists());
+
+        // No room to keep a renewed token (a full disk, here a folder in
+        // the way): it isn't renewed, and the one there is stays.
+        std::fs::create_dir(d.join(format!(".{FILE}.new"))).unwrap();
+        world.lock().unwrap().stale.push("access-3".into());
+        let e = respond(d, &ends, "i", "q", &schema).unwrap_err();
+        assert!(e.to_string().contains("disk is full"), "{e}");
+        assert_eq!(world.lock().unwrap().refreshes, ["refresh-1", "refresh-2"]);
+        assert_eq!(load(d).tokens.unwrap().refresh, "refresh-3");
+        std::fs::remove_dir(d.join(format!(".{FILE}.new"))).unwrap();
+        world.lock().unwrap().stale.clear();
 
         // The route turns down a field: asked again without it, once.
         world.lock().unwrap().respond_error = Some((
@@ -1441,6 +1613,17 @@ mod tests {
         let s = load(d);
         assert!(s.tokens.is_none());
         assert_eq!(s.client.as_deref(), Some("oaiapp_1"));
+
+        // OpenAI dropped the registration: the sign-in forgets it, and the
+        // next one registers afresh instead of failing the same way.
+        world.lock().unwrap().exchange_error = Some("invalid_client");
+        let e = sign_in(d, &ends, &browser(world.clone()), Duration::from_secs(20)).unwrap_err();
+        assert!(e.to_string().contains("sign in again"), "{e}");
+        let s = load(d);
+        assert!(s.client.is_none() && s.tokens.is_none() && s.sub.is_none());
+        assert_eq!(s.host, host);
+        sign_in(d, &ends, &browser(world.clone()), Duration::from_secs(20)).unwrap();
+        assert_eq!(load(d).client.as_deref(), Some("oaiapp_1"));
     }
 
     #[test]

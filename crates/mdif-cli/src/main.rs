@@ -40,6 +40,11 @@ use mdif_core::scan::Options;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Nobody asked for this run (the app's, when a window comes forward or
+    /// a page opens): without Full Disk Access, what would show a privacy
+    /// prompt is left alone, since nobody is there to answer it
+    #[arg(long, global = true, hide = true)]
+    unattended: bool,
 }
 
 #[derive(Subcommand)]
@@ -502,7 +507,14 @@ fn main() -> Result<()> {
     if let Some(name) = not_here_yet(&command_named()) {
         bail!("`mdif {name}` isn't available on this operating system yet");
     }
-    match Cli::parse_from(arguments()).cmd {
+    let cli = Cli::parse_from(arguments());
+    if cli.unattended {
+        let probes = mdif_core::os::sys::access_probes(&watch_cmd::home());
+        mdif_core::privacy::avoid_prompts(
+            mdif_core::os::sys::full_disk_access(&probes) != Some(true),
+        );
+    }
+    match cli.cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
         Cmd::Forecast {
             json,

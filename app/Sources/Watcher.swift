@@ -44,7 +44,7 @@ final class WatcherService: ObservableObject {
         case .notFound: "This copy of the app can't register it. Move the app to Applications."
         default:
             hasCommandLineAgent
-                ? "The one from `mdif agent install` is running; turning this on moves it into the app."
+                ? "The one from `mdif agent install` watches instead; turning this on moves it into the app."
                 : "Nothing is watched while it's off."
         }
     }

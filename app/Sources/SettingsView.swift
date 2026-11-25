@@ -21,7 +21,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .notifications: "Notifications"
         case .kept: "What You Keep"
         case .access: Edition.appStore ? "Disk Access" : "Full Disk Access"
-        case .about: "About & Updates"
+        case .about: Edition.appStore ? "About" : "About & Updates"
         }
     }
 
@@ -53,7 +53,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
                               "folder", "wearing", "writes", "threshold"]
         case .kept: ["keep", "kept", "pin", "never suggest", "exclude"]
         case .access: ["full disk access", "privacy", "permission", "disk", "access"]
-        case .about: ["about", "version", "update", "check"]
+        case .about: Edition.appStore ? ["about", "version"] : ["about", "version", "update", "check"]
         }
     }
 
@@ -238,7 +238,8 @@ struct SettingsView: View {
     private func summary(_ p: SettingsPage) -> String {
         switch p {
         case .watching:
-            var t = [watcher.isOn ? (Edition.appStore ? "Watching while open" : "Watching in the background") : "Not watching"]
+            var t = [watcher.isOn ? (Edition.appStore ? "Watching while open" : "Watching in the background")
+                     : watcher.hasCommandLineAgent ? "Watching with mdif agent" : "Not watching"]
             if atLogin { t.append("opens at login") }
             if !inDock { t.append("out of the Dock") }
             return t.joined(separator: ", ")
@@ -263,7 +264,7 @@ struct SettingsView: View {
     /// A dot on the row when something there needs doing.
     private func attention(_ p: SettingsPage) -> Bool {
         switch p {
-        case .watching: watcher.problem != nil || loginError != nil || !watcher.isOn
+        case .watching: watcher.problem != nil || loginError != nil || !(watcher.isOn || watcher.hasCommandLineAgent)
         case .notifications: notify && Notifier.authorizationProblem != nil
         case .access: monitor.lacksFullDiskAccess
         default: false
@@ -548,6 +549,13 @@ private struct AlertChoices: View {
     private static let sizes: [Int64] = [500_000_000, 1_000_000_000, 2_000_000_000, 5_000_000_000, 10_000_000_000]
     private static let floors: [Int64] = [5_000_000_000, 10_000_000_000, 20_000_000_000, 50_000_000_000]
 
+    /// The choices, with the one set now among them: one set with `mdif
+    /// alerts` that isn't would leave the picker blank.
+    private static func with<T: Comparable>(_ now: T?, _ choices: [T]) -> [T] {
+        guard let now, !choices.contains(now) else { return choices }
+        return (choices + [now]).sorted()
+    }
+
     var body: some View {
         if let a = monitor.status?.alerts {
             Section {
@@ -556,7 +564,7 @@ private struct AlertChoices: View {
                     set: { monitor.setAlert("low_free", $0 == 0 ? "auto" : "\($0)") }
                 )) {
                     Text("Automatic (\(Format.bytes(a.lowFreeAuto)))").tag(Int64(0))
-                    ForEach(Self.floors, id: \.self) { Text(Format.bytes($0)).tag($0) }
+                    ForEach(Self.with(a.lowFree, Self.floors), id: \.self) { Text(Format.bytes($0)).tag($0) }
                 }
             } footer: {
                 Text("Always notified: below this, apps start to fail.")
@@ -570,9 +578,9 @@ private struct AlertChoices: View {
                     get: { a.fullWithinDays },
                     set: { monitor.setAlert("full_within_days", "\($0)") }
                 )) {
-                    Text("a day").tag(1)
-                    Text("3 days").tag(3)
-                    Text("2 weeks").tag(14)
+                    ForEach(Self.with(a.fullWithinDays, [1, 3, 14]), id: \.self) { d in
+                        Text(d == 1 ? "a day" : d == 14 ? "2 weeks" : "\(d) days").tag(d)
+                    }
                 }
                 .disabled(!a.notifyForecast)
             }
@@ -585,7 +593,7 @@ private struct AlertChoices: View {
                     get: { a.growthMin },
                     set: { monitor.setAlert("growth_min", "\($0)") }
                 )) {
-                    ForEach(Self.sizes, id: \.self) { Text(Format.bytes($0)).tag($0) }
+                    ForEach(Self.with(a.growthMin, Self.sizes), id: \.self) { Text(Format.bytes($0)).tag($0) }
                 }
                 .disabled(!a.notifyGrowth)
             } footer: {
@@ -601,7 +609,7 @@ private struct AlertChoices: View {
                     get: { a.churnPerHour },
                     set: { monitor.setAlert("churn_per_hour", "\($0)") }
                 )) {
-                    ForEach(Self.sizes, id: \.self) { Text("\(Format.bytes($0)) an hour").tag($0) }
+                    ForEach(Self.with(a.churnPerHour, Self.sizes), id: \.self) { Text("\(Format.bytes($0)) an hour").tag($0) }
                 }
                 .disabled(!a.notifyChurn)
             } footer: {

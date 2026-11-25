@@ -3,8 +3,9 @@
 //!
 //! **Growth**: an owner folder keeps getting bigger. All of these must hold
 //! over the sustain window:
-//! - its cumulative growth fits a rising line (r² ≥ 0.85, at least 8 points),
-//!   which rules out bursts, staircases and sawtooth caches;
+//! - its cumulative growth fits a rising line (r² ≥ 0.85), seen growing in
+//!   at least 3 of its listings, which rules out bursts (a download or two),
+//!   staircases and sawtooth caches;
 //! - it grew by at least 1 GB, and by at least 5% of its own size;
 //! - it is still growing (the last third of the window grew at least a
 //!   quarter of what the fitted rate predicts) and at its peak (within 2%),
@@ -16,7 +17,9 @@
 //! **Churn**: a process writes far more than the disk keeps, like a stuck
 //! sync client rewriting logs. Over the last hour it wrote at least 1 GB,
 //! steadily (in at least 3 of its 4 quarters), while the volume kept less
-//! than 10% of that, and its name is not on the allowlist.
+//! than 10% of that (the free space lost sample to sample: space that came
+//! back meanwhile, a clean-up, doesn't hide what it kept), and its name is
+//! not on the allowlist.
 //!
 //! The sizes (1 GB grown, 1 GB written in an hour) are the defaults of what
 //! the user may set (`mdif alerts`, see [`crate::alerts`]); the clauses that
@@ -42,13 +45,18 @@ pub struct GrowthParams {
     /// Cumulative growth is evaluated on this grid, so an owner that only
     /// reports every few periods still has evenly spaced points.
     pub grid: i64,
-    pub min_points: usize,
+    /// Listings that saw it grow, at least: a big folder is listed every
+    /// 2 hours, so 3 in the 6 hours; one or two jumps (a download or two)
+    /// can fit a line on the grid, and aren't growth that goes on.
+    pub min_rises: usize,
     pub min_r2: f64,
     pub min_growth: u64,
     pub min_share: f64,
     pub peak_tolerance: f64,
     pub horizon: i64,
-    /// Path components (exact) whose folders may grow as they like.
+    /// Path components whose folders may grow as they like: a name, or
+    /// `*.ext` for any name ending so (every photo library, not only the
+    /// first).
     pub allow: Vec<String>,
 }
 
@@ -57,7 +65,7 @@ impl Default for GrowthParams {
         GrowthParams {
             sustain: 6 * HOUR,
             grid: 1800,
-            min_points: 8,
+            min_rises: 3,
             min_r2: 0.85,
             min_growth: MIN_GROWTH,
             min_share: 0.05,
@@ -65,13 +73,17 @@ impl Default for GrowthParams {
             horizon: 7 * DAY,
             allow: [
                 // Deliberate: photo imports, virtual machines (VMware's folder
-                // on a Mac and on Windows, Parallels, UTM, VirtualBox,
-                // Hyper-V's disks) and games being downloaded (Steam).
-                "Photos Library.photoslibrary",
+                // on a Mac and on Windows and its bundles, Parallels, UTM,
+                // VirtualBox, Hyper-V's disks) and games being downloaded
+                // (Steam). `*.x`: any name ending so.
+                "*.photoslibrary",
                 "Virtual Machines.localized",
                 "Virtual Machines",
+                "*.vmwarevm",
                 "Parallels",
+                "*.pvm",
                 "com.utmapp.UTM",
+                "*.utm",
                 "VirtualBox VMs",
                 "Hyper-V",
                 "Virtual Hard Disks",
@@ -228,10 +240,13 @@ pub fn growth(
     let mut owners: Vec<&String> = series.keys().collect();
     owners.sort();
     for owner in owners {
-        if Path::new(owner)
-            .iter()
-            .any(|c| p.allow.iter().any(|a| c == a.as_str()))
-        {
+        if Path::new(owner).iter().any(|c| {
+            let c = c.to_string_lossy();
+            p.allow.iter().any(|a| match a.strip_prefix('*') {
+                Some(ext) => c.len() > ext.len() && c.ends_with(ext),
+                None => c == a.as_str(),
+            })
+        }) {
             continue;
         }
         let rows: Vec<(i64, i64)> = series[owner]
@@ -256,7 +271,7 @@ pub fn growth(
             );
             g += p.grid;
         }
-        if t.len() < p.min_points {
+        if rows.iter().filter(|(_, b)| *b > 0).count() < p.min_rises {
             continue;
         }
         let Some((slope, r2)) = fit(&t, &y) else {
@@ -267,7 +282,7 @@ pub fn growth(
             continue;
         }
         let peak = y.iter().copied().fold(f64::MIN, f64::max);
-        let last = *y.last().expect("at least min_points");
+        let last = *y.last().expect("the window is on the grid");
         // A third of the window is also the longest a big folder waits to
         // be re-listed, so its staircase still shows growth here.
         let third = y.len() - 1 - (y.len() - 1) / 3;
@@ -317,10 +332,16 @@ pub fn churn(
         .iter()
         .filter(|s| s.ts >= since && s.ts <= now)
         .collect();
-    let consumed = match (in_window.first(), in_window.last()) {
-        (Some(a), Some(b)) => (a.avail as i64 - b.avail as i64).max(0) as u64,
-        _ => return Vec::new(),
-    };
+    if in_window.is_empty() {
+        return Vec::new();
+    }
+    // What the disk kept: free space lost, sample to sample. Space that
+    // came back meanwhile (the Trash emptied, a clean-up, macOS purging)
+    // isn't taken off it, or it would hide a writer that kept what it wrote.
+    let consumed: u64 = in_window
+        .windows(2)
+        .map(|w| w[0].avail.saturating_sub(w[1].avail))
+        .sum();
     let mut out = Vec::new();
     let mut names: Vec<&String> = writes.keys().collect();
     names.sort();
@@ -491,6 +512,14 @@ mod tests {
             )
             .is_empty()
         );
+        // Two downloads, wherever they fall in the window: on the grid some
+        // pairs fit a line, but two jumps aren't growth that goes on.
+        for a in 1..=12 {
+            for b in a + 1..=12 {
+                let two = rows(6, |i| if i == a || i == b { 5 * GB } else { 0 });
+                assert!(grows("/a", two, free, None).is_empty(), "{a} {b}");
+            }
+        }
         // Plateaued: grew, then stopped for the last two hours.
         assert!(grows("/a", rows(6, |i| if i <= 8 { GB } else { 0 }), free, None).is_empty());
         // Sawtooth: grows and is cleared.
@@ -514,6 +543,15 @@ mod tests {
         assert!(grows(photos, rows(6, |_| GB / 2), free, None).is_empty());
         let near = "/Users/me/Pictures/Photos Library.photoslibrary-old";
         assert_eq!(grows(near, rows(6, |_| GB / 2), free, None).len(), 1);
+        // Any photo library or VM bundle, by its extension.
+        for p in [
+            "/Users/me/Pictures/Family.photoslibrary",
+            "/Users/me/Documents/Ubuntu.vmwarevm",
+            "/Users/me/VMs/Windows 11.utm",
+        ] {
+            assert!(grows(p, rows(6, |_| GB / 2), free, None).is_empty(), "{p}");
+        }
+        assert_eq!(grows("/a/.utm", rows(6, |_| GB / 2), free, None).len(), 1);
     }
 
     fn churn_case(per_5min: u64, consumed: u64, minutes: i64) -> Vec<Incident> {
@@ -602,5 +640,44 @@ mod tests {
             },
         ];
         assert!(churn(&writes, &space, NOW, &ChurnParams::default()).is_empty());
+
+        // OneDrive downloads 3 GB that the disk keeps, and in the same hour
+        // the Trash is emptied: free space ends where it started, which
+        // says nothing about what was kept.
+        let writes = HashMap::from([(
+            "OneDrive".to_string(),
+            (1..=12)
+                .map(|i| (NOW - HOUR + i * 300, 250_000_000))
+                .collect(),
+        )]);
+        let at = |ts: i64, avail: i64| SpacePoint {
+            ts,
+            total: 500,
+            avail: avail as u64,
+        };
+        let space = [
+            at(NOW - HOUR, 100 * GB),
+            at(NOW - HOUR / 2, 98 * GB + GB / 2),
+            at(NOW - HOUR / 2 + 300, 101 * GB + GB / 2),
+            at(NOW, 100 * GB),
+        ];
+        assert!(churn(&writes, &space, NOW, &ChurnParams::default()).is_empty());
+        // A sync stuck rewriting the same 3 GB while the Trash is emptied:
+        // still rewriting, and said once, not closed by the clean-up.
+        let writes = HashMap::from([(
+            "stuck-sync".to_string(),
+            (1..=12)
+                .map(|i| (NOW - HOUR + i * 300, 250_000_000))
+                .collect(),
+        )]);
+        let space = [
+            at(NOW - HOUR, 100 * GB),
+            at(NOW - HOUR / 2, 100 * GB - 50_000_000),
+            at(NOW - HOUR / 2 + 300, 102 * GB),
+            at(NOW, 102 * GB - 50_000_000),
+        ];
+        let found = churn(&writes, &space, NOW, &ChurnParams::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].subject, "stuck-sync");
     }
 }

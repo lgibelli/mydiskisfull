@@ -11,6 +11,7 @@ use mdif_core::privacy;
 use mdif_core::store::Store;
 use mdif_core::text::printable;
 use mdif_core::tidy::{self, Id, Outcome, Tidy};
+use mdif_core::timemachine;
 use mdif_core::units::bytes;
 use mdif_core::watch::unix_now;
 use serde_json::{Value, json};
@@ -291,6 +292,19 @@ pub fn run_due(store: &Store, db: &Path, now: i64) {
 /// it out) and the kept measurement. Folders only kept out of Time Machine
 /// changed neither.
 fn cleaned(store: &Store, db: &Path, start: i64, o: &Outcome) {
+    // What it kept out of the backups, so the page still lists each if it
+    // stops looking made again (renamed, moved).
+    let excluded: Vec<PathBuf> = o
+        .done
+        .iter()
+        .filter(|d| d.what == "excluded")
+        .map(|d| d.path.clone())
+        .collect();
+    if !excluded.is_empty()
+        && let Err(e) = timemachine::remember_excluded(store, &excluded, true, &home())
+    {
+        eprintln!("noting what was kept out of Time Machine: {e:#}");
+    }
     let mut changed: Vec<PathBuf> = o
         .done
         .iter()

@@ -555,6 +555,7 @@ dependencies = [
  "clap",
  "mdif-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

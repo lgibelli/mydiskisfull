@@ -64,6 +64,10 @@ pub struct Entry {
     /// The volume the entry lives on (its serial number, as the same bits a
     /// macOS device number would have).
     pub dev: i32,
+    /// A folder another volume is mounted on: never here. Windows mounts one
+    /// on a reparse point, listed as a link ([`Kind::Symlink`]), which no
+    /// walk follows.
+    pub mount_point: bool,
     /// Creation, modification and last access time, seconds since the
     /// epoch. Reading them reads no file, so it changes no access time.
     pub crtime: i64,
@@ -330,6 +334,7 @@ fn entry(dir: &Path, dev: i32, name: OsString, e: &FILE_ID_EXTD_DIR_INFO) -> Ent
         name,
         kind,
         dev,
+        mount_point: false,
         crtime: unix_seconds(e.CreationTime),
         mtime: unix_seconds(e.LastWriteTime),
         atime: unix_seconds(e.LastAccessTime),
@@ -547,6 +552,7 @@ mod tests {
             name: OsString::new(),
             kind: Kind::File,
             dev: 0,
+            mount_point: false,
             crtime: 0,
             mtime: 0,
             atime: 0,

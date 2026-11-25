@@ -336,6 +336,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             switch action {
             #if !APP_STORE
             case Notifier.Action.applyTweak.rawValue:
+                // In the window, on its page: what it asks and how it went
+                // are said there.
+                AppDelegate.show(.prevention)
                 if let tweak { AppDelegate.monitor?.apply(tweak) }
             #endif
             case Notifier.Action.copyCommand.rawValue:

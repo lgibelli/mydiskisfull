@@ -218,6 +218,13 @@ fn last_access_on(policy: u32) -> bool {
     matches!(policy, 0 | 0x8000_0000 | 0x8000_0002)
 }
 
+/// `s` as it is: NTFS keeps a name as it was typed, composed or not
+/// (`é`, or `e` and its accent, are two names), where a Mac's disk takes
+/// both for one.
+pub fn decomposed(s: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(s)
+}
+
 /// Mounted file systems, as (volume name, mount point): `(r"\\?\Volume{...}\",
 /// r"C:\")`. Drives with a letter only.
 pub fn mounts() -> io::Result<Vec<(String, String)>> {

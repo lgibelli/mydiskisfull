@@ -1,0 +1,26 @@
+{
+  "done": [
+    {
+      "path": "/Users/me/Library/Caches/com.spotify.client",
+      "how": "trashed",
+      "to": "/Users/me/.Trash/com.spotify.client",
+      "size": 1234567890,
+      "note": null
+    },
+    {
+      "path": "/Users/me/Library/Developer/CoreSimulator/Devices/ABCD",
+      "how": "reset",
+      "to": null,
+      "size": null,
+      "note": "Erased the iPhone 17 simulator"
+    }
+  ],
+  "failed": [
+    {
+      "path": "/Users/me/Movies",
+      "why": "It isn't something mdif suggests cleaning."
+    }
+  ],
+  "freed": 2345678901,
+  "in_trash": 1234567890
+}

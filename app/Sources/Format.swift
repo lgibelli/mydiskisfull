@@ -111,4 +111,23 @@ enum Format {
         if p.hasPrefix(home + "/") { return "~" + p.dropFirst(home.count) }
         return p
     }
+
+    /// Whether looking at `p` may ask for permission, as `mdif`'s privacy
+    /// check says (privacy.rs): in Desktop, Documents or Downloads, iCloud
+    /// Drive, cloud storage, an app's container, or on another disk. What
+    /// the window draws doesn't look there: a prompt would hold it up.
+    static func mayPrompt(_ p: String) -> Bool {
+        var names = p.split(separator: "/").map { $0.lowercased() }
+        if names.starts(with: ["system", "volumes", "data"]) { names.removeFirst(3) }
+        if names.count >= 2, names[0] == "volumes" { return true }
+        guard names.count >= 3, names[0] == "users" else { return false }
+        let rest = Array(names.dropFirst(2))
+        if ["desktop", "documents", "downloads"].contains(rest[0]) { return true }
+        guard rest.count >= 2, rest[0] == "library" else { return false }
+        switch rest[1] {
+        case "mobile documents", "cloudstorage": return true
+        case "containers", "group containers": return rest.count > 2
+        default: return false
+        }
+    }
 }

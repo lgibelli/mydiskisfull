@@ -348,7 +348,8 @@ struct CleanAction: Decodable {
     /// What it takes comes back by itself and nothing used lately goes:
     /// ticked to start with in Clean Up.
     var safe: Bool? = nil
-    /// The app to quit first: a bundle id, or a name.
+    /// The app to quit first: a bundle id, a bundle id prefix ending in "."
+    /// (any app of a vendor), or a name.
     var quit: String? = nil
     /// What goes, in a line, when the item doesn't say.
     var note: String? = nil
@@ -393,7 +394,7 @@ struct CleanAction: Decodable {
         case "docker-old":
             // Near enough: Docker's filters go by when a container was made,
             // not when it last ran.
-            return "docker container prune --filter until=168h; docker image prune; docker network prune; docker builder prune --filter until=168h"
+            return "docker container prune --filter until=168h; docker image prune; docker builder prune --filter until=168h"
         case "simulators":
             // Each simulator's folder is named by its UDID.
             return paths.map { "xcrun simctl erase \(Self.quote(URL(fileURLWithPath: $0).lastPathComponent))" }
@@ -641,6 +642,9 @@ struct Totals: Decodable {
 /// which `mdif` caches.
 struct SpaceReport: Decodable {
     let measured: Int64
+    /// A clean-up was patched in where it couldn't be measured again: to be
+    /// measured again (`nil` from an older `mdif`).
+    let partial: Bool?
     let tookSecs: Double
     let volume: Volume
     /// Space that returns without deleting anything.
@@ -704,7 +708,9 @@ struct SpaceReport: Decodable {
         /// sent to ask (never one of your own folders).
         let unexplained: String?
 
-        var id: String { path }
+        // Several have no path (system data, the volumes macOS keeps): by
+        // name then, or SwiftUI would take them for one row.
+        var id: String { path.isEmpty ? "#" + name : path }
         func has(_ flag: String) -> Bool { flags.contains(flag) }
     }
 
@@ -942,6 +948,9 @@ struct DockerReport: Decodable {
 struct TimeMachineReport: Decodable {
     /// Whether it has a backup disk.
     let setUp: Bool
+    /// Its settings couldn't be read (no Full Disk Access): whether it has
+    /// one can't be told (`nil` from an older `mdif`).
+    let unreadable: Bool?
     /// Whether it backs up by itself.
     let auto: Bool
     /// Seconds between automatic backups.
@@ -994,6 +1003,9 @@ struct TimeMachineReport: Decodable {
         /// Tries since that didn't finish.
         let failed: Int
         let held: Int64
+        /// The backup disk, when there are several (`nil` from an older
+        /// `mdif`).
+        let to: String?
     }
 
     struct Snapshot: Decodable, Identifiable {
@@ -1059,7 +1071,7 @@ extension TimeMachineReport {
     /// The same, with these folders and changes (a quick look keeps what
     /// the last full one found).
     func with(changes: [Change], rebuildable: [Folder]) -> TimeMachineReport {
-        TimeMachineReport(setUp: setUp, auto: auto, interval: interval, destinations: destinations,
+        TimeMachineReport(setUp: setUp, unreadable: unreadable, auto: auto, interval: interval, destinations: destinations,
                           lastBackup: lastBackup, running: running, tries: tries, backlog: backlog,
                           snapshots: snapshots, held: held, delete: delete, changes: changes,
                           rebuildable: rebuildable, skipped: skipped)

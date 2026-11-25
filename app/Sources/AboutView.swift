@@ -6,7 +6,6 @@ import SwiftUI
 
 struct AboutView: View {
     @ObservedObject var monitor: Monitor
-    @State private var appCPU: Double = 0
 
     /// "0.1.0 (100)".
     static var version: String {
@@ -49,10 +48,14 @@ struct AboutView: View {
                     Text("The watcher's cost shows once it has run.").foregroundStyle(.secondary)
                 }
                 Divider()
-                Text(String(format: "This app has used %.0f ms of CPU since it opened %@ ago, including the commands it ran.",
-                            appCPU, Format.duration(Int64(Date().timeIntervalSince(monitor.launched)))))
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                // Read again every few seconds, with the time it's been open:
+                // not one figure from when the window opened.
+                TimelineView(.periodic(from: .now, by: 5)) { t in
+                    Text(String(format: "This app has used %.0f ms of CPU since it opened %@ ago, including the commands it ran.",
+                                monitor.ownCPUms, Format.duration(Int64(t.date.timeIntervalSince(monitor.launched)))))
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
             }
             .card(padding: 16)
             .padding(.horizontal, 8)
@@ -78,7 +81,6 @@ struct AboutView: View {
         .padding(.bottom, 24)
         .frame(width: 520)
         .background(Theme.canvas)
-        .onAppear { appCPU = monitor.ownCPUms }
     }
 
     private func costNote(_ c: WatcherCost) -> String {

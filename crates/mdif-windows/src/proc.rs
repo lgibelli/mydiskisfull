@@ -8,7 +8,7 @@
 
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
@@ -245,6 +245,15 @@ pub fn force_quit(pid: i32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// A process working in `dir` or a folder in it: none can be told here.
+/// Windows keeps a process's current folder in its own memory, not where
+/// another may ask; and that folder is held open, so removing it fails
+/// rather than taking it from under the process.
+pub fn working_in(dir: &Path) -> Option<String> {
+    let _ = dir;
+    None
 }
 
 /// Whether `pid` is a process that hasn't exited.

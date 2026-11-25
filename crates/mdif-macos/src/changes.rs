@@ -34,6 +34,16 @@ pub fn now(_root: &Path) -> u64 {
     fsevents::current_event_id()
 }
 
+/// The identity of the event history the volume at `volume` keeps: a
+/// position only means something in the one it was taken in (a new one
+/// after its history was purged, or the volume restored, or another Mac's).
+/// `None` when it has none.
+pub fn history(volume: &Path) -> Option<String> {
+    crate::fs::dev_of(volume)
+        .ok()
+        .and_then(fsevents::history_id)
+}
+
 /// Replay the journal under `root` from position `since` to its end,
 /// waiting at most `timeout`. Changes made by this process are left out.
 pub fn replay(root: &Path, since: u64, timeout: Duration) -> io::Result<Replay> {

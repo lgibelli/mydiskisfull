@@ -42,7 +42,11 @@ final class CleanUp: ObservableObject {
     }
 
     @Published private(set) var rows: [Row] = []
-    @Published var chosen: Set<String> = []
+    @Published private(set) var chosen: Set<String> = []
+    /// What you ticked or unticked yourself, by row, while the sheet is
+    /// open: kept when the list follows the disk, so a measure that lands
+    /// meanwhile doesn't tick again a row you unticked.
+    private var yours: [String: Bool] = [:]
     @Published private(set) var states: [String: State] = [:]
     @Published private(set) var running = false
     @Published private(set) var stopping = false
@@ -54,18 +58,30 @@ final class CleanUp: ObservableObject {
     var finished: Bool { !running && !states.isEmpty }
 
     /// The list as the disk is now, unless a run is under way or its
-    /// results are on screen. With `keepTicks` (the disk measured again while
-    /// the sheet is open), what the user ticked or unticked stays so: only a
-    /// row new to the list starts ticked or not by itself.
-    func load(_ m: Monitor, minBytes: Int64, minDays: Int, force: Bool = false, keepTicks: Bool = false) {
+    /// results are on screen. What you ticked or unticked stays so (`yours`):
+    /// only a row new to the list starts ticked or not by itself.
+    func load(_ m: Monitor, minBytes: Int64, minDays: Int, force: Bool = false) {
         guard !running, force || states.isEmpty else { return }
-        let seen = Set(rows.map(\.id))
         states = [:]
         freed = 0
         rows = Self.list(m, minBytes: minBytes, minDays: minDays)
-        let safe = Set(rows.filter(\.safe).map(\.id))
-        chosen = keepTicks ? chosen.intersection(rows.map(\.id)).union(safe.subtracting(seen)) : safe
+        chosen = Set(rows.filter { yours[$0.id] ?? $0.safe }.map(\.id))
     }
+
+    /// You ticked or unticked a row.
+    func choose(_ id: String, _ on: Bool) {
+        yours[id] = on
+        if on { chosen.insert(id) } else { chosen.remove(id) }
+    }
+
+    /// You ticked or unticked them all.
+    func chooseAll(_ on: Bool) {
+        for r in rows { yours[r.id] = on }
+        chosen = on ? Set(rows.map(\.id)) : []
+    }
+
+    /// The sheet opened again: what's ticked starts from what's safe.
+    func forget() { yours = [:] }
 
     func run(_ m: Monitor) {
         let picked = rows.filter { chosen.contains($0.id) }
@@ -82,6 +98,12 @@ final class CleanUp: ObservableObject {
                 states[row.id] = .running
                 if let app = row.action.quit.flatMap(Self.openApp) {
                     states[row.id] = .failed("\(app) is open: quit it first.")
+                    failed += 1
+                    continue
+                }
+                // Already being cleaned from its own button: not twice at once.
+                guard m.cleaning.isDisjoint(with: row.action.paths) else {
+                    states[row.id] = .failed("Already being cleaned up.")
                     failed += 1
                     continue
                 }
@@ -123,9 +145,13 @@ final class CleanUp: ObservableObject {
     /// Stops after the one under way.
     func stop() { stopping = true }
 
-    /// The open app `owner` names: a bundle id, or a name.
+    /// The open app `owner` names: a bundle id, a bundle id prefix ending in
+    /// "." (any app of a vendor: every JetBrains IDE), or a name.
     static func running(_ owner: String) -> NSRunningApplication? {
         let apps = NSWorkspace.shared.runningApplications
+        if owner.hasSuffix(".") {
+            return apps.first { $0.bundleIdentifier?.hasPrefix(owner) == true }
+        }
         return owner.contains(".")
             ? apps.first { $0.bundleIdentifier == owner }
             : apps.first { $0.localizedName == owner }
@@ -218,12 +244,13 @@ struct CleanUpSheet: View {
         .frame(width: 680, height: 600)
         .onAppear {
             model.shown = true
+            model.forget()
             model.load(monitor, minBytes: Int64(minBytes), minDays: minDays)
         }
         .onDisappear { model.shown = false }
         // The list follows the disk while nothing has run yet, ticks as chosen.
         .onChange(of: monitor.space?.measured) { _, _ in
-            model.load(monitor, minBytes: Int64(minBytes), minDays: minDays, keepTicks: true)
+            model.load(monitor, minBytes: Int64(minBytes), minDays: minDays)
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
             appsChanged += 1
@@ -293,7 +320,7 @@ struct CleanUpSheet: View {
                 if !model.rows.isEmpty {
                     let all = picked.count == model.rows.count
                     Button(all ? "Select None" : "Select All") {
-                        model.chosen = all ? [] : Set(model.rows.map(\.id))
+                        model.chooseAll(!all)
                     }
                 }
                 if !picked.isEmpty {
@@ -353,6 +380,11 @@ private struct CleanUpRow: View {
                     if !row.safe, let warn = row.action.confirm {
                         Text(Format.inline(warn)).font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else if row.safe, !["trash", "finder-trash", "restart"].contains(row.action.kind) {
+                        // Ticked to start with: said on the row, not only
+                        // in its tooltip.
+                        Text("Deleted, not moved to the Trash.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     if let app = open, state == nil {
                         HStack(spacing: 8) {
@@ -384,7 +416,7 @@ private struct CleanUpRow: View {
         case nil:
             Toggle("", isOn: Binding(
                 get: { model.chosen.contains(row.id) },
-                set: { if $0 { model.chosen.insert(row.id) } else { model.chosen.remove(row.id) } }
+                set: { model.choose(row.id, $0) }
             ))
             .toggleStyle(.checkbox)
             .labelsHidden()

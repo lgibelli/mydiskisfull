@@ -45,7 +45,8 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
                 Some(s) => t.check(&home, s, now)?,
                 None => None,
             };
-            Ok((st, check))
+            // Applied here: judged by what it recorded.
+            Ok((check.as_ref().map_or(st, |c| c.status), check))
         }) {
             Ok(x) => x,
             Err(e) => {
@@ -195,6 +196,16 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
         let here = if cfg!(windows) { "this PC" } else { "this Mac" };
         bail!("{id} doesn't apply to {here}: {why}.");
     }
+    // It has an app clear out its folders: not what you keep.
+    let keep = crate::keep_cmd::load(db)?;
+    if let Some(entry) = t.kept(&home, &keep) {
+        bail!(
+            "\"{}\" stays off: you keep {}, in what it would clear out ({}).",
+            t.title,
+            printable(entry),
+            t.what
+        );
+    }
     let steps = if dry_run {
         t.plan(&home)?
     } else {
@@ -315,6 +326,7 @@ pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
                 setting: s.setting.clone(),
                 from: s.to.clone(),
                 to: s.from.clone(),
+                at_most: false,
             })
         })
         .collect();

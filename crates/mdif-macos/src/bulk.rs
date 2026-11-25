@@ -32,6 +32,9 @@ const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const ATTR_CMN_FILEID: u32 = 0x0200_0000;
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
+/// `ATTR_DIR_MOUNTSTATUS`: a volume is mounted on this folder.
+const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
 const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
 const ATTR_FILE_TOTALSIZE: u32 = 0x0000_0002;
 const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
@@ -92,8 +95,12 @@ pub enum Kind {
 pub struct Entry {
     pub name: OsString,
     pub kind: Kind,
-    /// Device the entry lives on; differs from its parent at a mount point.
+    /// Device the entry lives on. At a mount point it can be the parent's
+    /// (getattrlistbulk(2) gives the covered folder's attributes there):
+    /// [`Entry::mount_point`] says it.
     pub dev: i32,
+    /// A folder another volume is mounted on: what's in it is that volume's.
+    pub mount_point: bool,
     /// Creation, modification and last access time, seconds since the
     /// epoch. Reading them reads no file, so it changes no access time.
     pub crtime: i64,
@@ -199,7 +206,7 @@ pub fn read_dir_fd_with(fd: &OwnedFd, detail: Detail) -> io::Result<Vec<Entry>> 
             | ATTR_CMN_FLAGS
             | ATTR_CMN_FILEID,
         volattr: 0,
-        dirattr: 0,
+        dirattr: ATTR_DIR_MOUNTSTATUS,
         fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
         forkattr: if full {
             ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID
@@ -262,10 +269,12 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
     c.skip(8); // tv_nsec
     let flags = c.u32()?;
     let inode = c.u64()?;
-    let (nlink, logical, allocated) = if objtype == VDIR {
-        (1, 0, 0)
+    // A folder carries the folder group and no file group; anything else the
+    // other way round.
+    let (mount_point, nlink, logical, allocated) = if objtype == VDIR {
+        (c.u32()? & DIR_MNTSTATUS_MNTPOINT != 0, 1, 0, 0)
     } else {
-        (c.u32()?, c.u64()?, c.u64()?)
+        (false, c.u32()?, c.u64()?, c.u64()?)
     };
     let (private, clone_id) = if full {
         (c.u64()?, c.u64()?)
@@ -298,6 +307,7 @@ fn parse(rec: &[u8], full: bool) -> io::Result<Entry> {
         name: OsString::from_vec(name.to_vec()),
         kind,
         dev,
+        mount_point,
         crtime,
         mtime,
         atime,
@@ -494,6 +504,26 @@ mod tests {
             .unwrap();
         }
         assert_eq!(read_dir(dir.path()).unwrap().len(), 5000);
+    }
+
+    #[test]
+    fn a_folder_a_volume_is_mounted_on_says_so() {
+        // macOS mounts its volumes on these, and `/dev` is devfs.
+        let system = read_dir(Path::new("/System/Volumes")).unwrap();
+        let data = system.iter().find(|e| e.name == "Data").unwrap();
+        assert!(data.mount_point, "{data:?}");
+        let root = read_dir(Path::new("/")).unwrap();
+        let dev = root.iter().find(|e| e.name == "dev").unwrap();
+        assert!(dev.mount_point, "{dev:?}");
+        // A folder of one's own isn't one; a file next to it is read as before.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("f"), vec![1u8; 5000]).unwrap();
+        let listed = read_dir(dir.path()).unwrap();
+        let sub = listed.iter().find(|e| e.name == "sub").unwrap();
+        let f = listed.iter().find(|e| e.name == "f").unwrap();
+        assert!(!sub.mount_point && !f.mount_point);
+        assert_eq!((f.kind, f.logical, f.nlink), (Kind::File, 5000, 1));
     }
 
     #[test]

@@ -85,6 +85,17 @@ pub fn now(root: &Path) -> u64 {
         .map_or(0, |j| cursor(j.UsnJournalID, j.NextUsn))
 }
 
+/// The identity of the change journal of the volume holding `volume`: a
+/// position only means something in the one it was taken in (the journal
+/// deleted and made again starts over). `None` where there is none to read.
+pub fn history(volume: &Path) -> Option<String> {
+    Volume::open(&fs::normalized(volume))
+        .and_then(|v| v.query())
+        .ok()
+        .flatten()
+        .map(|j| format!("{:016x}", j.UsnJournalID))
+}
+
 /// Bits of a saved position that are the USN; the 19 above tag the journal's id
 /// and keep the top bit clear (a position is kept as a signed number). A USN is
 /// a record's offset in the journal, always a multiple of 8, so it's kept in
