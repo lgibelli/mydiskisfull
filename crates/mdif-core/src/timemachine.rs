@@ -33,7 +33,7 @@ use serde::Serialize;
 use crate::clean::{self, Action};
 use crate::keep::Keep;
 use crate::map::DATA_ROOT;
-use crate::owners::{ARTIFACTS, CODE_ROOTS};
+use crate::owners::ARTIFACTS;
 use crate::store::Store;
 use crate::{privacy, scan, space, worktrees};
 
@@ -52,6 +52,41 @@ pub const CACHE_MIN: u64 = 10_000_000;
 /// The mark on a folder you let back into the backups, so the tidy-up
 /// doesn't keep it out again; it goes where the folder goes.
 pub const LET_IN: &str = "io.github.lgibelli.mydiskisfull.backed-up";
+
+/// The same, on the folder it's in, by name: a build tool deletes and
+/// makes again `target` (`cargo clean`), and the mark on it goes with it.
+fn let_in_child(name: &std::ffi::OsStr) -> Option<String> {
+    let mark = format!("{LET_IN}.{}", name.to_str()?);
+    // An extended attribute's name has 127 bytes at most.
+    (mark.len() <= 127).then_some(mark)
+}
+
+/// Whether you let `dir` back into the backups, by its mark or the one its
+/// folder keeps for it. When that can't be read, it counts as yes: nothing
+/// is kept out on a guess.
+pub fn let_in(dir: &Path) -> bool {
+    if mdif_macos::fs::has_mark(dir, LET_IN).unwrap_or(true) {
+        return true;
+    }
+    match (dir.parent(), dir.file_name().and_then(let_in_child)) {
+        (Some(parent), Some(mark)) => mdif_macos::fs::has_mark(parent, &mark).unwrap_or(true),
+        _ => false,
+    }
+}
+
+/// System Settings' own list of folders kept out (`SkipPaths`), as paths:
+/// it writes the ones you add as `~/Downloads`.
+fn settings_skips(skip: &[String], home: &Path) -> Vec<PathBuf> {
+    skip.iter()
+        .map(|p| match p.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                PathBuf::from(format!("{}{rest}", home.to_string_lossy()))
+            }
+            _ => PathBuf::from(p),
+        })
+        .collect()
+}
+
 const CHANGES: usize = 8;
 
 /// What Time Machine's settings say.
@@ -87,10 +122,14 @@ pub struct Destination {
     pub reference: Option<i64>,
 }
 
-/// Reads Time Machine's settings; none when it isn't set up.
-pub fn prefs() -> Option<Prefs> {
-    let bytes = std::fs::read(PREFS).ok()?;
-    parse_prefs(&bytes).ok()
+/// Reads Time Machine's settings; none when it isn't set up, an error
+/// when they are there but can't be read (without Full Disk Access).
+pub fn prefs() -> std::io::Result<Option<Prefs>> {
+    match std::fs::read(PREFS) {
+        Ok(bytes) => Ok(parse_prefs(&bytes).ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub fn parse_prefs(bytes: &[u8]) -> Result<Prefs> {
@@ -234,11 +273,15 @@ pub struct Backlog {
     /// What macOS counts as purgeable, which is at most what the snapshots
     /// hold.
     pub held: u64,
+    /// The backup disk it is, when there are several ([`worst_backlog`]).
+    pub to: Option<String>,
 }
 
 /// Backups are failing when two tries in a row since the last good backup
-/// didn't finish, or none finished in twice the time between them (a day at
-/// least: a Mac that's off doesn't back up). One under way doesn't count.
+/// didn't finish; overdue when none finished in twice the time between
+/// them (a day at least: a Mac that's off doesn't back up), unless one is
+/// under way, catching up. One under way doesn't count as failed. Either
+/// way the snapshot holds what changed since; `failed` says which it is.
 pub fn backlog(
     tries: &[Try],
     interval: i64,
@@ -252,12 +295,39 @@ pub fn backlog(
         .take_while(|t| t.finished.is_none())
         .skip(usize::from(running))
         .count();
-    let overdue = since.is_some_and(|s| now - s > (2 * interval).max(DAY));
+    let overdue = !running && since.is_some_and(|s| now - s > (2 * interval).max(DAY));
     (failed >= 2 || overdue || (since.is_none() && failed > 0)).then_some(Backlog {
         since,
         failed,
         held,
+        to: None,
     })
+}
+
+/// Each backup disk's [`backlog`], judged by its own tries (a USB disk
+/// backing up every hour says nothing of a NAS out of reach for two
+/// weeks), and of those behind, the one furthest behind, named when there
+/// are several: it holds the most in its snapshot.
+pub fn worst_backlog(
+    destinations: &[Destination],
+    interval: i64,
+    running: bool,
+    held: u64,
+    now: i64,
+) -> Option<Backlog> {
+    let several = destinations.len() > 1;
+    destinations
+        .iter()
+        .filter_map(|d| {
+            let (mut finished, mut attempts) = (d.finished.clone(), d.attempts.clone());
+            finished.sort();
+            attempts.sort();
+            let mut b = backlog(&tries(&finished, &attempts), interval, running, held, now)?;
+            b.to = several.then(|| d.name.clone());
+            Some(b)
+        })
+        // Never backed up is furthest behind.
+        .min_by_key(|b| (b.since.unwrap_or(i64::MIN), std::cmp::Reverse(b.failed)))
 }
 
 /// A backup under way.
@@ -309,9 +379,17 @@ pub struct Snapshot {
     pub reference: bool,
 }
 
-/// Time Machine's own among `names`, oldest first, with the reference
-/// marked (within a minute of `reference`).
-pub fn snapshots(names: &[String], reference: Option<i64>) -> Vec<Snapshot> {
+/// The moment a local wall-clock time names (`wall`: its fields read as if
+/// UTC). The offset is the one at that moment, not at `wall` taken as UTC:
+/// in the hours around a change of summer time those differ.
+fn from_wall(wall: i64) -> i64 {
+    let guess = wall - mdif_macos::sys::utc_offset(wall);
+    wall - mdif_macos::sys::utc_offset(guess)
+}
+
+/// Time Machine's own among `names`, oldest first, each backup disk's
+/// reference marked (within a minute of one of `references`).
+pub fn snapshots(names: &[String], references: &[i64]) -> Vec<Snapshot> {
     let mut out: Vec<Snapshot> = names
         .iter()
         .filter_map(|n| {
@@ -324,12 +402,11 @@ pub fn snapshots(names: &[String], reference: Option<i64>) -> Vec<Snapshot> {
                 d.get(13..15)?,
                 d.get(15..17)?
             );
-            let wall = space::parse_time(&text)?;
-            let taken = wall - mdif_macos::sys::utc_offset(wall);
+            let taken = from_wall(space::parse_time(&text)?);
             Some(Snapshot {
                 name: n.clone(),
                 taken,
-                reference: reference.is_some_and(|r| (r - taken).abs() <= 60),
+                reference: references.iter().any(|r| (r - taken).abs() <= 60),
             })
         })
         .collect();
@@ -426,7 +503,8 @@ pub fn rebuildable(dir: &Path) -> Option<&'static str> {
 
 /// The folders in the home folder that are macOS's or yours, not a tool's:
 /// no tool's cache is looked for in them, nor in the code folders
-/// ([`CODE_ROOTS`]), whose projects have build folders instead.
+/// ([`CODE_ROOTS`](crate::owners::CODE_ROOTS), whatever the case), whose
+/// projects have build folders instead.
 const NOT_TOOLS: &[&str] = &[
     "Applications",
     "Desktop",
@@ -441,15 +519,35 @@ const NOT_TOOLS: &[&str] = &[
     ".Trash",
 ];
 
+/// Tools that keep their folder in the home folder under a name of their
+/// own, not a hidden one: Go's (`~/go/pkg/mod/cache`), Flutter's SDK and
+/// conda's.
+const TOOL_HOMES: &[&str] = &["go", "flutter", "miniconda3", "anaconda3", "miniforge3"];
+
 /// The tool's folder in the home folder that `dir` is in (`~/.bun` for
-/// `~/.bun/install/cache`), or `dir` itself; none for what's in macOS's or
-/// your folders ([`NOT_TOOLS`]) or the code folders.
+/// `~/.bun/install/cache`), or `dir` itself: a hidden folder (where tools
+/// keep theirs), or one of [`TOOL_HOMES`]. None for what's in macOS's
+/// folders ([`NOT_TOOLS`]), the code folders, or a folder of yours
+/// (`~/Research/scraper/cache` is yours, however it's named).
 pub fn tool_folder(dir: &Path, home: &Path) -> Option<PathBuf> {
     let Some(Component::Normal(name)) = dir.strip_prefix(home).ok()?.components().next() else {
         return None;
     };
     let name = name.to_str()?;
-    (!NOT_TOOLS.contains(&name) && !CODE_ROOTS.contains(&name)).then(|| home.join(name))
+    let tools = name.starts_with('.') || TOOL_HOMES.contains(&name);
+    (tools && !NOT_TOOLS.contains(&name) && !crate::owners::is_code_root(name))
+        .then(|| home.join(name))
+}
+
+/// Whether `dir` has a `CACHEDIR.TAG` as the standard has it: a file that
+/// starts with its signature, not one that only has the name.
+fn tagged_cache(dir: &Path) -> bool {
+    use std::io::Read;
+    const SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+    let mut head = [0u8; SIGNATURE.len()];
+    std::fs::File::open(dir.join("CACHEDIR.TAG"))
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| head == SIGNATURE)
 }
 
 /// Whether a folder's name says it's a cache: `cache`, `Caches`, npm's
@@ -478,7 +576,7 @@ pub fn download_cache(dir: &Path, home: &Path) -> bool {
     if tool_folder(dir, home).is_none()
         || !privacy::may_open(dir)
         || !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
-        || !(named_cache(name) || dir.join("CACHEDIR.TAG").is_file())
+        || !(named_cache(name) || tagged_cache(dir))
     {
         return false;
     }
@@ -530,6 +628,9 @@ pub fn parse_isexcluded(out: &str) -> Vec<(PathBuf, bool)> {
 pub struct Report {
     /// Whether it has a backup disk.
     pub set_up: bool,
+    /// Its settings are there but couldn't be read (no Full Disk Access):
+    /// whether it is set up can't be told.
+    pub unreadable: bool,
     /// Whether it backs up by itself.
     pub auto: bool,
     /// Seconds between automatic backups.
@@ -559,7 +660,10 @@ pub struct Report {
 /// The backups and the snapshots, without the folders: a few
 /// milliseconds, for a glance (the Overview's alert).
 pub fn glance(home: &Path, now: i64) -> Report {
-    let prefs = prefs().unwrap_or_default();
+    let (prefs, unreadable) = match prefs() {
+        Ok(p) => (p.unwrap_or_default(), false),
+        Err(_) => (Prefs::default(), true),
+    };
     let set_up = !prefs.destinations.is_empty();
     let mut finished: Vec<i64> = Vec::new();
     let mut attempts: Vec<i64> = Vec::new();
@@ -573,8 +677,13 @@ pub fn glance(home: &Path, now: i64) -> Report {
     let running = running();
 
     let names = crate::apfs::local_snapshots(Path::new(DATA_ROOT)).unwrap_or_default();
-    let reference = prefs.destinations.iter().filter_map(|d| d.reference).max();
-    let snaps = snapshots(&names, reference);
+    // Each backup disk keeps the one its next backup starts from.
+    let references: Vec<i64> = prefs
+        .destinations
+        .iter()
+        .filter_map(|d| d.reference)
+        .collect();
+    let snaps = snapshots(&names, &references);
     let free = mdif_macos::fs::statfs(Path::new(DATA_ROOT)).map_or(0, |s| s.avail);
     let held = if snaps.is_empty() {
         0
@@ -582,25 +691,25 @@ pub fn glance(home: &Path, now: i64) -> Report {
         space::purgeable(Path::new(DATA_ROOT), free)
     };
     let backlog = if set_up && prefs.auto {
-        backlog(&all, prefs.interval, running.is_some(), held, now)
+        worst_backlog(
+            &prefs.destinations,
+            prefs.interval,
+            running.is_some(),
+            held,
+            now,
+        )
     } else {
         None
     };
 
-    // System Settings writes the ones you add as `~/Downloads`.
-    let skipped = prefs
-        .skip
-        .iter()
-        .map(|p| match p.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-                format!("{}{rest}", home.to_string_lossy())
-            }
-            _ => p.clone(),
-        })
+    let skipped = settings_skips(&prefs.skip, home)
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
 
     Report {
         set_up,
+        unreadable,
         auto: prefs.auto,
         interval: prefs.interval,
         destinations: prefs.destinations,
@@ -673,19 +782,24 @@ pub fn report(
 
     // Each folder checked once, side by side (git for most); only those
     // still backed up are measured: the others are a count.
-    let found: Vec<(PathBuf, &'static str)> = crate::tidy::artifact_folders(home)
+    let mut found: Vec<(PathBuf, &'static str)> = crate::tidy::artifact_folders(home)
         .into_par_iter()
-        .filter(|p| keep.covering(p).is_none())
+        .filter(|p| !keep.touches(p))
         .filter_map(|p| rebuildable(&p).map(|what| (p, what)))
         .collect::<Vec<_>>()
         .into_iter()
         .chain(
             crate::tidy::tool_caches(home)
                 .into_iter()
-                .filter(|p| keep.covering(p).is_none())
+                .filter(|p| !keep.touches(p))
                 .map(|p| (p, "cache")),
         )
         .collect();
+
+    if let Some(s) = store {
+        let more = kept_out_by_mdif(s, home, &found);
+        found.extend(more);
+    }
 
     let asked: Vec<PathBuf> = changes
         .iter()
@@ -742,6 +856,89 @@ pub fn report(
     r
 }
 
+/// Where the folders mdif kept out of the backups are listed: a JSON list
+/// of `[path, what, inode]`. The inode finds one renamed or moved since (a
+/// `dist` renamed to keep a release, which takes its exclusion with it), so
+/// that it's still on the page, to be let back in.
+pub const EXCLUDED_KEY: &str = "timemachine.excluded";
+
+type Excluded = (String, String, u64);
+
+fn excluded_by_mdif(store: &Store) -> Vec<Excluded> {
+    store
+        .meta(EXCLUDED_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Notes that mdif kept `paths` out of the backups (`exclude`), or let them
+/// back in: for [`kept_out_by_mdif`].
+pub fn remember_excluded(
+    store: &Store,
+    paths: &[PathBuf],
+    exclude: bool,
+    home: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut list = excluded_by_mdif(store);
+    for p in paths {
+        let path = p.to_string_lossy().into_owned();
+        let inode = std::fs::symlink_metadata(p).map_or(0, |m| m.ino());
+        list.retain(|(q, _, i)| *q != path && (inode == 0 || *i != inode));
+        if exclude && inode != 0 {
+            let what = match rebuildable(p) {
+                Some(w) => w,
+                None if download_cache(p, home) => "cache",
+                None => "build",
+            };
+            list.push((path, what.to_string(), inode));
+        }
+    }
+    list.sort();
+    store.set_meta(EXCLUDED_KEY, &serde_json::to_string(&list)?)
+}
+
+/// The folders mdif kept out that aren't among `found`, where they are now
+/// (renamed or moved in the home folder): still folders, and still kept out.
+/// One let back in by hand, or deleted, isn't listed.
+fn kept_out_by_mdif(
+    store: &Store,
+    home: &Path,
+    found: &[(PathBuf, &'static str)],
+) -> Vec<(PathBuf, &'static str)> {
+    use std::os::unix::fs::MetadataExt;
+    let volume = mdif_macos::fs::fsid(home).ok();
+    let mut out: Vec<(PathBuf, &'static str)> = Vec::new();
+    for (path, what, inode) in excluded_by_mdif(store) {
+        let what = match what.as_str() {
+            "dependencies" => "dependencies",
+            "cache" => "cache",
+            _ => "build",
+        };
+        let same = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.ino() == inode);
+        let path = PathBuf::from(path);
+        let now = if privacy::may_open(&path) && same(&path) {
+            Some(path)
+        } else {
+            volume
+                .and_then(|v| mdif_macos::fs::path_of(v, inode).ok())
+                .filter(|p| p.starts_with(home))
+        };
+        let Some(p) = now else { continue };
+        if !found.iter().any(|(f, _)| *f == p)
+            && !out.iter().any(|(f, _)| *f == p)
+            && privacy::may_open(&p)
+            && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir() && m.ino() == inode)
+            && mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false)
+        {
+            out.push((p, what));
+        }
+    }
+    out
+}
+
 /// How many of `folders` inside `dir` Time Machine skips.
 fn kept_out(dir: &Path, folders: &[Folder]) -> usize {
     folders
@@ -752,22 +949,59 @@ fn kept_out(dir: &Path, folders: &[Folder]) -> usize {
 
 /// Keeps `paths` out of the backups (`exclude`) or lets them back in: only
 /// folders a build or an install makes again ([`rebuildable`]) or their
-/// tool downloads again ([`download_cache`]), and never what you keep. One
-/// let back in is marked ([`LET_IN`]). Each comes back done, or refused and
-/// why.
+/// tool downloads again ([`download_cache`]) go out, and never what you
+/// keep or what has something you keep in it. Any folder Time Machine
+/// skips may come back in, one that no longer looks made again too (a
+/// `dist` renamed to keep a release). One let back in is marked
+/// ([`LET_IN`]), and so is the name on its folder. One System Settings
+/// keeps out isn't let in: its list wins. Each comes back done, or refused
+/// and why.
 pub fn set_excluded(
     paths: &[PathBuf],
     exclude: bool,
     keep: &Keep,
     home: &Path,
 ) -> Vec<(PathBuf, Result<(), String>)> {
+    let skips = match exclude {
+        true => Vec::new(),
+        false => prefs()
+            .ok()
+            .flatten()
+            .map(|p| settings_skips(&p.skip, home))
+            .unwrap_or_default(),
+    };
+    set_excluded_with(paths, exclude, keep, home, &skips)
+}
+
+fn set_excluded_with(
+    paths: &[PathBuf],
+    exclude: bool,
+    keep: &Keep,
+    home: &Path,
+    skips: &[PathBuf],
+) -> Vec<(PathBuf, Result<(), String>)> {
     paths
         .iter()
         .map(|p| {
             let shown = crate::text::printable(&p.to_string_lossy()).into_owned();
+            let skipped = || {
+                std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+                    && mdif_macos::fs::excluded_from_backup(p).unwrap_or(false)
+            };
             let done = if exclude && keep.covering(p).is_some() {
                 Err(format!("{shown} is on your keep list."))
-            } else if rebuildable(p).is_none() && !download_cache(p, home) {
+            } else if let Some(s) = skips.iter().find(|s| p.starts_with(s)) {
+                Err(format!(
+                    "Time Machine's own settings keep {} out: take it off the list in System \
+                     Settings › General › Time Machine › Options.",
+                    crate::text::printable(&s.to_string_lossy())
+                ))
+            } else if exclude && keep.touches(p) {
+                Err(format!("{shown} has something on your keep list in it."))
+            } else if rebuildable(p).is_none()
+                && !download_cache(p, home)
+                && (exclude || !skipped())
+            {
                 Err(format!(
                     "{shown} isn't a folder a build, an install or its tool makes again."
                 ))
@@ -775,6 +1009,13 @@ pub fn set_excluded(
                 mdif_macos::fs::set_excluded_from_backup(p, exclude)
                     .and_then(|()| mdif_macos::fs::set_mark(p, LET_IN, !exclude))
                     .map_err(|e| format!("{shown}: {e}"))
+                    .inspect(|()| {
+                        if let (Some(parent), Some(mark)) =
+                            (p.parent(), p.file_name().and_then(let_in_child))
+                        {
+                            let _ = mdif_macos::fs::set_mark(parent, &mark, !exclude);
+                        }
+                    })
             };
             (p.clone(), done)
         })
@@ -839,6 +1080,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../app/Tests/timemachine.json")).unwrap();
         let real = serde_json::to_value(Report {
             set_up: true,
+            unreadable: false,
             auto: true,
             interval: DAY,
             destinations: vec![Destination {
@@ -862,6 +1104,7 @@ mod tests {
                 since: Some(1),
                 failed: 2,
                 held: 1,
+                to: Some(String::new()),
             }),
             snapshots: vec![Snapshot {
                 name: String::new(),
@@ -994,7 +1237,58 @@ mod tests {
         );
         // Daily backups: two days without one is overdue, one isn't.
         assert_eq!(backlog(&[ok(now - DAY - HOUR)], DAY, false, 0, now), None);
-        assert!(backlog(&[ok(now - 3 * DAY)], DAY, false, 0, now).is_some());
+        let late = backlog(&[ok(now - 3 * DAY)], DAY, false, 0, now).unwrap();
+        // Overdue, nothing failed: said so, not "failing".
+        assert_eq!(late.failed, 0);
+        // The lid opened on Monday, the backup under way: catching up.
+        assert_eq!(
+            backlog(&[failed(now - 60), ok(now - 3 * DAY)], HOUR, true, 0, now),
+            None
+        );
+    }
+
+    /// A USB disk backing up every hour, a NAS out of reach for two weeks:
+    /// merged, the NAS's backlog would hide behind the USB disk's backups.
+    #[test]
+    fn each_backup_disk_is_judged_by_its_own_backups() {
+        let now = 1_800_000_000;
+        let hourly: Vec<i64> = (1..48).map(|h| now - h * HOUR).collect();
+        let usb = Destination {
+            name: "USB".into(),
+            finished: hourly.clone(),
+            attempts: hourly.iter().map(|f| f - 600).collect(),
+            reference: Some(now - HOUR),
+            ..Destination::default()
+        };
+        let nas = Destination {
+            name: "NAS".into(),
+            finished: vec![now - 14 * DAY],
+            attempts: vec![now - 14 * DAY - 600],
+            reference: Some(now - 14 * DAY),
+            ..Destination::default()
+        };
+        let both = [usb.clone(), nas.clone()];
+        let b = worst_backlog(&both, HOUR, false, 7, now).unwrap();
+        assert_eq!(
+            (b.to.as_deref(), b.since, b.held),
+            (Some("NAS"), Some(now - 14 * DAY), 7)
+        );
+        // One disk, nothing to name; a healthy one, nothing to say.
+        assert_eq!(worst_backlog(&[nas], HOUR, false, 7, now).unwrap().to, None);
+        assert_eq!(worst_backlog(&[usb], HOUR, false, 7, now), None);
+        // Each disk's reference snapshot is held, not only the newest.
+        let names = [
+            "com.apple.TimeMachine.2026-10-15-093349.local".to_string(),
+            "com.apple.TimeMachine.2026-10-26-231632.local".to_string(),
+            "com.apple.TimeMachine.2026-10-29-081500.local".to_string(),
+        ];
+        let taken: Vec<i64> = snapshots(&names, &[]).iter().map(|s| s.taken).collect();
+        let refs = [taken[0] + 20, taken[2] - 5];
+        let held: Vec<bool> = snapshots(&names, &refs)
+            .iter()
+            .map(|s| s.reference)
+            .collect();
+        assert_eq!(held, [true, false, true]);
     }
 
     #[test]
@@ -1142,11 +1436,11 @@ mod tests {
             "com.apple.TimeMachine.2026-10-27-231632.local".to_string(),
             "com.apple.os.update-MSUPrepareUpdate".to_string(),
         ];
-        let first = snapshots(&names, None);
+        let first = snapshots(&names, &[]);
         assert_eq!(first.len(), 2);
         assert!(first[0].taken < first[1].taken, "oldest first");
         let reference = first[1].taken + 20;
-        let s = snapshots(&names, Some(reference));
+        let s = snapshots(&names, &[reference]);
         let marked: Vec<bool> = s.iter().map(|s| s.reference).collect();
         assert_eq!(marked, [false, true]);
     }
@@ -1216,6 +1510,108 @@ mod tests {
     }
 
     #[test]
+    fn what_mdif_kept_out_is_found_again_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = home.join("devel/app");
+        let dist = app.join("dist");
+        let kept = app.join("node_modules");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        for p in [&dist, &kept] {
+            mdif_macos::fs::set_excluded_from_backup(p, true).unwrap();
+        }
+        remember_excluded(&store, &[dist.clone(), kept.clone()], true, &home).unwrap();
+        // Found as made again: listed there, not twice.
+        let found = [(kept.clone(), "dependencies")];
+        assert_eq!(
+            kept_out_by_mdif(&store, &home, &found),
+            [(dist.clone(), "build")]
+        );
+        // Renamed to keep a release: found where it is now.
+        let release = home.join("Archive/release-1.0");
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::rename(&dist, &release).unwrap();
+        assert_eq!(
+            kept_out_by_mdif(&store, &home, &found),
+            [(release.clone(), "build")]
+        );
+        // Let back in: no longer listed, by mdif or by hand.
+        mdif_macos::fs::set_excluded_from_backup(&release, false).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
+        mdif_macos::fs::set_excluded_from_backup(&release, true).unwrap();
+        remember_excluded(&store, std::slice::from_ref(&release), false, &home).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
+        // Deleted: gone from the list, and nothing else taken for it.
+        std::fs::remove_dir(&kept).unwrap();
+        assert!(kept_out_by_mdif(&store, &home, &[]).is_empty());
+    }
+
+    #[test]
+    fn what_holds_a_kept_folder_stays_in_and_a_renamed_one_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let app = home.join("devel/app");
+        std::fs::create_dir_all(app.join("target/release")).unwrap();
+        std::fs::create_dir_all(app.join("notes")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "").unwrap();
+        let target = app.join("target");
+        // A build of it you keep is inside: it stays backed up.
+        let keep = Keep::parse("~/devel/app/target/release\n", &home);
+        let r = set_excluded(std::slice::from_ref(&target), true, &keep, &home);
+        let why = r[0].1.as_ref().unwrap_err();
+        assert!(why.contains("keep list in it"), "{why}");
+        // Kept out, then renamed to keep it: no longer build output, and
+        // still it may come back in.
+        let none = Keep::default();
+        let r = set_excluded(std::slice::from_ref(&target), true, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        let release = app.join("release-1.0");
+        std::fs::rename(&target, &release).unwrap();
+        assert!(rebuildable(&release).is_none());
+        let r = set_excluded(std::slice::from_ref(&release), false, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        // One Time Machine backs up isn't marked for it by name.
+        let r = set_excluded(&[app.join("notes")], false, &none, &home);
+        assert!(r[0].1.is_err());
+        // Let back in, then deleted and made again by the next build: still
+        // let in, by the name its folder keeps.
+        std::fs::rename(&release, &target).unwrap();
+        let r = set_excluded(std::slice::from_ref(&target), true, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        assert!(!let_in(&target));
+        let r = set_excluded(std::slice::from_ref(&target), false, &none, &home);
+        assert_eq!(r[0].1, Ok(()));
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::create_dir_all(target.join("release")).unwrap();
+        assert!(let_in(&target));
+        assert!(!let_in(&app.join("notes")));
+        // System Settings' own list keeps it out: not let in, and said where.
+        let skips = settings_skips(&["~/devel/app".into()], &home);
+        assert_eq!(skips, [home.join("devel/app")]);
+        let r = set_excluded_with(std::slice::from_ref(&target), false, &none, &home, &skips);
+        let why = r[0].1.as_ref().unwrap_err();
+        assert!(why.contains("System Settings"), "{why}");
+    }
+
+    #[test]
+    fn a_snapshot_named_in_local_time_is_dated_right_around_summer_time() {
+        // Every quarter hour of 2026, in this Mac's time zone: its local
+        // name read back is the same moment, but in the hour the clocks go
+        // back, which two moments share.
+        let start = 1_767_225_600; // 2026-01-01 UTC
+        let wall = |t: i64| t + mdif_macos::sys::utc_offset(t);
+        for t in (start..start + 365 * 86_400).step_by(900) {
+            let w = wall(t);
+            let shared = [-3600, 3600].iter().any(|d| wall(t + d) == w);
+            if !shared {
+                assert_eq!(from_wall(w), t, "{t}");
+            }
+        }
+    }
+
+    #[test]
     fn a_tool_says_which_of_its_folders_are_caches() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
@@ -1232,10 +1628,20 @@ mod tests {
             ".sdk/lib/cache",
             "Documents/cache",
             "devel/app/cache",
+            "go/pkg/mod/cache",
+            "Research/scraper/cache",
+            "Dev/app/cache",
+            ".tool/downloads",
         ] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
-        std::fs::write(home.join(".cargo/registry/CACHEDIR.TAG"), b"x").unwrap();
+        std::fs::write(
+            home.join(".cargo/registry/CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n",
+        )
+        .unwrap();
+        // Named like the tag, without what the standard says is in it.
+        std::fs::write(home.join(".tool/downloads/CACHEDIR.TAG"), b"x").unwrap();
         // A tool's own checkout: what git ignores in it is a cache, what it
         // tracks isn't.
         let sdk = home.join(".sdk");
@@ -1273,13 +1679,16 @@ mod tests {
         mdif_macos::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
 
         // Tagged, named one by its tool, or in an XDG cache home; the
-        // outermost only. Not in .git, macOS's or your folders, or projects.
+        // outermost only. Not in .git, macOS's or your folders (a research
+        // project's `cache` is yours, `~/Dev` a code folder in any case), or
+        // projects.
         let found: Vec<PathBuf> = [
             ".bun/install/cache",
             ".cache",
             ".cargo/registry",
             ".pub-cache",
             ".sdk/bin/cache",
+            "go/pkg/mod/cache",
         ]
         .iter()
         .map(|d| home.join(d))
@@ -1290,6 +1699,10 @@ mod tests {
             Some(home.join(".bun"))
         );
         assert_eq!(tool_folder(&home.join("Documents/cache"), &home), None);
+        assert_eq!(
+            tool_folder(&home.join("Research/scraper/cache"), &home),
+            None
+        );
 
         // Only those are marked; a tool's folder stands for its caches.
         let keep = Keep::default();

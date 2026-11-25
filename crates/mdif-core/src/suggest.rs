@@ -128,6 +128,21 @@ pub fn restarted_key(helper: &str) -> String {
 /// Finished worktrees of a project are suggested once they take this much.
 const WORKTREES_FROM: u64 = 500_000_000;
 
+/// Whether Google's caches folder holds only Chrome's (Chrome, its Beta,
+/// Canary), not Android Studio's. One that can't be listed counts as
+/// Chrome's, the usual case.
+fn only_chrome(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map_or(true, |entries| {
+        entries.flatten().all(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("Chrome")
+                || name.starts_with('.')
+                || !e.file_type().is_ok_and(|t| t.is_dir())
+        })
+    })
+}
+
 /// The fix for growth in `owner`, a folder from [`owners::Rules`].
 pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     let name = owner
@@ -141,9 +156,10 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
             "Library/Application Support/Google" if home.join(CHROME_MODEL).exists() => {
                 return Fix::Tweak("chrome-ai-model");
             }
-            "Library/Caches/Google" | "Library/Caches/com.google.Chrome" => {
-                return Fix::Tweak("chrome-cache");
-            }
+            // Google's caches hold Android Studio's too: Chrome's tweak
+            // only when Chrome's is all there is.
+            "Library/Caches/Google" if only_chrome(owner) => return Fix::Tweak("chrome-cache"),
+            "Library/Caches/com.google.Chrome" => return Fix::Tweak("chrome-cache"),
             ".gradle" => return Fix::Tweak("gradle-caches"),
             ".claude" => return Fix::Tweak("claude-transcripts"),
             "Library/Caches/Homebrew" => return Fix::Tweak("homebrew-downloads"),
@@ -205,6 +221,7 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
         return Fix::Steps(WORKTREE.into());
     }
     if ARTIFACTS.contains(&name.as_str())
+        && clean::in_a_project(owner, home)
         && let Some(project) = owner.parent()
     {
         return artifact(&name, project);
@@ -417,7 +434,7 @@ pub fn gather(
         from_system(home, &st.mount_point, st.avail, &mut out);
     }
     from_worktrees(home, store, now, keep, &mut out);
-    from_leftovers(&mut out);
+    from_leftovers(keep, &mut out);
     out.retain(|s| {
         s.path
             .as_deref()
@@ -477,7 +494,8 @@ fn measure_folders(
             continue;
         };
         let kind = s.action.as_ref().map(|a| a.kind);
-        let build = kind.is_none() && clean::build_output(&path);
+        let build =
+            kind.is_none() && clean::in_a_project(&path, home) && clean::build_output(&path);
         let trash = kind == Some("trash");
         if !(s.measured.followed || build || trash) {
             continue;
@@ -695,6 +713,8 @@ fn from_tweaks(
             continue;
         };
         let check = store.and_then(|s| t.check(home, s, now).ok().flatten());
+        // Applied here: judged by what it recorded ([`tweaks::Tweak::check`]).
+        let status = check.as_ref().map_or(status, |c| c.status);
         let size = check
             .as_ref()
             .and_then(|c| c.size_now())
@@ -809,9 +829,12 @@ fn from_tweaks(
 /// What macOS updates moved aside in `/Users/Shared`, one folder per update:
 /// clutter more than space, and nothing reads it again. Always, not only
 /// when space is tight.
-fn from_leftovers(out: &mut Vec<Suggestion>) {
-    // `mdif clean` leaves alone what you keep.
-    let relocated: Vec<PathBuf> = clean::relocated_in(Path::new(clean::SHARED));
+fn from_leftovers(keep: &Keep, out: &mut Vec<Suggestion>) {
+    // Not what you keep: `mdif clean` would refuse it.
+    let relocated: Vec<PathBuf> = clean::relocated_in(Path::new(clean::SHARED))
+        .into_iter()
+        .filter(|p| !keep.touches(p))
+        .collect();
     if !relocated.is_empty() {
         let size: u64 = relocated.iter().filter_map(|p| scan::size_of(p)).sum();
         let oldest = relocated
@@ -1052,10 +1075,14 @@ fn from_worktrees(
             };
             let note = format!("Their branches stay, and {lost}.");
             // Keeping their folder keeps every one of them.
+            // Not once one in it is kept: the others would go with the
+            // suggestion (one placed on a folder with something kept in it
+            // is dropped).
             let parent = g[0]
                 .path
                 .parent()
-                .filter(|p| g.iter().all(|f| f.path.parent() == Some(*p)));
+                .filter(|p| g.iter().all(|f| f.path.parent() == Some(*p)))
+                .filter(|p| !keep.touches(p));
             (
                 cause,
                 Fix::Run { command, note },
@@ -1333,6 +1360,13 @@ mod tests {
             Fix::Tweak("chrome-cache")
         );
         assert_eq!(fix("/Users/me/.Trash"), Fix::Tweak("trash-auto-empty"));
+        // Android Studio's caches beside Chrome's: not Chrome's tweak.
+        let home = tempfile::tempdir().unwrap();
+        let google = home.path().join("Library/Caches/Google");
+        std::fs::create_dir_all(google.join("Chrome")).unwrap();
+        assert_eq!(for_folder(&google, home.path()), Fix::Tweak("chrome-cache"));
+        std::fs::create_dir_all(google.join("AndroidStudio2024.2")).unwrap();
+        assert_ne!(for_folder(&google, home.path()), Fix::Tweak("chrome-cache"));
         assert!(matches!(
             fix("/Users/me/Library/Caches/com.spotify.client"),
             Fix::Leave(_)
@@ -1396,10 +1430,11 @@ mod tests {
     #[test]
     fn build_output_fixes_know_the_toolchain() {
         let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("it's a project");
-        std::fs::create_dir(&proj).unwrap();
+        let h = dir.path();
+        let proj = h.join("devel/it's a project");
+        std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("Cargo.toml"), "").unwrap();
-        let Fix::Run { command, .. } = for_folder(&proj.join("target"), Path::new(HOME)) else {
+        let Fix::Run { command, .. } = for_folder(&proj.join("target"), h) else {
             panic!()
         };
         // Quoted for the shell, apostrophe included.
@@ -1413,10 +1448,21 @@ mod tests {
         );
         // Without a manifest, `target` is just build output.
         std::fs::remove_file(proj.join("Cargo.toml")).unwrap();
-        assert!(matches!(
-            for_folder(&proj.join("target"), Path::new(HOME)),
-            Fix::Steps(_)
-        ));
+        let Fix::Steps(s) = for_folder(&proj.join("target"), h) else {
+            panic!()
+        };
+        assert!(s.contains("safe to delete"), "{s}");
+
+        // Not in a project in a code folder: a folder of yours that has the
+        // name, not build output.
+        std::fs::write(h.join("package.json"), "{}").unwrap();
+        for mine in ["build", "dist", "devel/build"] {
+            std::fs::create_dir_all(h.join(mine)).unwrap();
+            let Fix::Steps(s) = for_folder(&h.join(mine), h) else {
+                panic!()
+            };
+            assert!(!s.contains("safe to delete"), "{mine}: {s}");
+        }
     }
 
     #[test]

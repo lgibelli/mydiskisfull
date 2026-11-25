@@ -102,7 +102,7 @@ pub fn about(paths: &[PathBuf], json_out: bool) -> Result<()> {
         return Ok(());
     }
     for a in &found {
-        let shown = a.path.replacen(&*home.to_string_lossy(), "~", 1);
+        let shown = crate::watch_cmd::tilde(&a.path);
         match &a.name {
             Some(n) => println!("{}: {}", printable(n), printable(&shown)),
             None => println!("{}", printable(&shown)),
@@ -305,7 +305,10 @@ pub fn sign_in(json_out: bool) -> Result<()> {
     let open = |url: &str| -> Result<()> {
         // Not for the app: what's printed is its error message.
         if !json_out {
-            eprintln!("Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{url}");
+            eprintln!(
+                "Sign in with ChatGPT in your browser. If it doesn't open, go to:\n{}",
+                chatgpt::printable_url(url)
+            );
         }
         let opened = std::process::Command::new("/usr/bin/open")
             .arg(url)
@@ -324,12 +327,17 @@ pub fn sign_in(json_out: bool) -> Result<()> {
     print_account(&a, json_out)
 }
 
+/// What `mdif knowledge sign-out --json` prints (the app's `SignedOut`).
+fn signed_out_value(revoked: bool) -> serde_json::Value {
+    json!({"revoked": revoked})
+}
+
 pub fn sign_out(json_out: bool) -> Result<()> {
     let revoked = chatgpt::sign_out(&dir(), &Endpoints::openai())?;
     if json_out {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({"revoked": revoked}))?
+            serde_json::to_string_pretty(&signed_out_value(revoked))?
         );
     } else if revoked {
         println!("Signed out of ChatGPT.");
@@ -387,4 +395,20 @@ pub fn check(file: &Path, sig: Option<&Path>) -> Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixture the app's contract check decodes for a sign-out, which
+    /// it can't do itself (it would sign the Mac running it out).
+    #[test]
+    fn the_apps_sign_out_fixture_has_the_shape_printed() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../app/Tests/sign-out.json")).unwrap();
+        let keys =
+            |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&fixture), keys(&signed_out_value(true)));
+    }
 }

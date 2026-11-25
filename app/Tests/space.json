@@ -1,5 +1,6 @@
 {
   "measured": 1792583880,
+  "partial": false,
   "took_secs": 38.4,
   "volume": {
     "total": 494384795648,

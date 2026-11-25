@@ -1,5 +1,6 @@
 {
   "set_up": true,
+  "unreadable": false,
   "auto": true,
   "interval": 86400,
   "destinations": [
@@ -33,7 +34,8 @@
   "backlog": {
     "since": 1792622972,
     "failed": 2,
-    "held": 25000000000
+    "held": 25000000000,
+    "to": "NAS"
   },
   "snapshots": [
     {

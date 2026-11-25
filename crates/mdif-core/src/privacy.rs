@@ -46,39 +46,51 @@ pub fn may_open(path: &Path) -> bool {
 /// network volumes prompt; an internal one under /Volumes can't be told
 /// apart by its path).
 pub fn prompts(path: &Path) -> bool {
-    let path = path.strip_prefix(DATA_ROOT).map_or(path, |rest| rest);
-    if path.starts_with("/Volumes") && path.components().count() > 2 {
-        return true;
-    }
-    let names: Vec<&OsStr> = path
+    // By names, whatever their case: the disk ignores it, so
+    // `/users/me/documents` is Documents too.
+    let is = |n: &OsStr, name: &str| n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(name));
+    let mut names: Vec<&OsStr> = path
         .components()
         .filter_map(|c| match c {
             Component::Normal(n) => Some(n),
             _ => None,
         })
         .collect();
+    // The Data volume's prefix taken off leaves the same names.
+    let data: Vec<&str> = DATA_ROOT.split('/').filter(|n| !n.is_empty()).collect();
+    if names.len() >= data.len() && names.iter().zip(&data).all(|(n, d)| is(n, d)) {
+        names.drain(..data.len());
+    }
+    // Another disk: removable and network volumes prompt.
+    if let [volumes, _, ..] = names.as_slice()
+        && is(volumes, "Volumes")
+    {
+        return true;
+    }
     // /Users/<name>/...
     let [users, _, rest @ ..] = names.as_slice() else {
         return false;
     };
-    if *users != "Users" {
+    if !is(users, "Users") {
         return false;
     }
     match rest {
         [top, ..]
             if ["Desktop", "Documents", "Downloads"]
-                .map(OsStr::new)
-                .contains(top) =>
+                .iter()
+                .any(|d| is(top, d)) =>
         {
             true
         }
-        [lib, place, ..] if *lib == "Library" => {
+        [lib, place, ..] if is(lib, "Library") => {
             let inside = rest.len() > 2;
-            match place.to_str() {
-                Some("Mobile Documents" | "CloudStorage") => true,
+            if is(place, "Mobile Documents") || is(place, "CloudStorage") {
+                true
+            } else if is(place, "Containers") || is(place, "Group Containers") {
                 // Listing the containers is fine; looking inside one isn't.
-                Some("Containers" | "Group Containers") => inside,
-                _ => false,
+                inside
+            } else {
+                false
             }
         }
         _ => false,
@@ -101,6 +113,12 @@ mod tests {
             "/Users/me/Library/Group Containers/group.x/Library",
             "/System/Volumes/Data/Users/me/Documents/a",
             "/Volumes/Backup/Users",
+            "/System/Volumes/Data/Volumes/Backup",
+            // Typed in another case: the same folders.
+            "/users/me/documents/a",
+            "/Users/me/DESKTOP",
+            "/system/volumes/data/Users/me/Downloads",
+            "/Users/me/library/containers/net.whatsapp.WhatsApp/Data",
         ] {
             assert!(prompts(Path::new(p)), "{p}");
         }

@@ -355,6 +355,24 @@ struct Walked {
 /// Allocated bytes of `path`, a folder (every file in it once) or a file: 0
 /// when it doesn't exist, `None` when it can't be read.
 pub fn size_of(path: &Path) -> Option<u64> {
+    measured(path, |t| t.allocated, |_| true)
+}
+
+/// What deleting `path` frees at once: a folder's private bytes (what is
+/// hard-linked from outside it, pnpm's store, or cloned, a copy Finder
+/// made, frees nothing or less), a file's allocated ones, none while it
+/// has another link. 0 when it doesn't exist, `None` when it can't be read.
+pub fn freed_by(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    measured(path, |t| t.private, |m| m.nlink() <= 1)
+}
+
+/// A folder's `total`, or a file's allocated bytes when it `counts`.
+fn measured(
+    path: &Path,
+    total: impl Fn(&Totals) -> u64,
+    counts: impl Fn(&std::fs::Metadata) -> bool,
+) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     // Measuring must never download a cloud placeholder.
     mdif_macos::fs::forbid_dataless_materialization().ok()?;
@@ -365,8 +383,9 @@ pub fn size_of(path: &Path) -> Option<u64> {
                 min_node: u64::MAX,
                 big_files: None,
             };
-            scan(path, &opts).ok().map(|s| s.root.totals.allocated)
+            scan(path, &opts).ok().map(|s| total(&s.root.totals))
         }
+        Ok(m) if !counts(&m) => Some(0),
         Ok(m) => Some(m.blocks() * 512),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
         Err(_) => None,
@@ -377,6 +396,8 @@ pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
     if !crate::privacy::may_open(root) {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
+    // Whoever calls it: listing a cloud placeholder must never download it.
+    mdif_macos::fs::forbid_dataless_materialization()?;
     let dev = mdif_macos::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
     bulk::open_dir(root)?;
@@ -444,9 +465,20 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
 
     let mut blocks = Blocks::default();
     let mut subdirs = Vec::new();
+    let mut unreadable = Vec::new();
     for e in entries {
         match e.kind {
-            Kind::Dir if e.dev != ctx.dev => base.other_volumes += 1,
+            // Listed, but its attributes couldn't be read: not a 0-byte
+            // file, nor a folder with nothing in it, but unknown.
+            _ if e.error != 0 => {
+                base.unreadable_dirs += 1;
+                if unreadable.len() < UNREADABLE_SAMPLE {
+                    unreadable.push(dir.join(&e.name));
+                }
+            }
+            // Another volume: by its device, or mounted here though it
+            // shows the covered folder's (`/Volumes/*`, a disk image).
+            Kind::Dir if e.dev != ctx.dev || e.mount_point => base.other_volumes += 1,
             // Cloud-only folder: its listing isn't local; don't fetch it.
             Kind::Dir if e.is_dataless() => base.dataless_files += 1,
             Kind::Dir => subdirs.push(dir.join(&e.name)),
@@ -475,7 +507,6 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
         .map(|d| walk(d, depth + 1, ctx))
         .collect();
     let mut children = Vec::new();
-    let mut unreadable = Vec::new();
     for w in walked {
         base.add(&w.base);
         blocks.merge(w.blocks);
@@ -664,6 +695,25 @@ mod tests {
             (8 * MIB, 0, 8 * MIB)
         );
         assert_eq!(s.real, 8 * MIB);
+    }
+
+    /// A pnpm `node_modules` is hard links into its store: deleting it
+    /// frees nothing, however big it is, and that's what's said freed.
+    #[test]
+    fn what_deleting_frees_leaves_out_what_is_linked_elsewhere() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().join("store/pkg.js");
+        write(&store, 8 * MIB as usize);
+        let modules = t.path().join("app/node_modules");
+        fs::create_dir_all(&modules).unwrap();
+        fs::hard_link(&store, modules.join("pkg.js")).unwrap();
+        write(&modules.join("own.js"), MIB as usize);
+        assert_eq!(size_of(&modules), Some(9 * MIB));
+        assert_eq!(freed_by(&modules), Some(MIB));
+        // A file with another link frees nothing either; one without, all.
+        assert_eq!(freed_by(&modules.join("pkg.js")), Some(0));
+        assert_eq!(freed_by(&modules.join("own.js")), Some(MIB));
+        assert_eq!(freed_by(&t.path().join("gone")), Some(0));
     }
 
     #[test]

@@ -261,6 +261,48 @@ fn disk_io(pid: i32) -> Option<(u64, u64)> {
     rusage(pid).map(|ri| (ri.ri_diskio_bytesread, ri.ri_diskio_byteswritten))
 }
 
+/// The folder `pid` works in (its current directory).
+pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = size_of::<libc::proc_vnodepathinfo>() as c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let raw: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|&c| c as u8)
+        .take_while(|&b| b != 0)
+        .collect();
+    (!raw.is_empty()).then(|| std::ffi::OsStr::from_bytes(&raw).into())
+}
+
+/// A process of the current user's working in `dir` or a folder in it (a
+/// shell, an editor's terminal, an agent's session), by name.
+pub fn working_in(dir: &std::path::Path) -> Option<String> {
+    // As the kernel names folders: links resolved (/var is /private/var).
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let me = unsafe { libc::getuid() };
+    all_pids()
+        .into_iter()
+        .filter(|&pid| owner(pid) == Some(me))
+        .find(|&pid| cwd(pid).is_some_and(|c| c.starts_with(&dir)))
+        .map(name)
+}
+
 fn name(pid: i32) -> String {
     let mut buf = [0u8; 256];
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
@@ -273,6 +315,24 @@ fn name(pid: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_is_found_by_the_folder_it_works_in() {
+        let dir = tempfile::tempdir().unwrap();
+        // As the kernel names it: /private/var, not /var.
+        let d = dir.path().canonicalize().unwrap();
+        assert_eq!(working_in(&d), None);
+        let mut sleeping = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&d)
+            .spawn()
+            .unwrap();
+        assert_eq!(cwd(sleeping.id() as i32).as_deref(), Some(d.as_path()));
+        assert_eq!(working_in(&d).as_deref(), Some("sleep"));
+        sleeping.kill().unwrap();
+        sleeping.wait().unwrap();
+        assert_eq!(working_in(&d), None);
+    }
 
     #[test]
     fn sees_itself_and_its_writes() {

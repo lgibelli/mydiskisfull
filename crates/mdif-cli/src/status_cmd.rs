@@ -72,7 +72,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => s
             .incidents_since(now)?
             .into_iter()
-            .filter(|e| e.closed.is_none())
+            .filter(|e| e.live(now))
             .collect(),
         None => Vec::new(),
     };
@@ -195,10 +195,13 @@ fn applied(store: &Store) -> Result<Vec<Applied>> {
         let Some(tweak) = tweaks::find(&r.id) else {
             continue;
         };
+        // Every record of it not reverted: applied again, the newest
+        // names only what was set again.
+        let open = store.open_tweaks(&r.id)?;
         out.push(Applied {
             tweak,
             at: r.applied,
-            status: tweak.record_status(&r).ok(),
+            status: tweak.records_status(&open).ok(),
         });
     }
     Ok(out)

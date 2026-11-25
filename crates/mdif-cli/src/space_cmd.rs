@@ -28,11 +28,26 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
         Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
         _ => None,
     };
+    let measured_now = fresh.is_none();
     let mut m = match fresh {
         Some(m) => m,
         None => {
-            let m = space::measure(&home())?;
-            if let Err(e) = save(&kept, &m) {
+            let started = unix_now();
+            let mut m = space::measure(&home())?;
+            // What was cleaned up while it measured (and patched into the
+            // kept one meanwhile) may have been listed before it went: it's
+            // measured again in this one too, before this one is kept.
+            let saved = locked(db, || {
+                let since = patched_since(db, started);
+                if !since.is_empty() {
+                    space::update(&mut m, &since)?;
+                }
+                save(&kept, &m)?;
+                // This one has everything patched until now.
+                let _ = std::fs::remove_file(journal(db));
+                Ok(())
+            });
+            if let Err(e) = saved {
                 eprintln!("The measurement isn't kept for next time: {e:#}");
             }
             m
@@ -52,8 +67,13 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
         mdif_core::apfs::local_snapshots(Path::new(mdif_core::map::DATA_ROOT)).unwrap_or_default();
     let r =
         space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
-    // Again for the same measurement replaces it: nothing piles up.
-    record(db, r.measured, &r);
+    // Into the history when measured now. One kept from before is there
+    // already, at its time, and each clean-up patched into it since at
+    // the clean-up's: at its time again, it would say the disk was made
+    // then of what it was after them.
+    if measured_now {
+        record(db, r.measured, &r);
+    }
     if json_out {
         println!("{}", serde_json::to_string_pretty(&r)?);
     } else {
@@ -67,14 +87,24 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
 /// nothing to do; a failure is said and left for Refresh.
 pub fn patch(db: &Path, paths: &[PathBuf]) {
     let kept = file(db);
-    let Some(mut m) = load(&kept) else {
-        return;
+    let patched = locked(db, || {
+        // Said for a measure under way, which saves after this.
+        note_patched(db, paths)?;
+        let Some(mut m) = load(&kept) else {
+            return Ok(None);
+        };
+        space::update(&mut m, paths)?;
+        save(&kept, &m)?;
+        Ok(Some(m))
+    });
+    let m = match patched {
+        Ok(Some(m)) => m,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("The breakdown is measured again only on Refresh: {e:#}");
+            return;
+        }
     };
-    let done = space::update(&mut m, paths).and_then(|()| save(&kept, &m));
-    if let Err(e) = done {
-        eprintln!("The breakdown is measured again only on Refresh: {e:#}");
-        return;
-    }
     if let Ok(keep) = crate::keep_cmd::load(db) {
         // What the disk is made of doesn't depend on the snapshots.
         record(db, unix_now(), &space::report(&m, &keep, &[]));
@@ -93,6 +123,59 @@ fn record(db: &Path, ts: i64, r: &Report) {
     }
 }
 
+/// Holds the lock on the kept measurement while `f` runs: a patch and a
+/// measure's save one after the other, never interleaved.
+fn locked<T>(db: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let dir = db.parent().context("no folder for it")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(db.with_file_name("space.lock"))?;
+    mdif_macos::fs::lock(&lock)?;
+    f()
+}
+
+/// What clean-ups patched into the kept measurement, and when: a line
+/// each, `<unix seconds> <path>`, until a measure that saw them is kept.
+fn journal(db: &Path) -> PathBuf {
+    db.with_file_name("space.patched")
+}
+
+fn note_patched(db: &Path, paths: &[PathBuf]) -> Result<()> {
+    use std::io::Write;
+    let now = unix_now();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal(db))?;
+    for p in paths {
+        // A path with a line break in it can't be noted: it's measured
+        // again with the next measure only.
+        if let Some(p) = p.to_str().filter(|p| !p.contains('\n')) {
+            writeln!(f, "{now} {p}")?;
+        }
+    }
+    Ok(())
+}
+
+/// The paths patched at `since` or after.
+fn patched_since(db: &Path, since: i64) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(journal(db)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = text
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(t, _)| t.parse::<i64>().is_ok_and(|t| t >= since))
+        .map(|(_, p)| PathBuf::from(p))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// A kept measurement, if there is one this version can read.
 pub(crate) fn load(file: &Path) -> Option<Measured> {
     let text = std::fs::read(file).ok()?;
@@ -105,7 +188,8 @@ pub(crate) fn load(file: &Path) -> Option<Measured> {
 fn save(file: &Path, m: &Measured) -> Result<()> {
     let dir = file.parent().context("no folder for it")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let tmp = file.with_extension("tmp");
+    // Its own temporary file: two writers never write into one.
+    let tmp = file.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec(m)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, file).with_context(|| format!("writing {}", file.display()))?;
@@ -122,6 +206,12 @@ fn print(r: &Report, now: i64) {
         ago(now - r.measured),
         r.took_secs
     );
+    if r.partial {
+        println!(
+            "A clean-up since was in a folder too big to measure again in a moment: \
+             `mdif space --refresh` shows it."
+        );
+    }
     if !r.comes_back.is_empty() {
         let back: Vec<String> = r
             .comes_back
@@ -194,5 +284,30 @@ fn ago(secs: i64) -> String {
         s if s < 90 * 60 => format!("{} min", s / 60),
         s if s < 36 * 3600 => format!("{} h", s / 3600),
         s => format!("{} days", s / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_was_patched_while_it_measured_is_measured_again_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("history.db");
+        let started = unix_now();
+        assert!(patched_since(&db, started).is_empty());
+        let derived = PathBuf::from("/Users/me/Library/Developer/Xcode/DerivedData");
+        let spaced = PathBuf::from("/Users/me/devel/my app/target");
+        let broken = PathBuf::from("/Users/me/a\nb");
+        locked(&db, || {
+            note_patched(&db, &[derived.clone(), spaced.clone(), broken])
+        })
+        .unwrap();
+        locked(&db, || note_patched(&db, std::slice::from_ref(&derived))).unwrap();
+        // Once each, spaces kept; a name with a line break can't be noted.
+        assert_eq!(patched_since(&db, started), [derived, spaced]);
+        // Patched before it started: it saw that already.
+        assert!(patched_since(&db, unix_now() + 60).is_empty());
     }
 }

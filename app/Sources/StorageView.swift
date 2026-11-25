@@ -223,7 +223,8 @@ private struct TrashButton: View {
         let path = NSHomeDirectory() + "/.Trash"
         let action = CleanAction(
             kind: "empty-trash", label: "Empty Trash", paths: [path],
-            confirm: "The \(Format.bytes(bytes)) in the Trash is erased for good. You can't undo this.",
+            // Measured a while ago: what was put there since goes too.
+            confirm: "Everything in the Trash is erased for good: \(Format.bytes(bytes)) when the disk was measured, and whatever went there since. You can't undo this.",
             done: nil)
         #if APP_STORE
         // The App Store edition may only read: Finder empties it.
@@ -515,7 +516,8 @@ struct FileIcon: View {
         if ext == "app" {
             // One that isn't installed (left out of the backups by name)
             // would be a blank page.
-            image = FileManager.default.fileExists(atPath: path)
+            // Nor is one where looking would ask for permission.
+            image = !Format.mayPrompt(path) && FileManager.default.fileExists(atPath: path)
                 ? NSWorkspace.shared.icon(forFile: path) : NSWorkspace.shared.icon(for: .applicationBundle)
         } else {
             image = NSWorkspace.shared.icon(for: type ?? (folder ? .folder : .data))

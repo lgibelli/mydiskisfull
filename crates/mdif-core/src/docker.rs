@@ -13,8 +13,9 @@
 //! later ([`settle`]).
 //!
 //! What Docker has had no use for in a week ([`old`]): stopped containers
-//! that haven't run since, images no tag points to, networks no container
-//! uses, and build cache no build has used since. The app's Clean Up removes
+//! that haven't run since, images no tag points to, and build cache no
+//! build has used since; never a network, which takes no room and which a
+//! stopped project's containers need again. The app's Clean Up removes
 //! it ([`clear_old`]), starting Docker Desktop in the background for it when
 //! it isn't running and quitting it again after; the daily tidy-up does too,
 //! but only while Docker is running ([`answers_now`]): it never starts it.
@@ -144,15 +145,23 @@ pub fn report(home: &Path) -> Report {
     };
     let df = match run(
         &docker,
+        home,
         &["system", "df", "-v", "--format", "{{json .}}"],
         60,
     ) {
         Ok(out) => out,
         Err(why) => return failed(why),
     };
-    let totals = run(&docker, &["system", "df", "--format", "{{json .}}"], 60).unwrap_or_default();
+    let totals = run(
+        &docker,
+        home,
+        &["system", "df", "--format", "{{json .}}"],
+        60,
+    )
+    .unwrap_or_default();
     let networks = run(
         &docker,
+        home,
         &[
             "network",
             "ls",
@@ -367,7 +376,7 @@ pub fn remove(r: &Removal, home: &Path) -> Result<(), String> {
         Removal::Network(id) => (vec!["network", "rm", "--", id], 60),
         Removal::Cache => (vec!["builder", "prune", "--all", "--force"], 600),
     };
-    run(&docker, &args, wait).map(|_| ())
+    run(&docker, home, &args, wait).map(|_| ())
 }
 
 /// Waits for Docker Desktop's disk image to give back what was deleted in
@@ -395,9 +404,34 @@ pub fn settle(home: &Path, before: u64) -> u64 {
     before.saturating_sub(last)
 }
 
-/// Runs `docker args`, within `wait` seconds: its output, or why not.
-fn run(docker: &Path, args: &[&str], wait: u64) -> Result<String, String> {
+/// The engine on this Mac ([`answers_now`]'s sockets): Docker Desktop's,
+/// else the usual one, else Docker Desktop's still (it appears once Docker
+/// Desktop has started).
+fn local_engine(home: &Path) -> PathBuf {
+    let desktop = home.join(".docker/run/docker.sock");
+    let usual = PathBuf::from("/var/run/docker.sock");
+    if !desktop.exists() && usual.exists() {
+        usual
+    } else {
+        desktop
+    }
+}
+
+/// Runs `docker args`, within `wait` seconds: its output, or why not. On
+/// this Mac's engine, whatever context the command is set to (`docker
+/// context use` may have left another machine's current): what's listed and
+/// removed is never another engine's. `docker desktop` talks to Docker
+/// Desktop, not to an engine, and is left as it is.
+fn run(docker: &Path, home: &Path, args: &[&str], wait: u64) -> Result<String, String> {
     let mut cmd = Command::new(docker);
+    if args.first() != Some(&"desktop") {
+        let mut host = std::ffi::OsString::from("unix://");
+        host.push(local_engine(home));
+        cmd.env("DOCKER_HOST", host);
+        for var in ["DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"] {
+            cmd.env_remove(var);
+        }
+    }
     cmd.args(args);
     let out = run_within(cmd, Duration::from_secs(wait))
         .ok_or("Docker didn't answer in time. Is Docker Desktop starting or stuck?")?;
@@ -443,12 +477,27 @@ pub fn answers_now(home: &Path) -> bool {
 /// here (and so is to be quit after, [`stop`]).
 pub fn start(home: &Path) -> Result<bool, String> {
     let docker = command(home).ok_or("Docker isn't installed.")?;
-    if answers(&docker) {
+    if answers(&docker, home) {
         return Ok(false);
+    }
+    // Already starting (you opened it a moment ago): waited for, not
+    // started here, so not quit after.
+    if desktop_open() {
+        return match wait_for(&docker, home) {
+            true => Ok(false),
+            false => Err("Docker Desktop didn't answer in three minutes.".into()),
+        };
     }
     // Docker Desktop's own command waits until it's up. Without it (before
     // Docker Desktop 4.37), the app, opened hidden.
-    if run(&docker, &["desktop", "start", "--timeout", "180"], 200).is_err() {
+    if run(
+        &docker,
+        home,
+        &["desktop", "start", "--timeout", "180"],
+        200,
+    )
+    .is_err()
+    {
         let app = Path::new("/Applications/Docker.app");
         if !app.is_dir() {
             return Err(format!(
@@ -464,33 +513,63 @@ pub fn start(home: &Path) -> Result<bool, String> {
             return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
         }
     }
+    if wait_for(&docker, home) {
+        return Ok(true);
+    }
+    // Started here, and not left running half-started.
+    let _ = stop(home);
+    Err("Docker Desktop didn't start in three minutes.".into())
+}
+
+/// Waits for Docker to answer, three minutes at most.
+fn wait_for(docker: &Path, home: &Path) -> bool {
     let begun = Instant::now();
     while begun.elapsed() < Duration::from_secs(180) {
-        if answers(&docker) {
-            return Ok(true);
+        if answers(docker, home) {
+            return true;
         }
         std::thread::sleep(Duration::from_secs(2));
     }
-    Err("Docker Desktop didn't start in three minutes.".into())
+    false
+}
+
+/// Whether Docker Desktop is open, answering or not (still starting).
+fn desktop_open() -> bool {
+    mdif_macos::proc::own_processes()
+        .iter()
+        .any(|p| is_desktop(&p.name))
+}
+
+/// Docker Desktop's app or its backend, by process name (the kernel keeps
+/// 16 characters of it).
+fn is_desktop(name: &str) -> bool {
+    name == "Docker Desktop" || name.starts_with("com.docker.back")
 }
 
 /// Quits Docker Desktop, once it was started for a clean-up.
 pub fn stop(home: &Path) -> Result<(), String> {
     let docker = command(home).ok_or("Docker isn't installed.")?;
-    run(&docker, &["desktop", "stop", "--timeout", "60"], 90).map(|_| ())
+    run(&docker, home, &["desktop", "stop", "--timeout", "60"], 90).map(|_| ())
 }
 
-fn answers(docker: &Path) -> bool {
-    run(docker, &["info", "--format", "{{.ServerVersion}}"], 30).is_ok()
+fn answers(docker: &Path, home: &Path) -> bool {
+    run(
+        docker,
+        home,
+        &["info", "--format", "{{.ServerVersion}}"],
+        30,
+    )
+    .is_ok()
 }
 
 /// What Docker has had no use for in [`OLD_AFTER`], from `r` (Docker's
 /// answer) and when each stopped container last ran (`ran`, by id: its
 /// end, or when it was made if it never ran): stopped containers that
-/// haven't run since, images no tag points to and networks no container
-/// uses. Not tagged images, nor volumes, nor a container Docker didn't say
-/// when it ran. Build cache goes by Docker's own filter
-/// ([`prune_old_cache`]).
+/// haven't run since and images no tag points to. Not tagged images, nor
+/// volumes, nor a container Docker didn't say when it ran, nor networks:
+/// one no container uses may be a stopped project's (no endpoint while
+/// stopped, and `docker compose start` fails without it), and it takes no
+/// room. Build cache goes by Docker's own filter ([`prune_old_cache`]).
 pub fn old(r: &Report, ran: &[(String, i64)], now: i64) -> Vec<Item> {
     let ended = |item: &Item| {
         let id = item.name.strip_prefix(&format!("{PREFIX}container:"))?;
@@ -502,7 +581,6 @@ pub fn old(r: &Report, ran: &[(String, i64)], now: i64) -> Vec<Item> {
         .iter()
         .filter(|c| ended(c).is_some_and(|at| now - at >= OLD_AFTER))
         .chain(&r.dangling)
-        .chain(&r.networks)
         .cloned()
         .collect()
 }
@@ -554,7 +632,7 @@ pub fn old_now(home: &Path, now: i64) -> Result<Vec<Item>, String> {
             "--",
         ];
         args.extend(&ids);
-        parse_ran(&run(&docker, &args, 60)?)
+        parse_ran(&run(&docker, home, &args, 60)?)
     };
     Ok(old(&r, &ran, now))
 }
@@ -581,6 +659,7 @@ pub fn prune_old_cache(home: &Path) -> Result<u64, String> {
     let until = format!("until={}h", OLD_AFTER / 3600);
     let out = run(
         &docker,
+        home,
         &["builder", "prune", "--force", "--filter", &until],
         600,
     )?;
@@ -800,6 +879,49 @@ mod tests {
 
     const HEX: &str = "7185107c3261e393732a218940febb8dac8d1c4655c11082dba754d4c2556cb4";
 
+    #[test]
+    fn docker_desktop_is_told_by_its_processes() {
+        // As the kernel names them (16 characters): the app, its backend.
+        for name in ["Docker Desktop", "com.docker.backe"] {
+            assert!(is_desktop(name), "{name}");
+        }
+        for name in [
+            "docker",
+            "Docker",
+            "com.docker.cli",
+            "com.docker.build",
+            "Docker Helper",
+        ] {
+            assert!(!is_desktop(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn docker_is_asked_on_this_macs_engine_whatever_its_context() {
+        use std::os::unix::fs::PermissionsExt;
+        // A stand-in for the command that says where it was pointed.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("docker");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho \"host=$DOCKER_HOST context=$DOCKER_CONTEXT $*\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".docker/run")).unwrap();
+        std::fs::write(home.join(".docker/run/docker.sock"), "").unwrap();
+        let said = run(&fake, &home, &["container", "rm", "--", "x"], 10).unwrap();
+        let sock = home.join(".docker/run/docker.sock");
+        assert_eq!(
+            said.trim(),
+            format!("host=unix://{} context= container rm -- x", sock.display())
+        );
+        // Docker Desktop's own command isn't an engine's.
+        let said = run(&fake, &home, &["desktop", "stop"], 10).unwrap();
+        assert!(!said.contains("unix://"), "{said}");
+    }
+
     fn df() -> String {
         format!(
             r#"{{"Images":[
@@ -970,15 +1092,17 @@ mod tests {
 
         let r = parse(&df(), TOTALS, NETWORKS).unwrap();
         let names: Vec<String> = old(&r, &ran, now).into_iter().map(|i| i.title).collect();
-        // The stopped container ended 10 days ago, the untagged image, the
-        // network; never the tagged image no container uses.
-        assert_eq!(names, ["db-old", "Untagged image 4105e2bb7b57", "old-net"]);
+        // The stopped container ended 10 days ago, the untagged image;
+        // never the tagged image no container uses, nor the network (a
+        // stopped project's has no container on it, and needs it again).
+        assert_eq!(names, ["db-old", "Untagged image 4105e2bb7b57"]);
+        assert!(!r.networks.is_empty());
         // Stopped yesterday: it stays.
         let lately = [(HEX.to_string(), now - 86_400)];
         let names: Vec<String> = old(&r, &lately, now).into_iter().map(|i| i.title).collect();
-        assert_eq!(names, ["Untagged image 4105e2bb7b57", "old-net"]);
+        assert_eq!(names, ["Untagged image 4105e2bb7b57"]);
         // Docker didn't say when it ran: it stays too.
-        assert_eq!(old(&r, &[], now).len(), 2);
+        assert_eq!(old(&r, &[], now).len(), 1);
     }
 
     #[test]

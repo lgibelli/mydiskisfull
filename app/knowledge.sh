@@ -34,7 +34,18 @@ MDIF=target/release/mdif
 "$MDIF" knowledge check "$LIST"
 URL=$("$MDIF" knowledge --json | plutil -extract url raw -o - -)
 VERSION=$(plutil -extract version raw -o - "$LIST")
-ONLINE=$(curl -sSf --max-time 30 "$URL" 2>/dev/null | plutil -extract version raw -o - - 2>/dev/null || echo 0)
+# None online yet (404) is version 0; any other failure can't tell, and
+# publishing a version that isn't higher would never reach anyone.
+ONLINE_FILE=$(mktemp)
+CODE=$(curl -sS --max-time 30 -o "$ONLINE_FILE" -w '%{http_code}' "$URL") \
+    || { rm -f "$ONLINE_FILE"; die "couldn't reach $URL to compare versions"; }
+case "$CODE" in
+    200) ONLINE=$(plutil -extract version raw -o - "$ONLINE_FILE") \
+             || { rm -f "$ONLINE_FILE"; die "$URL has no version"; } ;;
+    404) ONLINE=0 ;;
+    *) rm -f "$ONLINE_FILE"; die "$URL answered $CODE: its version can't be told" ;;
+esac
+rm -f "$ONLINE_FILE"
 [ "$VERSION" -gt "$ONLINE" ] \
     || die "the list is version $VERSION and $URL is $ONLINE: raise \"version\" in $LIST"
 

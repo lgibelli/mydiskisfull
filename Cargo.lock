@@ -556,6 +556,7 @@ dependencies = [
  "mdif-core",
  "mdif-macos",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

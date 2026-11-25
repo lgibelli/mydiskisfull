@@ -14,6 +14,7 @@ struct WelcomeView: View {
     @State private var notificationsAsked = false
     /// Turned off in System Settings: asking again shows nothing.
     @State private var notificationsDenied = false
+    @State private var notificationsAllowed = false
     /// Lite opens at login only once the switch is turned on: a switch that
     /// starts on isn't consent to App Review (2.4.5(iii), rejected 0.1.2).
     @State private var openAtLogin = !Edition.appStore
@@ -54,7 +55,7 @@ struct WelcomeView: View {
                 }
                 #endif
 
-                StepRow(number: 3, done: notificationsAsked && !notificationsDenied, title: "Allow notifications",
+                StepRow(number: 3, done: notificationsAllowed, title: "Allow notifications",
                         text: notificationsDenied
                             ? "They're turned off for \(Edition.name) in System Settings, so macOS won't ask again. Turn on Allow Notifications there."
                             : "For a runaway filler, the disk filling within two weeks, or a fix something undid. Each is announced once.") {
@@ -62,8 +63,10 @@ struct WelcomeView: View {
                         Button("Open Notification Settings…") { Notifier.openSettings() }
                     } else {
                         Button("Allow…") {
-                            Notifier.requestAuthorization()
                             notificationsAsked = true
+                            // Done once allowed: turned down in the dialog,
+                            // it says how to turn them on instead.
+                            Notifier.requestAuthorization { Task { await checkNotifications() } }
                         }
                         .disabled(notificationsAsked)
                     }
@@ -161,9 +164,8 @@ struct WelcomeView: View {
     private func checkNotifications() async {
         let s = await UNUserNotificationCenter.current().notificationSettings()
         notificationsDenied = s.authorizationStatus == .denied
-        if s.authorizationStatus == .authorized || s.authorizationStatus == .provisional {
-            notificationsAsked = true
-        }
+        notificationsAllowed = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
+        if notificationsAllowed { notificationsAsked = true }
     }
 
     private func finish() {

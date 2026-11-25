@@ -19,6 +19,68 @@ unsafe extern "C" {
     fn fsgetpath(buf: *mut libc::c_char, size: usize, fsid: *mut libc::fsid_t, id: u64) -> isize;
 }
 
+/// `s` in Unicode's decomposed form (NFD): `é` as `e` and its accent. A
+/// name typed by hand is often composed while Finder's is decomposed, and
+/// the disk takes both for the same file. ASCII is as it is.
+pub fn decomposed(s: &str) -> std::borrow::Cow<'_, str> {
+    use std::ffi::c_void;
+    type CFStringRef = *const c_void;
+    const UTF8: u32 = 0x0800_0100;
+    const FORM_D: isize = 0;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithBytes(
+            alloc: *const c_void,
+            bytes: *const u8,
+            len: isize,
+            encoding: u32,
+            external: u8,
+        ) -> CFStringRef;
+        fn CFStringCreateMutableCopy(
+            alloc: *const c_void,
+            max: isize,
+            s: CFStringRef,
+        ) -> *mut c_void;
+        fn CFStringNormalize(s: *mut c_void, form: isize);
+        fn CFStringGetLength(s: CFStringRef) -> isize;
+        fn CFStringGetMaximumSizeForEncoding(len: isize, encoding: u32) -> isize;
+        fn CFStringGetCString(
+            s: CFStringRef,
+            buf: *mut libc::c_char,
+            size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+    if s.is_ascii() || s.contains('\0') {
+        return s.into();
+    }
+    // SAFETY: every CF object made here is released before returning; the
+    // buffer is sized for the string in UTF-8 plus its NUL.
+    unsafe {
+        let made = CFStringCreateWithBytes(std::ptr::null(), s.as_ptr(), s.len() as isize, UTF8, 0);
+        if made.is_null() {
+            return s.into();
+        }
+        let m = CFStringCreateMutableCopy(std::ptr::null(), 0, made);
+        CFRelease(made);
+        if m.is_null() {
+            return s.into();
+        }
+        CFStringNormalize(m, FORM_D);
+        let size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(m), UTF8) + 1;
+        let mut buf = vec![0u8; size.max(1) as usize];
+        let ok = CFStringGetCString(m, buf.as_mut_ptr().cast(), size, UTF8) != 0;
+        CFRelease(m);
+        if !ok {
+            return s.into();
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        buf.truncate(end);
+        String::from_utf8(buf).map_or(s.into(), Into::into)
+    }
+}
+
 /// Stop this process from downloading cloud placeholders (OneDrive, iCloud,
 /// ...) when it touches them. Scanning must never cost network traffic:
 /// listing a dataless directory would otherwise fetch it.
@@ -339,9 +401,44 @@ pub fn lock(file: &std::fs::File) -> io::Result<()> {
     }
 }
 
+/// Takes `file`'s advisory lock if nobody holds it: false, not waiting,
+/// when another open of it does.
+pub fn try_lock(file: &std::fs::File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is the open file's, for as long as `file` is.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(true)
+    } else {
+        match io::Error::last_os_error() {
+            e if e.raw_os_error() == Some(libc::EWOULDBLOCK) => Ok(false),
+            e => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_held_elsewhere_isnt_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let open = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
+        let first = open();
+        assert!(try_lock(&first).unwrap());
+        let second = open();
+        assert!(!try_lock(&second).unwrap());
+        drop(first);
+        assert!(try_lock(&second).unwrap());
+    }
 
     #[test]
     fn a_lock_waits_for_the_one_holding_it() {
@@ -375,6 +472,17 @@ mod tests {
         set_mark(&d, name, false).unwrap();
         set_mark(&d, name, false).unwrap();
         assert!(!has_mark(&d, name).unwrap());
+    }
+
+    #[test]
+    fn names_are_compared_decomposed() {
+        assert_eq!(decomposed("Vid\u{e9}os"), "Vide\u{301}os");
+        assert_eq!(decomposed("Vide\u{301}os"), "Vide\u{301}os");
+        assert_eq!(decomposed("Movies"), "Movies");
+        assert_eq!(
+            decomposed("\u{1f4c1} M\u{fc}nchen"),
+            "\u{1f4c1} Mu\u{308}nchen"
+        );
     }
 
     #[test]

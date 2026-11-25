@@ -63,7 +63,9 @@ pub const HANDLERS: &[Handler] = &[
     // Cloud storage: what each keeps on this Mac besides the cloud, and how
     // to keep less of it. A dated folder is first: it's no account's now.
     Handler {
-        path: "Library/CloudStorage/*-* (*)",
+        // The date and time macOS put in its name: an account named with
+        // brackets ("OneDrive-Org (UK)") is a live one.
+        path: "Library/CloudStorage/*-* (* *:*)",
         title: "A cloud folder left behind",
         what: "A copy macOS kept when this cloud account's folder was removed or reset (the \
                date in its name). Nothing syncs it any more.",
@@ -350,6 +352,13 @@ mod tests {
         assert_eq!(
             cloud("iCloudDrive-iCloudDrive (16-03-26 15:16)"),
             "A cloud folder left behind"
+        );
+        // An account whose own name has brackets is still synced.
+        assert_eq!(cloud("OneDrive-Org (UK)"), "OneDrive's downloads");
+        assert!(
+            !find(Path::new("Library/CloudStorage/OneDrive-Org (UK)"))
+                .unwrap()
+                .trash
         );
         assert!(glob("a*b*c", "aXbYc") && glob("a*", "a") && !glob("a*b", "ab c"));
         // A handler's caches belong to its app.

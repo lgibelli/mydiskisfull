@@ -6,6 +6,200 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Fixed
+- Clean Up ticked tool caches whose tool doesn't download them again by itself: Playwright's and
+  Puppeteer's browsers, LM Studio's, Hugging Face's, llama.cpp's, PyTorch's and Whisper's models,
+  Cypress. They're listed with what emptying one costs, unticked, and the daily tidy-up leaves
+  them. Emptying a tool's cache keeps what in it isn't cache (Hugging Face's sign-in and
+  `accelerate` settings, the JetBrains IDEs' local history of your edits), and waits until its
+  vendor's apps are closed.
+- A folder in the home folder named like build output (`build`, `dist`, `target` outside a
+  project in a code folder) got a ticked Delete Build Output. Only a project's is deleted now; a
+  `build` or `dist` beside a `package.json` only when git ignores it and tracks nothing in it.
+- A worktree holding another live worktree counted as finished, and removing it deleted the
+  inner one's work. It stays now, and so does one whose ignored folders hold anything main's
+  don't (a folder of the same name isn't enough).
+- Docker's clean-ups acted on whatever engine `docker`'s current context pointed at, a remote
+  one included. They act on this Mac's Docker Desktop only, and leave networks alone (Remove
+  Old Leftovers no longer removes those of stopped projects).
+- Clean Up ticked its defaults again when a measurement landed while it was open, so a row you
+  had unticked could be deleted. What you tick or untick stays.
+- The forecast said "Not filling up" for days after a clean-up done in several steps outside the
+  app. Steps one after another count as one.
+- Measuring went into volumes mounted inside a folder, and deleting the folder would have gone
+  into them too. A mount point is skipped, and a folder with a volume mounted in it isn't
+  deleted.
+- The backups tidy-up kept your own folders out of Time Machine when they were named like a
+  cache. Only a tool's folders (a dot-folder in the home folder, or one with a cache's
+  `CACHEDIR.TAG`) are kept out now, never one that holds something you keep.
+- A folder kept out of Time Machine, then renamed or moved to keep it (a `dist` renamed
+  `release-1.0`), took its exclusion along, vanished from the Time Machine page and couldn't be
+  let back in. MyDiskIsFull notes what it keeps out: the page still lists such a folder where it
+  is now, with Back Up, and `mdif timemachine include` lets it back in.
+- The simulators tidy-up erased every unavailable simulator; only those whose runtime is gone
+  are now, and none when simctl lists none.
+- Switching pages stopped a measurement under way (Storage, Time Machine): it finishes now.
+- The app's automatic runs could make macOS ask for access to Desktop, Documents, Downloads or
+  another app's data; they skip what would ask, as the watcher does. So do the watcher's daily
+  tidy-ups when they run git, which now gives up after 30 seconds and never fetches what a
+  partial clone lacks.
+- Asking ChatGPT and updating the folder list read your `~/.curlrc`: they don't now.
+- Signing out of ChatGPT could be stopped before the sign-in was forgotten here, and the app
+  said "Signed out" anyway. It's forgotten first, and the app says what mdif answered. A
+  sign-in OpenAI no longer recognises is forgotten too, so signing in again works instead of
+  failing the same way each time.
+- Measuring the whole disk again overwrote what a clean-up had just freed in Storage's
+  breakdown, and a breakdown patched only in part showed the difference as System data. A
+  clean-up's patch is kept until a measurement covers it, and a partial one is measured again
+  in the background.
+- A keep list entry with `..` in it protected another path than the one named.
+- The growth incident's "at least 8 points" rule could never fail; it now needs three samples
+  that grew. Two downloads in a day no longer raise it.
+- The growth incident and the History chart read free space without what macOS can purge,
+  while the forecast counted it: all three count it now.
+- "Keeps rewriting the disk" could be said of something that kept what it wrote, when a
+  clean-up in the same hour gave the space back: what the disk kept is the free space it lost,
+  sample to sample, now.
+- A file growing out of control directly in a folder like `~/Library` never counted as that
+  folder's growth.
+- `~/Code` and `~/code` (and `~/Projects`, `~/projects`) were walked twice, so each finished
+  worktree in them was suggested twice.
+- `mdif clean` with a trailing slash (`~/dist/`) followed a link to a folder, and the keep list
+  didn't see the folder it pointed to.
+- A watcher started with `mdif agent install` that had stopped looked healthy, and Settings
+  said "Not watching" while it ran.
+- Restart picked a same-named helper of another app.
+- What a clean-up frees was counted in allocated bytes, so a folder of hard links or clones
+  "freed" gigabytes it didn't.
+- A tweak set to a value at least as good as its own (a shorter Claude Code transcript
+  retention, a smaller Homebrew cleanup age) counted as undone, and Turn On would have set the
+  tweak's looser value.
+- One heavy day could raise a "filling faster" warning when it fell across two of the 24-hour
+  blocks the forecast leaves out one at a time to check itself: it's left out whole now.
+- Overview and Storage worked out which suggestion goes with which item for every row each time
+  they were drawn; once for each measurement now.
+- Time Machine said backups "keep failing" when they were only overdue, or while one was
+  running; and a backup disk that hadn't backed up for days was hidden by another that had.
+  Each disk is judged by its own backups now, and the warning names it when there are several.
+- Time Machine's page said "isn't set up" when its settings couldn't be read without Full Disk
+  Access; it says so instead.
+- A zoomed folder map kept showing the old measurement after measuring again, and zooming into
+  "Code - Insiders" could stop at "Code".
+- After moving to a new Mac, or once macOS had purged its file-change journal, the watcher
+  could resume from an event that wasn't there and miss what grew.
+- A "cloud folder left behind" (with Move to Trash) could be a live one whose name has
+  brackets: "OneDrive-Org (UK)". Only a name with the date macOS gives it counts now.
+- Emptying the Trash ignored the keep list (Storage offers Keep on its row).
+- A folder an app's handler suggests moving to the Trash, or emptying, still had the button with
+  something you keep inside it.
+- Deleting build output didn't check that nothing runs from it (a tool started from
+  `target/release`).
+- Moving what's in /Users/Shared to the Trash asks Finder, which a signed build couldn't do
+  without the Apple Events entitlement.
+- Clean Up could clean what was already being cleaned from its own button.
+- A Keep It that failed was only logged: it's said now. A notice that went right no longer
+  replaces one that went wrong before it was read.
+- History showed a spinner for ever when the watcher's history couldn't be read.
+- The pointer could stay a hand after the Storage bar it was over went away.
+- Measuring for a macOS update's leftovers, and `mdif timemachine`, could download cloud
+  placeholders. No walk does now.
+- A worktree with a session still open in it (a shell, an agent waiting for an answer) counted
+  as finished once it had been quiet for a while, and so did one with changes git was told not
+  to look at (skip-worktree, assume-unchanged). Neither is now.
+- An Android system image was offered for deleting, ticked, when where the emulators are
+  couldn't be seen (`ANDROID_AVD_HOME` set only in your shell) or one of them was on a disk that
+  wasn't connected. Then which images are used isn't known, and they stay.
+- Removing Docker's leftovers quit a Docker Desktop you had just started yourself, left one it
+  started running when it didn't answer in time, and Start Docker then Cancel left it running.
+  The texts now say a stopped container's files go with it (what isn't in a volume).
+- Clean Up's ticked rows say when what they clean is deleted rather than moved to the Trash.
+- `mdif knowledge sign-in` printed the sign-in address with your ID token and email in it: it
+  prints it without them.
+- Folders typed in another case (`/users/me/documents`) slipped past the checks that keep
+  MyDiskIsFull out of protected folders, and Ask AI could have sent such a path with your
+  account's name in it.
+- Renewing the ChatGPT sign-in on a full disk spent the refresh token without keeping the new
+  one, which ended the sign-in. It now makes room first, and keeps the old one when it can't.
+- A tweak's undo rewrote a JSON settings file laid out its own way (four spaces, tabs, one line)
+  in two-space layout, and applying one to a settings file linked to a dotfiles file that wasn't
+  made yet replaced the link with a file.
+- A tweak whose app would clear out something on your keep list could still be applied from the
+  command line or the Prevention page: it's refused, with what you keep.
+- Restarting a helper that keeps rewriting the disk ended every process of that name (one per
+  tab for WebKit's page helper): it ends the one writing.
+- A deletion that stopped part-way after freeing space wasn't counted as a clean-up, so the
+  forecast took the drop for the disk filling less.
+- A file or folder whose details macOS couldn't read during a scan counted as empty: it counts
+  as unreadable.
+- A folder you let back into Time Machine was kept out again once its tool deleted and made it
+  again (`cargo clean`), and letting one in said done while System Settings' own list still
+  kept it out.
+- A full Time Machine look that ended after you kept a folder out or let one in showed it as
+  before, and the look asked for after the change was dropped.
+- Storage and Time Machine looked for apps in Downloads and other protected folders while
+  drawing the window, where a permission prompt held it up.
+- A name typed composed in the keep list (`~/Vidéos`) didn't keep the folder Finder wrote
+  decomposed, and Docker's leftovers were removed though you kept Docker's folder.
+- Keeping one agent worktree hid the suggestion to remove the others of its project, and the
+  macOS update leftovers suggestion listed folders you keep in /Users/Shared.
+- Growth in Google's caches folder suggested capping Chrome's cache when it was Android
+  Studio's.
+- A trend from a few hours of history gave a date years away ("164 months"); like the
+  simulation, it gives none past 60 days, and says there's room for a long time.
+- A tidy that started and ended in the second of a sample wasn't matched to the space it freed,
+  and a night unsampled at the usual pace counted as a one-off arrival.
+- `mdif status` and the app showed incidents a stopped watcher had left open, however old, and
+  finished incidents and clean-ups were never pruned from the history.
+- Growth in photo libraries other than the first, and in VMware, Parallels, UTM and VirtualBox
+  bundles, wasn't on the allowlist.
+- Time Machine's reference snapshot wasn't marked in the hours around a change of summer time,
+  and after Delete Snapshots the page still listed them.
+- A tweak's switch could start a second apply or undo while the first asked its question, and a
+  tidy that was on but couldn't run here couldn't be turned off.
+- Ask AI gave up after two minutes while an answer may take three, and showed commands the
+  AI wasn't meant to give (`defaults write`, `brew cleanup`, `tmutil`) under What helps.
+- The list of what's known about folders downloaded again every day when the copy online
+  wasn't newer, downloaded over a phone's hotspot or in Low Data Mode, and after a failed
+  try waited a day: it waits for another connection and tries again in an hour.
+- A tweak whose profile you removed in System Settings read "waiting for approval" for good;
+  after a week, it reads as off. A tweak applied again after part of it was undone read as
+  applied while the other part stayed undone.
+- A measurement started before a clean-up could bring back the suggestion it cleaned, a
+  suggestion placed on a folder you keep vanished from Overview, and an undone tweak's
+  notification was taken back as soon as it was posted when it had been undone before.
+- Apply Again from a notification ran with no window, where what it asks and how it went
+  weren't seen, and Keep It left the row's button on Storage until the next measurement.
+- Empty Trash's question quoted the Trash's size when last measured as if it were all that
+  goes, and rows without a folder (system data, macOS's volumes) could be drawn as one.
+- The watcher lost a sample's writes and folder growth when its history couldn't be written
+  (the disk full); they're recorded with the next sample.
+- Two watchers could keep one history (the app's and `mdif agent`'s, or one in Terminal),
+  counting every write and growth twice: one started while another runs waits for it to stop.
+- `mdif agent`'s log was never rotated, and the app's only when its watcher started: both are
+  rotated past a megabyte as they run.
+- The watcher's cost per hour left out the updates it runs early when space comes back, and
+  writes per day split the day the clocks change on in two.
+- After a clean-up, the folders above what it cleaned kept their old age, so one could stay
+  "unused" for what had gone; and `mdif space` showing a kept measurement wrote it into the
+  history again at the time it was taken, with the clean-ups since already in it.
+- History said "Not enough history yet" while its chart was still loading or couldn't be read,
+  showed the alert line's key when the line was off the chart, and dated a point on hover
+  by weekday only.
+- Settings showed a blank choice for an alert threshold set with `mdif alerts` to a value not
+  in its list, and the App Store edition's page was called About & Updates with no updates.
+- Welcome showed notifications as allowed when they'd been turned down in the dialog; the menu
+  bar menu could be ten minutes behind when opened; About's CPU figure stayed what it was
+  when the window opened.
+- Map: an automatic map that failed was tried again every minute, the whole disk each time;
+  in the App Store edition a map of a folder no longer chosen was shown as current; the
+  startup disk was always called Macintosh HD; and the caption left out what may be counted
+  twice and what's in use outside any folder shown.
+- Development: an interrupted Sparkle download broke every later build; a failed fetch of the
+  online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
+  could be built with a beta Xcode; CI didn't run on release branches. The contract check
+  now also decodes a clean-up done, a folder kept out of Time Machine, a backup started and a
+  sign-out, from fixtures held to what `mdif` prints.
+
 ## [0.1.5] - 2026-11-10
 
 ### Added

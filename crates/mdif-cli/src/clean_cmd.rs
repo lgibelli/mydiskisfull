@@ -23,13 +23,18 @@ pub fn clean(
 ) -> Result<()> {
     let home = home();
     let keep = crate::keep_cmd::load(db)?;
-    // A local snapshot and Docker's items go by their names, not paths.
+    // A local snapshot and Docker's items go by their names, not paths. A
+    // path is made whole and rebuilt from its parts: a trailing `/` would
+    // make a link to a folder count as the folder.
     let paths: Vec<PathBuf> = paths
         .iter()
         .map(|p| match clean::snapshot_date(p) {
             _ if docker::is_item(p) => p.clone(),
             Some(_) => p.clone(),
-            None => std::path::absolute(p).unwrap_or_else(|_| p.clone()),
+            None => std::path::absolute(p)
+                .unwrap_or_else(|_| p.clone())
+                .components()
+                .collect(),
         })
         .collect();
     // Docker, asked once, right before: only what's still as shown goes.
@@ -143,10 +148,13 @@ pub fn clean(
             Err(why) => failed.extend(paths.into_iter().map(|p| (p, why.clone()))),
         }
     }
+    // Started and not finished (a deletion that stopped part-way): what it
+    // removed before is gone all the same.
+    let mut broke_off: Vec<PathBuf> = Vec::new();
     for s in &steps {
         // What goes to the Trash still takes its space there.
         let size = matches!(s, Step::Trash { .. })
-            .then(|| scan::size_of(s.path()))
+            .then(|| scan::freed_by(s.path()))
             .flatten();
         match clean::run(s, &home) {
             Ok(d) => {
@@ -155,7 +163,18 @@ pub fn clean(
                 }
                 done.push((d, size))
             }
-            Err(why) => failed.push((s.path().to_path_buf(), why)),
+            Err(why) => {
+                if matches!(
+                    s,
+                    Step::Delete(_)
+                        | Step::Empty { .. }
+                        | Step::EmptyTrash(_)
+                        | Step::Docker { .. }
+                ) {
+                    broke_off.push(s.path().to_path_buf());
+                }
+                failed.push((s.path().to_path_buf(), why))
+            }
         }
     }
     // Docker Desktop gives back what went from its disk image a few seconds
@@ -166,18 +185,20 @@ pub fn clean(
         docker::settle(&home, disk);
     }
     // Nothing done frees nothing, whatever else changed on the disk meanwhile.
-    let freed = if done.is_empty() {
-        0
-    } else {
+    let touched = !done.is_empty() || !broke_off.is_empty();
+    let freed = if touched {
         mdif_macos::fs::statfs(volume)?.avail.saturating_sub(before)
+    } else {
+        0
     };
-    if !done.is_empty() {
+    if touched {
         crate::watch_cmd::record_clean(db, freed);
         // What went to the Trash is there now too.
         let mut changed: Vec<PathBuf> = done
             .iter()
             .filter(|(d, _)| !d.how.starts_with("docker"))
             .map(|(d, _)| d.path.clone())
+            .chain(broke_off.iter().filter(|p| p.is_absolute()).cloned())
             .collect();
         if done.iter().any(|(d, _)| d.how == "trashed") {
             changed.push(home.join(".Trash"));
@@ -190,18 +211,7 @@ pub fn clean(
     let in_trash: u64 = done.iter().filter_map(|(_, s)| *s).sum();
 
     if json_out {
-        let out = json!({
-            "done": done.iter().map(|(d, size)| json!({
-                "path": d.path,
-                "how": d.how,
-                "to": d.to,
-                "size": size,
-                "note": d.note,
-            })).collect::<Vec<_>>(),
-            "failed": failed.iter().map(|(p, why)| json!({"path": p, "why": why})).collect::<Vec<_>>(),
-            "freed": freed,
-            "in_trash": in_trash,
-        });
+        let out = cleaned_value(&done, &failed, freed, in_trash);
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         for (d, size) in &done {
@@ -229,7 +239,7 @@ pub fn clean(
         for (_, why) in &failed {
             println!("Not done: {}", printable(why));
         }
-        if !done.is_empty() {
+        if !done.is_empty() || freed > 0 {
             println!("The disk has {} more free.", bytes(freed));
         }
     }
@@ -274,11 +284,73 @@ fn churning(db: &Path) -> Vec<String> {
     let Ok(store) = mdif_core::store::Store::open(db) else {
         return Vec::new();
     };
+    let now = unix_now();
     store
-        .incidents_since(unix_now())
+        .incidents_since(now)
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| e.closed.is_none() && e.incident.kind == mdif_core::incidents::Kind::Churn)
+        .filter(|e| e.live(now) && e.incident.kind == mdif_core::incidents::Kind::Churn)
         .map(|e| e.incident.subject)
         .collect()
+}
+
+/// What `mdif clean --json` prints (the app's `Cleaned`).
+fn cleaned_value(
+    done: &[(Done, Option<u64>)],
+    failed: &[(PathBuf, String)],
+    freed: u64,
+    in_trash: u64,
+) -> serde_json::Value {
+    json!({
+        "done": done.iter().map(|(d, size)| json!({
+            "path": d.path,
+            "how": d.how,
+            "to": d.to,
+            "size": size,
+            "note": d.note,
+        })).collect::<Vec<_>>(),
+        "failed": failed.iter().map(|(p, why)| json!({"path": p, "why": why})).collect::<Vec<_>>(),
+        "freed": freed,
+        "in_trash": in_trash,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// The fixture the app's contract check decodes (app/Tests/clean.json),
+    /// with every field a clean-up prints: a fresh history has nothing to
+    /// clean, so the check couldn't see a done item otherwise.
+    #[test]
+    fn the_apps_clean_fixture_has_the_shape_a_clean_up_prints() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../app/Tests/clean.json")).unwrap();
+        let done = Done {
+            path: PathBuf::from("/x"),
+            how: "trashed",
+            to: Some(PathBuf::from("/t")),
+            note: Some(String::new()),
+        };
+        let real = cleaned_value(
+            &[(done, Some(1))],
+            &[(PathBuf::from("/y"), String::new())],
+            1,
+            1,
+        );
+        assert_eq!(keys(&fixture), keys(&real));
+        for d in fixture["done"].as_array().unwrap() {
+            assert_eq!(keys(d), keys(&real["done"][0]));
+        }
+        for f in fixture["failed"].as_array().unwrap() {
+            assert_eq!(keys(f), keys(&real["failed"][0]));
+        }
+        assert!(!fixture["done"].as_array().unwrap().is_empty());
+    }
 }

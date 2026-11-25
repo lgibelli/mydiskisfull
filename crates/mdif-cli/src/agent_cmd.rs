@@ -84,6 +84,8 @@ pub fn install(interval: u64) -> Result<()> {
     let plist = plist_path();
     std::fs::create_dir_all(plist.parent().unwrap())?;
     // --quiet: only errors reach the log, so the log can't grow by itself.
+    // --log: it's rotated past a megabyte (launchd's StandardErrorPath, for
+    // what's said before, never would be).
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -96,6 +98,7 @@ pub fn install(interval: u64) -> Result<()> {
     <string>{exe}</string>
     <string>watch</string>
     <string>--quiet</string>
+    <string>--log</string>
     <string>--interval</string>
     <string>{interval}</string>
   </array>

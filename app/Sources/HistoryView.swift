@@ -27,13 +27,19 @@ struct HistoryPage: View {
                 switch Edition.appStore ? .space : mode {
                 case .space:
                     Form {
-                        FreeSpaceSection(status: s, series: monitor.detail?.series ?? [],
+                        FreeSpaceSection(status: s, series: monitor.detail?.series, error: monitor.detailError,
                                          strata: monitor.detail?.strata ?? [], health: monitor.health, span: span)
                         GrewSections(detail: monitor.detail, span: span)
                     }
                     .formStyle(.grouped)
                 case .writes:
                     WritesView(detail: monitor.detail, total: s.total)
+                }
+            } else if let e = monitor.statusError {
+                ContentUnavailableView {
+                    Label("Can't read the watcher's history", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(e)
                 }
             } else {
                 ProgressView()
@@ -81,7 +87,9 @@ enum Span: String, CaseIterable, Identifiable {
 /// the last hour, day and week.
 private struct FreeSpaceSection: View {
     let status: Status
-    let series: [[Int64]]
+    /// `nil` until they're read: not "not enough history" meanwhile.
+    let series: [[Int64]]?
+    let error: String?
     let strata: [ForecastDetail.Strata]
     let health: Health
     let span: Span
@@ -120,7 +128,13 @@ private struct FreeSpaceSection: View {
             if let p = status.forecast?.paces {
                 PacesRow(paces: p)
             }
-            if points.count < 2 {
+            if series == nil, let error {
+                ContentUnavailableView("Can't read the history", systemImage: "exclamationmark.triangle",
+                                       description: Text(error))
+                    .frame(height: 280)
+            } else if series == nil {
+                ProgressView().frame(maxWidth: .infinity).frame(height: 280)
+            } else if points.count < 2 {
                 ContentUnavailableView("Not enough history yet", systemImage: "chart.xyaxis.line",
                                        description: Text("The chart starts once the watcher has a few samples. It takes one every 5 minutes."))
                     .frame(height: 280)
@@ -128,7 +142,7 @@ private struct FreeSpaceSection: View {
                 VStack(alignment: .leading, spacing: 12) {
                     chart(points, ahead, domain)
                         .frame(height: 300)
-                    legend
+                    legend(domain)
                 }
                 .padding(.vertical, 6)
             }
@@ -292,7 +306,7 @@ private struct FreeSpaceSection: View {
                     .font(.caption)
                     .frame(width: 210)
                 }
-                Text(point.date.formatted(.dateTime.weekday(.abbreviated).hour().minute()))
+                Text(point.date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()))
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10)
@@ -302,7 +316,8 @@ private struct FreeSpaceSection: View {
         }
     }
 
-    private var legend: some View {
+    /// Each key only for what the chart draws (the alert line only within its range).
+    private func legend(_ domain: ClosedRange<Double>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !strata.isEmpty {
                 FlowLayout(spacing: 14, lineSpacing: 5) {
@@ -320,7 +335,7 @@ private struct FreeSpaceSection: View {
                     key(RoundedRectangle(cornerRadius: 2).fill(Color.orange.opacity(0.2)).frame(width: 14, height: 8),
                         "Plausible range")
                 }
-                if floorPct <= 100 {
+                if floorPct <= domain.upperBound {
                     key(Capsule().fill(Color.red.opacity(0.55)).frame(width: 14, height: 1.5),
                         "Alert below \(Format.bytes(status.floor)) free")
                 }
@@ -352,7 +367,7 @@ private struct FreeSpaceSection: View {
 
     private func history() -> [Point] {
         let cutoff = span.seconds.map { Date().timeIntervalSince1970 - $0 } ?? 0
-        return series.compactMap { p in
+        return (series ?? []).compactMap { p in
             guard p.count == 2, Double(p[0]) >= cutoff else { return nil }
             return Point(date: Date(timeIntervalSince1970: TimeInterval(p[0])), pct: used(p[1]))
         }
@@ -393,9 +408,13 @@ private struct FreeSpaceSection: View {
         let ahead = (span.seconds ?? 14 * 86_400) / 3
         let secs = min(ahead, (f.fullIn?.days ?? .infinity) * 86_400)
         let start = Date(timeIntervalSince1970: TimeInterval(f.at))
-        let avail = Double(f.avail)
+        // The room the headline counts: free, and what macOS frees by itself
+        // as the disk fills. Used up, the disk is full, on the headline's day.
+        let room = Double(f.avail + (f.purgeable ?? 0))
+        let now = used(f.avail)
         func at(_ t: Double, _ rate: Double) -> Point {
-            Point(date: start.addingTimeInterval(t), pct: used(Int64(max(0, avail - rate * t / 86_400))))
+            let share = room > 0 ? min(1, rate * t / 86_400 / room) : 1
+            return Point(date: start.addingTimeInterval(t), pct: now + (100 - now) * share)
         }
         let ts = stride(from: 0.0, through: secs, by: max(secs / 12, 1)).map { $0 }
         return (ts.map { at($0, r.perDay) }, ts.map { at($0, max(r.high, r.perDay)) }, ts.map { at($0, max(0, r.low)) })
