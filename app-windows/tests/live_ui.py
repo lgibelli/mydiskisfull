@@ -41,15 +41,22 @@ def _elements(window, cond):
 
 
 def find(window, label, secs=60):
-    """The button labelled `label` (its text, spaces aside)."""
+    """The button labelled `label` (its text, spaces aside), enabled."""
     cond = uia.CreatePropertyCondition(U.UIA_ControlTypePropertyId, U.UIA_ButtonControlTypeId)
     return _until(f'the {label} button', lambda: next(
         (b for b in _elements(window, cond) if (b.CurrentName or '').strip() == label
-         and not b.CurrentIsOffscreen and b.CurrentIsEnabled), None), secs)
+         and b.CurrentIsEnabled), None), secs)
 
 
 def press(window, label, secs=60):
     button = find(window, label, secs)
+    # Scrolled to first, as a person would (one below the fold is offscreen).
+    try:
+        button.GetCurrentPattern(U.UIA_ScrollItemPatternId) \
+            .QueryInterface(U.IUIAutomationScrollItemPattern).ScrollIntoView()
+        time.sleep(1)
+    except comtypes.COMError:
+        pass
     button.GetCurrentPattern(U.UIA_InvokePatternId) \
         .QueryInterface(U.IUIAutomationInvokePattern).Invoke()
     print(f'pressed {label}')
