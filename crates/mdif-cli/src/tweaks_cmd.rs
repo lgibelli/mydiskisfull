@@ -95,17 +95,25 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
         return Ok(());
     }
     println!("Each tweak stops something from filling the disk again, and can be undone.");
+    // As wide as the longest id and two spaces (`recycle-bin-auto-empty` ran
+    // into its title at a fixed 20).
+    let w = rows
+        .iter()
+        .map(|(t, ..)| t.id.len() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(20);
     for (t, status, check, size) in &rows {
         println!();
-        println!("{:<20}{}", t.id, t.title);
+        println!("{:<w$}{}", t.id, t.title);
         println!(
-            "{:<20}{}",
+            "{:<w$}{}",
             "",
             state_line(t, *status, check.as_ref(), *size)
         );
         if let Some(c) = check {
             for line in evidence(t, c) {
-                println!("{:<20}{line}", "");
+                println!("{:<w$}{line}", "");
             }
         }
     }
