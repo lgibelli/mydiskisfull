@@ -129,7 +129,14 @@ impl Hourly {
         };
         let removed = !recurs(n, freed, refilled, p);
         // Arrivals too.
-        let came = arrivals(deltas.len(), |i| deltas[i].2, |i| deltas[i].3, threshold);
+        // Over hours not sampled (asleep), the usual pace adds up to more
+        // than an hour's threshold: an arrival takes that much an hour.
+        let came = arrivals(
+            deltas.len(),
+            |i| deltas[i].2,
+            |i| deltas[i].3 || deltas[i].2 < threshold * deltas[i].1.max(1) as f64,
+            threshold,
+        );
         // The last hour and the hour so far: no arrival there is a one-off yet.
         let calm = deltas.len().saturating_sub(2);
         let one_off = one_off_arrivals(&came, calm, p, |i| {

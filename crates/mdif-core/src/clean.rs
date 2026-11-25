@@ -201,6 +201,13 @@ pub fn plan(
 ) -> Result<Step, String> {
     let shown = display(path, home);
     if path == Path::new(crate::docker::OLD) {
+        // What it removes is in Docker's folder: not if you keep that.
+        if let Some(entry) = keep.covering(&home.join(crate::docker::FOLDER)) {
+            return Err(format!(
+                "Docker's leftovers stay: you keep {}.",
+                crate::text::printable(entry)
+            ));
+        }
         return crate::docker::command(home)
             .map(|_| Step::DockerOld)
             .ok_or_else(|| "Docker isn't installed.".into());
@@ -2032,6 +2039,10 @@ mod tests {
             "{:?}",
             old.err()
         );
+        // Not when you keep Docker's folder, where it all is.
+        let keep = Keep::parse("~/Library/Containers/com.docker.docker\n", h);
+        let why = plan(Path::new(crate::docker::OLD), h, &keep, &[], &[]).unwrap_err();
+        assert!(why.contains("you keep"), "{why}");
     }
 
     #[test]

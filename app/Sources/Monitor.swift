@@ -48,6 +48,9 @@ final class Monitor: ObservableObject {
     /// Tweaks applied or undone here that no measurement has read since: the
     /// switch shows the new state meanwhile.
     @Published private(set) var tweaksChanging: [String: Bool] = [:]
+    /// Tweaks being applied or undone now (the dry run, the question, the
+    /// change): their switch waits.
+    @Published private(set) var tweaksBusy: Set<String> = []
     /// When one was last applied or undone here.
     private var tweakChanged = Date.distantPast
     #endif
@@ -727,11 +730,21 @@ final class Monitor: ObservableObject {
 
     #if !APP_STORE
     func apply(_ id: String) {
-        Task { await afterTweak(id, await TweakFlow.apply(id), on: true) }
+        guard !tweaksBusy.contains(id) else { return }
+        tweaksBusy.insert(id)
+        Task {
+            defer { tweaksBusy.remove(id) }
+            await afterTweak(id, await TweakFlow.apply(id), on: true)
+        }
     }
 
     func revert(_ id: String) {
-        Task { await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false) }
+        guard !tweaksBusy.contains(id) else { return }
+        tweaksBusy.insert(id)
+        Task {
+            defer { tweaksBusy.remove(id) }
+            await afterTweak(id, await TweakFlow.revert(id, title: tweak(id)?.title ?? id), on: false)
+        }
     }
 
     /// Does a suggestion's clean-up, then measures again; `after`, once it's
@@ -766,6 +779,11 @@ final class Monitor: ObservableObject {
         // `mdif clean` measured again what it changed: the breakdown
         // follows at once, without a whole-disk scan.
         await loadSpace()
+        // Snapshots deleted: the Time Machine page lists what's left (a
+        // quick look keeps its folders).
+        if actions.contains(where: { $0.kind == "snapshots" }), timeMachine != nil {
+            await loadTimeMachine(quick: true)
+        }
     }
 
     /// The switch shows the new state at once; the measurement that follows

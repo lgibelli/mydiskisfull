@@ -380,6 +380,14 @@ pub struct Snapshot {
 
 /// Time Machine's own among `names`, oldest first, with the reference
 /// marked (within a minute of `reference`).
+/// The moment a local wall-clock time names (`wall`: its fields read as if
+/// UTC). The offset is the one at that moment, not at `wall` taken as UTC:
+/// in the hours around a change of summer time those differ.
+fn from_wall(wall: i64) -> i64 {
+    let guess = wall - mdif_macos::sys::utc_offset(wall);
+    wall - mdif_macos::sys::utc_offset(guess)
+}
+
 pub fn snapshots(names: &[String], references: &[i64]) -> Vec<Snapshot> {
     let mut out: Vec<Snapshot> = names
         .iter()
@@ -393,8 +401,7 @@ pub fn snapshots(names: &[String], references: &[i64]) -> Vec<Snapshot> {
                 d.get(13..15)?,
                 d.get(15..17)?
             );
-            let wall = space::parse_time(&text)?;
-            let taken = wall - mdif_macos::sys::utc_offset(wall);
+            let taken = from_wall(space::parse_time(&text)?);
             Some(Snapshot {
                 name: n.clone(),
                 taken,
@@ -1585,6 +1592,22 @@ mod tests {
         let r = set_excluded_with(std::slice::from_ref(&target), false, &none, &home, &skips);
         let why = r[0].1.as_ref().unwrap_err();
         assert!(why.contains("System Settings"), "{why}");
+    }
+
+    #[test]
+    fn a_snapshot_named_in_local_time_is_dated_right_around_summer_time() {
+        // Every quarter hour of 2026, in this Mac's time zone: its local
+        // name read back is the same moment, but in the hour the clocks go
+        // back, which two moments share.
+        let start = 1_767_225_600; // 2026-01-01 UTC
+        let wall = |t: i64| t + mdif_macos::sys::utc_offset(t);
+        for t in (start..start + 365 * 86_400).step_by(900) {
+            let w = wall(t);
+            let shared = [-3600, 3600].iter().any(|d| wall(t + d) == w);
+            if !shared {
+                assert_eq!(from_wall(w), t, "{t}");
+            }
+        }
     }
 
     #[test]

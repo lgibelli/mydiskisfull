@@ -296,7 +296,7 @@ pub fn forecast_with(points: &[SpacePoint], facts: &Facts, p: &Params) -> Option
         rate: trend,
         trend,
         recent,
-        full_in: trend.and_then(|r| full_in(room, &r)),
+        full_in: trend.and_then(|r| full_in(room, &r, p)),
         full_by: None,
         recent_full_in: None,
         paces,
@@ -314,7 +314,7 @@ pub fn forecast_with(points: &[SpacePoint], facts: &Facts, p: &Params) -> Option
         f.arrivals = h.arrivals;
     }
     f.recent_full_in = match (f.recent, f.rate) {
-        (Some(rc), Some(r)) if rc.per_day > 2.0 * r.per_day.max(0.0) => full_in(room, &rc),
+        (Some(rc), Some(r)) if rc.per_day > 2.0 * r.per_day.max(0.0) => full_in(room, &rc, p),
         _ => None,
     };
     Some(f)
@@ -462,15 +462,21 @@ pub fn alert_with(f: Option<&Forecast>, avail: u64, floor: u64, within_days: u32
     }
 }
 
-fn full_in(avail: u64, r: &Rate) -> Option<FullIn> {
+/// At rate `r`, within the horizon the simulation looks to: a rate from a
+/// few hours or days doesn't say when, years out, the disk would be full.
+fn full_in(avail: u64, r: &Rate, p: &Params) -> Option<FullIn> {
     if r.per_day <= 0.0 {
         return None;
     }
     let avail = avail as f64;
-    Some(FullIn {
-        days: avail / r.per_day,
+    let horizon = p.horizon_days as f64;
+    let days = avail / r.per_day;
+    (days <= horizon).then(|| FullIn {
+        days,
         earliest: avail / r.high.max(r.per_day),
-        latest: (r.low > 0.0).then(|| avail / r.low),
+        latest: (r.low > 0.0)
+            .then(|| avail / r.low)
+            .filter(|&d| d <= horizon),
     })
 }
 
@@ -677,7 +683,9 @@ pub(crate) fn step_rule(deltas: &[f64], p: &Params) -> (f64, bool) {
 pub(crate) fn known(cleanups: &[Cleanup], from: i64, to: i64, res: i64) -> bool {
     cleanups
         .iter()
-        .any(|c| c.end.max(c.start) > from && c.start < to + res.max(1))
+        // `>=`: a tidy run right after the sample at `from`, in the same
+        // second, starts and ends then, and what it freed is in this change.
+        .any(|c| c.end.max(c.start) >= from && c.start < to + res.max(1))
 }
 
 /// The same for a moment `t` (see [`known`]).
@@ -832,6 +840,56 @@ mod tests {
     }
 
     #[test]
+    fn a_cleanup_done_in_the_second_of_a_sample_is_in_the_change_after_it() {
+        let t = 1_000_000;
+        let c = [Cleanup {
+            start: t,
+            end: t,
+            freed: 1,
+        }];
+        assert!(known(&c, t, t + 300, 0));
+        assert!(known(&c, t - 300, t, 0));
+        assert!(!known(&c, t + 1, t + 300, 0));
+        assert!(!known(&c, t - 600, t - 300, 0));
+        // In hourly buckets: the change into its bucket and into the next.
+        assert!(known(&c, t - HOUR, t, HOUR));
+        assert!(known(&c, t, t + HOUR, HOUR));
+        assert!(!known(&c, t + HOUR, t + 2 * HOUR, HOUR));
+    }
+
+    #[test]
+    fn a_trend_says_no_date_past_the_horizon() {
+        // Half a day of history, 400 GB free and 1 GB a day: a rate, but
+        // no "full in a year".
+        let pts: Vec<SpacePoint> = (0..=72)
+            .map(|k| SpacePoint {
+                ts: k * 600,
+                total: 500_000_000_000,
+                avail: (400.0 * GB - GB * (k * 600) as f64 / DAY as f64) as u64,
+            })
+            .collect();
+        let f = forecast(&pts, &Params::default()).unwrap();
+        assert_eq!(f.method, Method::Trend);
+        let r = f.rate.unwrap();
+        assert!((r.per_day / GB - 1.0).abs() < 0.05, "{r:?}");
+        assert_eq!(f.full_in, None);
+        // 40 GB free at the same rate: within it, and said.
+        let near: Vec<SpacePoint> = pts
+            .iter()
+            .map(|p| SpacePoint {
+                avail: p.avail - 360_000_000_000,
+                ..*p
+            })
+            .collect();
+        let f = forecast(&near, &Params::default()).unwrap();
+        assert!(
+            (f.full_in.unwrap().days - 40.0).abs() < 2.0,
+            "{:?}",
+            f.full_in
+        );
+    }
+
+    #[test]
     fn a_cleanup_is_a_step_not_a_trend() {
         // 2 GB/day, then on day 7 a cleanup frees 30 GB.
         let pts = series(14, |h| {
@@ -867,6 +925,23 @@ mod tests {
         assert_eq!(f.arrivals.len(), 1, "{f:?}");
         assert!((f.arrivals[0].bytes as f64 / GB - 30.0).abs() < 0.2);
         assert!(f.full_by.unwrap().d1 < 0.05, "{f:?}");
+    }
+
+    #[test]
+    fn hours_asleep_at_the_usual_pace_are_no_arrival() {
+        // 3 GB a day, and a night of 20 hours unsampled (the Mac asleep):
+        // the 2.5 GB taken over it is the pace, not one-off.
+        let pts = hourly(14, 200.0 * GB, |k| {
+            let asleep = (6 * 24 + 1..6 * 24 + 21).contains(&k);
+            (3.0 * GB / 24.0, !asleep)
+        });
+        let f = forecast(&pts, &Params::default()).unwrap();
+        assert!(f.arrivals.is_empty(), "{:?}", f.arrivals);
+        assert!(
+            (f.rate.unwrap().per_day / GB - 3.0).abs() < 0.3,
+            "{:?}",
+            f.rate
+        );
     }
 
     #[test]

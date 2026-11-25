@@ -358,7 +358,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     let open: Vec<_> = store
         .incidents_since(now)?
         .into_iter()
-        .filter(|e| e.closed.is_none())
+        .filter(|e| e.live(now))
         .collect();
     for e in &open {
         println!("Runaway: {}", e.incident.sentence(Some(&home())));

@@ -35,8 +35,8 @@ nothing to warn about it.
    consumption, measured.
 2. **False positives are the whole product.** Coding agents writing build output in a burst,
    Xcode, Docker, Photos imports and backups are all legitimately big writers. Every incident
-   must pass strict clauses (below), and allowlist entries match whole path components, never
-   substrings.
+   must pass strict clauses (below), and allowlist entries match whole path components (a name,
+   or any name with an extension, `*.photoslibrary`), never substrings.
 3. **Explain why, in one sentence, with the evidence.** Example: "OneDrive is rewriting 3 GB of
    logs every 10 minutes while uploading nothing; usually a stuck sync. Restarting OneDrive fixes
    it."

@@ -295,11 +295,12 @@ fn churning(db: &Path) -> Vec<String> {
     let Ok(store) = mdif_core::store::Store::open(db) else {
         return Vec::new();
     };
+    let now = unix_now();
     store
-        .incidents_since(unix_now())
+        .incidents_since(now)
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| e.closed.is_none() && e.incident.kind == mdif_core::incidents::Kind::Churn)
+        .filter(|e| e.live(now) && e.incident.kind == mdif_core::incidents::Kind::Churn)
         .map(|e| e.incident.subject)
         .collect()
 }

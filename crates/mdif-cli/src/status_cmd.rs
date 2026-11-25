@@ -72,7 +72,7 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => s
             .incidents_since(now)?
             .into_iter()
-            .filter(|e| e.closed.is_none())
+            .filter(|e| e.live(now))
             .collect(),
         None => Vec::new(),
     };

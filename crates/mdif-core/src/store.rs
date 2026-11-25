@@ -85,6 +85,18 @@ pub struct Episode {
     pub incident: Incident,
 }
 
+/// An open episode not seen for this long was left open by a watcher that
+/// stopped (it closes them when it next looks): what it says is old news.
+/// The watcher looks every half hour by default (`--owners-every`).
+pub const STALE: i64 = 6 * 3600;
+
+impl Episode {
+    /// Open, and seen by the watcher lately.
+    pub fn live(&self, now: i64) -> bool {
+        self.closed.is_none() && now - self.updated <= STALE
+    }
+}
+
 /// A clean-up done through MyDiskIsFull (`mdif clean`, `mdif tidy`): when it
 /// started and ended, and what it freed by its own measure. The forecast
 /// takes out what came back around it, whatever its size (see
@@ -495,6 +507,16 @@ impl Store {
             params![last.res, now - last.keep],
         )?;
         tx.execute("DELETE FROM strata WHERE ts < ?1", params![now - last.keep])?;
+        // Episodes over and clean-ups older than the oldest history: what
+        // they explain is gone.
+        tx.execute(
+            "DELETE FROM incidents WHERE closed IS NOT NULL AND updated < ?1",
+            params![now - last.keep],
+        )?;
+        tx.execute(
+            "DELETE FROM cleanups WHERE ended < ?1",
+            params![now - last.keep],
+        )?;
         for (table, _) in QUANTITIES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE res = ?1 AND ts < ?2"),
@@ -876,16 +898,48 @@ mod tests {
         // Holding again later is a new episode.
         assert_eq!(s.update_incidents(5000, &[inc(3)], 600).unwrap().len(), 1);
         assert_eq!(s.incidents_since(0).unwrap().len(), 2);
+        // Left open by a watcher that stopped: open, but not live news.
+        let open = &s.incidents_since(0).unwrap()[0];
+        assert_eq!(open.closed, None);
+        assert!(open.live(5000 + 3600));
+        assert!(!open.live(5000 + STALE + 1));
+        assert!(!ep[0].live(900));
     }
 
     #[test]
     fn history_past_the_last_tier_is_dropped() {
+        use crate::incidents::{Incident, Kind};
         let s = Store::open_in_memory().unwrap();
+        let inc = |subject: &str| Incident {
+            kind: Kind::Churn,
+            subject: subject.into(),
+            at: 0,
+            window: 3600,
+            amount: 1,
+            per_day: 0.0,
+            fit: 0.0,
+            size: None,
+            full_in_days: None,
+        };
+        // An episode over long ago and one still open; a clean-up then.
+        s.update_incidents(0, &[inc("old"), inc("open")], 600)
+            .unwrap();
+        s.update_incidents(1000, &[inc("open")], 600).unwrap();
+        s.add_cleanup(&Cleanup {
+            start: 0,
+            end: 10,
+            freed: 1,
+        })
+        .unwrap();
         s.add_space("/", point(0, GB)).unwrap();
         s.add_writes(0, &[("p".into(), 1)]).unwrap();
         s.compact(500 * 86_400).unwrap();
         assert!(s.space_since("/", 0).unwrap().is_empty());
         assert!(s.writes_since(0).unwrap().is_empty());
+        let left = s.incidents_since(0).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].incident.subject, "open");
+        assert!(s.cleanups_since(0).unwrap().is_empty());
     }
 
     #[test]

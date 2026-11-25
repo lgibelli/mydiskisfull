@@ -54,7 +54,9 @@ pub struct GrowthParams {
     pub min_share: f64,
     pub peak_tolerance: f64,
     pub horizon: i64,
-    /// Path components (exact) whose folders may grow as they like.
+    /// Path components whose folders may grow as they like: a name, or
+    /// `*.ext` for any name ending so (every photo library, not only the
+    /// first).
     pub allow: Vec<String>,
 }
 
@@ -71,10 +73,14 @@ impl Default for GrowthParams {
             horizon: 7 * DAY,
             allow: [
                 // Deliberate: photo imports and virtual machines.
-                "Photos Library.photoslibrary",
+                "*.photoslibrary",
                 "Virtual Machines.localized",
+                "*.vmwarevm",
                 "Parallels",
+                "*.pvm",
                 "com.utmapp.UTM",
+                "*.utm",
+                "VirtualBox VMs",
             ]
             .map(String::from)
             .to_vec(),
@@ -227,10 +233,13 @@ pub fn growth(
     let mut owners: Vec<&String> = series.keys().collect();
     owners.sort();
     for owner in owners {
-        if Path::new(owner)
-            .iter()
-            .any(|c| p.allow.iter().any(|a| c == a.as_str()))
-        {
+        if Path::new(owner).iter().any(|c| {
+            let c = c.to_string_lossy();
+            p.allow.iter().any(|a| match a.strip_prefix('*') {
+                Some(ext) => c.len() > ext.len() && c.ends_with(ext),
+                None => c == a.as_str(),
+            })
+        }) {
             continue;
         }
         let rows: Vec<(i64, i64)> = series[owner]
@@ -526,6 +535,15 @@ mod tests {
         assert!(grows(photos, rows(6, |_| GB / 2), free, None).is_empty());
         let near = "/Users/me/Pictures/Photos Library.photoslibrary-old";
         assert_eq!(grows(near, rows(6, |_| GB / 2), free, None).len(), 1);
+        // Any photo library or VM bundle, by its extension.
+        for p in [
+            "/Users/me/Pictures/Family.photoslibrary",
+            "/Users/me/Documents/Ubuntu.vmwarevm",
+            "/Users/me/VMs/Windows 11.utm",
+        ] {
+            assert!(grows(p, rows(6, |_| GB / 2), free, None).is_empty(), "{p}");
+        }
+        assert_eq!(grows("/a/.utm", rows(6, |_| GB / 2), free, None).len(), 1);
     }
 
     fn churn_case(per_5min: u64, consumed: u64, minutes: i64) -> Vec<Incident> {

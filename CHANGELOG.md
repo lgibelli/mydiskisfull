@@ -138,6 +138,24 @@ All notable changes to this project are documented here. The format is based on
   before, and the look asked for after the change was dropped.
 - Storage and Time Machine looked for apps in Downloads and other protected folders while
   drawing the window, where a permission prompt held it up.
+- A name typed composed in the keep list (`~/Vidéos`) didn't keep the folder Finder wrote
+  decomposed, and Docker's leftovers were removed though you kept Docker's folder.
+- Keeping one agent worktree hid the suggestion to remove the others of its project, and the
+  macOS update leftovers suggestion listed folders you keep in /Users/Shared.
+- Growth in Google's caches folder suggested capping Chrome's cache when it was Android
+  Studio's.
+- A trend from a few hours of history gave a date years away ("164 months"); like the
+  simulation, it gives none past 60 days, and says there's room for a long time.
+- A tidy that started and ended in the second of a sample wasn't matched to the space it freed,
+  and a night unsampled at the usual pace counted as a one-off arrival.
+- `mdif status` and the app showed incidents a stopped watcher had left open, however old, and
+  finished incidents and clean-ups were never pruned from the history.
+- Growth in photo libraries other than the first, and in VMware, Parallels, UTM and VirtualBox
+  bundles, wasn't on the allowlist.
+- Time Machine's reference snapshot wasn't marked in the hours around a change of summer time,
+  and after Delete Snapshots the page still listed them.
+- A tweak's switch could start a second apply or undo while the first asked its question, and a
+  tidy that was on but couldn't run here couldn't be turned off.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.

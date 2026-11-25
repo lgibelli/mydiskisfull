@@ -242,7 +242,11 @@ fn names(path: &Path) -> Vec<String> {
     let path = path.strip_prefix(DATA_ROOT).unwrap_or(&path);
     path.components()
         .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
+            // Whatever its case, and composed or not: the disk takes
+            // `Vidéos` typed by hand for Finder's.
+            Component::Normal(n) => {
+                Some(mdif_macos::fs::decomposed(&n.to_string_lossy()).to_lowercase())
+            }
             _ => None,
         })
         .collect()
@@ -287,6 +291,18 @@ mod tests {
 
     fn keep(text: &str) -> Keep {
         Keep::parse(text, Path::new(HOME))
+    }
+
+    #[test]
+    fn a_name_typed_composed_keeps_the_one_finder_wrote_decomposed() {
+        let k = keep("~/Vid\u{e9}os\n");
+        assert_eq!(
+            k.covering(Path::new("/Users/me/Vide\u{301}os/clip.mov")),
+            Some("~/Vid\u{e9}os")
+        );
+        let k = keep("~/Vide\u{301}os\n");
+        assert!(k.covering(Path::new("/Users/me/VID\u{c9}OS")).is_some());
+        assert!(k.covering(Path::new("/Users/me/Videos")).is_none());
     }
 
     #[test]
