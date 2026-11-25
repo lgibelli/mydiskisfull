@@ -86,7 +86,7 @@ subprocess.run(['reg', 'add', r'HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE', 
 # Sense ("An administrator has disabled the Storage Service"): on again.
 print(ps("Get-Service StorSvc | Format-List Name,Status,StartType | Out-String; "
          r"Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense' "
-         "-ErrorAction SilentlyContinue | Format-List | Out-String"))
+         "-ErrorAction SilentlyContinue | Format-List | Out-String; exit 0"))
 ps("Set-Service StorSvc -StartupType Manual; Start-Service StorSvc")
 os.startfile('ms-settings:storagepolicies')
 window = ui.wait_window('Settings')
