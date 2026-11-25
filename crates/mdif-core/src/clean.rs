@@ -497,6 +497,16 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     display(path, home)
                 ));
             }
+            // A clone in it goes with it: one a build tool made can be
+            // fetched again, one with work of its own can't.
+            if let Some(repo) = repo_with_work_in(path) {
+                return Err(format!(
+                    "{} has a git repository in it with work that is only there ({}): \
+                     delete it yourself if you mean to.",
+                    display(path, home),
+                    display(&repo, home)
+                ));
+            }
             std::fs::remove_dir_all(path)
                 .map(|()| Done {
                     path: path.clone(),
@@ -1633,6 +1643,32 @@ pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The first git repository in `dir` (a folder with a `.git`, links not
+/// followed) that holds something none of its remotes has
+/// ([`crate::worktrees::clone_has_nothing_to_lose`]).
+fn repo_with_work_in(dir: &Path) -> Option<PathBuf> {
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(d) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut below = Vec::new();
+        let mut repo = false;
+        for e in entries.flatten() {
+            if e.file_name() == ".git" {
+                repo = true;
+            } else if e.file_type().is_ok_and(|t| t.is_dir()) {
+                below.push(e.path());
+            }
+        }
+        if repo && !crate::worktrees::clone_has_nothing_to_lose(&d) {
+            return Some(d);
+        }
+        folders.extend(below);
+    }
+    None
+}
+
 /// The first of `mounts` (where volumes are mounted) inside `dir`, by its
 /// path or by the Data volume's (`/System/Volumes/Data/Users/…`).
 fn mounted_in<'m>(dir: &Path, mounts: &'m [PathBuf]) -> Option<&'m Path> {
@@ -1760,6 +1796,100 @@ fn running(name: &str) -> bool {
     crate::os::proc::own_processes()
         .iter()
         .any(|p| p.name == name)
+}
+
+/// A clone in build output goes with it only when nothing in it is only
+/// there; on both systems.
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn a_clone_with_work_of_its_own_keeps_the_build_output_it_is_in() {
+        let t = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(t.path()).unwrap();
+        // `canonicalize` gives `\\?\C:\...` on Windows: the path as a person writes it.
+        let home = PathBuf::from(home.to_string_lossy().trim_start_matches(r"\\?\"));
+        let upstream = home.join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        git(&upstream, &["init", "-q"]);
+        std::fs::write(upstream.join("lib.rs"), "fn f() {}\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-qm", "one"]);
+
+        let app = home.join("devel").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "[package]").unwrap();
+        let target = app.join("target");
+        let dep = target.join("checkouts").join("dep");
+        let clone = || {
+            std::fs::create_dir_all(target.join("checkouts")).unwrap();
+            let (from, to) = (upstream.to_str().unwrap(), dep.to_str().unwrap());
+            git(&home, &["clone", "-q", from, to]);
+        };
+        let delete = || {
+            let step = plan(&target, &home, &Keep::default(), &[], &[]).unwrap();
+            run(&step, &home)
+        };
+
+        // What a build tool cloned, as it was: fetched again, so it goes.
+        clone();
+        assert_eq!(repo_with_work_in(&target), None);
+        assert!(delete().is_ok());
+        assert!(!target.exists());
+
+        // A commit of its own stays, and the build output with it.
+        clone();
+        std::fs::write(dep.join("lib.rs"), "fn g() {}\n").unwrap();
+        git(&dep, &["commit", "-qam", "mine"]);
+        let why = delete().unwrap_err();
+        assert!(why.contains("work that is only there"), "{why}");
+        assert!(dep.join("lib.rs").exists());
+        // Put back as its remote has it: nothing of its own again.
+        git(&dep, &["reset", "-q", "--hard", "origin/main"]);
+        assert_eq!(repo_with_work_in(&target), None);
+        // A change, an untracked file, a stash: each is only there.
+        std::fs::write(dep.join("lib.rs"), "fn h() {}\n").unwrap();
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        git(&dep, &["stash", "-q"]);
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        git(&dep, &["stash", "drop", "-q"]);
+        std::fs::write(dep.join("notes.txt"), "mine\n").unwrap();
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        std::fs::remove_file(dep.join("notes.txt")).unwrap();
+        // A repository with no remote: all of it is only there.
+        let local = target.join("local");
+        std::fs::create_dir(&local).unwrap();
+        git(&local, &["init", "-q"]);
+        std::fs::write(local.join("a"), "a").unwrap();
+        git(&local, &["add", "."]);
+        git(&local, &["commit", "-qm", "a"]);
+        assert_eq!(repo_with_work_in(&target), Some(local.clone()));
+        std::fs::remove_dir_all(&local).unwrap();
+        assert!(delete().is_ok());
+    }
 }
 
 // Clean-ups wait for Windows' own list (and drive-prefixed paths).

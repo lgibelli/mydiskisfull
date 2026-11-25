@@ -237,6 +237,61 @@ pub fn ignores(dir: &Path) -> Option<bool> {
     }
 }
 
+/// Whether the repository checked out at `dir` holds nothing that isn't on
+/// one of its remotes too, as the clones build tools make do (SwiftPM's
+/// `.build/checkouts`, CMake's `_deps`): no changes, no untracked files,
+/// nothing hidden from status, no stash, and HEAD and every branch on a
+/// remote. An editable install's clone (pip's `.venv/src`) is made to be
+/// changed. `false` when git can't tell: none found, or the repository's
+/// settings name a command git would run.
+pub fn clone_has_nothing_to_lose(dir: &Path) -> bool {
+    let Some(git) = Git::find() else {
+        return false;
+    };
+    if git.runs_its_own_commands(dir) {
+        return false;
+    }
+    // `S` skip-worktree, lowercase assume-unchanged: changes status hides.
+    let Some(tags) = git.out(dir, &["ls-files", "-v", "-z"]) else {
+        return false;
+    };
+    if tags
+        .split(|&b| b == 0)
+        .filter(|e| !e.is_empty())
+        .any(|e| e[0] == b'S' || e[0].is_ascii_lowercase())
+    {
+        return false;
+    }
+    let status = [
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=normal",
+        // A submodule's commit as recorded; what's in it is a repository of
+        // its own, looked at as one.
+        "--ignore-submodules=dirty",
+    ];
+    if git.out(dir, &status).is_none_or(|s| !s.is_empty()) {
+        return false;
+    }
+    // `rev-parse --verify` fails without a stash.
+    if git.ok(dir, &["rev-parse", "--verify", "--quiet", "refs/stash"]) {
+        return false;
+    }
+    // No commit only here. With no remote every one is; with no commit
+    // `rev-list` fails.
+    let only_here = [
+        "rev-list",
+        "-n",
+        "1",
+        "HEAD",
+        "--branches",
+        "--not",
+        "--remotes",
+    ];
+    git.out(dir, &only_here).is_some_and(|o| o.is_empty())
+}
+
 /// Projects in the code folders ([`crate::owners::code_folders`]) with
 /// linked worktrees.
 fn repos(home: &Path) -> Vec<PathBuf> {

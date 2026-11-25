@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 ## Unreleased
 
 ### Fixed
+- Deleting build output with a git repository somewhere inside it (a dependency checked out
+  in `node_modules`, a clone a script made in `dist`) lost what was only in it. It's deleted only
+  when the repository holds nothing its remotes don't: no commit of its own, no change, stash or
+  file git doesn't know, and a remote to fetch it from again. Otherwise it's left, and says why.
 - A `dist`, `Pods` or `build` folder git keeps files in (CocoaPods' `Pods` committed, a
   library's `dist`) was labelled build output in what the disk is made of. It's part of the
   project.
