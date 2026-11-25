@@ -6,29 +6,115 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## [0.1.8] - 2026-11-25
+
+### Added
+- When the daily tidy-up keeps folders out of Time Machine by itself, a notification says which
+  ones (up to three by name), and opens the Time Machine page, where one is backed up again.
+
 ### Fixed
+- Where a variable set in `.zshrc` or `.bash_profile` says a tool keeps its files elsewhere
+  (`GRADLE_USER_HOME`, `ANDROID_HOME` or `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `XDG_CONFIG_HOME`
+  for Homebrew's `brew.env`), the app and the watcher looked, and wrote, where the tool never
+  reads: started by macOS, not from a shell, they don't see it. They now ask your login shell
+  once, as an interactive one, with nothing to read and at most 5 seconds to answer;
+  `MDIF_RESOLVING_ENVIRONMENT=1` is set, so a startup file can skip slow work. (The watcher asks
+  only with Full Disk Access: a startup file may open a folder that asks for permission.)
+- Deleting build output with a git repository somewhere inside it (a dependency checked out
+  in `node_modules`, a clone a script made in `dist`) lost what was only in it. It's deleted only
+  when the repository holds nothing its remotes don't: no commit of its own, no change, stash or
+  file git doesn't know, and a remote to fetch it from again. Otherwise it's left, and says why.
+- A `dist`, `Pods` or `build` folder git keeps files in (CocoaPods' `Pods` committed, a
+  library's `dist`) was labelled build output in what the disk is made of. It's part of the
+  project.
+- `mdif map` on a Mac showed "not measured" below zero when it counted more than the disk uses
+  (clones whose shared blocks couldn't be told apart, files that grew while it ran). It says how
+  much was counted twice, as on Windows.
+- What each folder grows: a folder moved or renamed counted as freed where it was and as new
+  where it went when its new place was listed first, or when where it went couldn't be asked (as
+  when nothing may show a privacy prompt). It's found by its number at its new place now. A
+  folder moved out of another that was deleted after no longer took the deleted one's size
+  along, and files moved into a folder seen for the first time count there (a Mac records when
+  each was put there; a moved file keeps when it was made).
+- After FSEvents dropped events, the folders it asked to have listed again were listed in one
+  period, up to 20,000 of them, whatever it cost. A rescan now stops when the period's share is
+  spent and goes on in the next, counting what was made since it began.
+
+## [0.1.7] - 2026-11-25
+
+### Fixed
+- `mdif tweaks` lines up each tweak's title past its id however long the id is: on Windows,
+  `recycle-bin-auto-empty` ran into its title.
+
+## [0.1.6] - 2026-11-25
+
+### Added
+- A Windows edition, for x64 and ARM64 PCs, not yet signed (Windows' SmartScreen asks before the
+  first run: More info, then Run anyway; the README says how to check a download). It watches
+  the disk and forecasts when it fills, shows what it's made of, Old Files, a clean-up, Automatic
+  Clean-ups, Prevention and Ask AI, from the tray, and updates itself, signed, from GitHub. Not
+  in it yet: a Backups page, Docker's clean-ups and what each program writes.
+- `mdif space --cached`: the last measurement, however old, without measuring the disk again (it
+  fails when there is none yet).
+
+### Changed
+- A file of a megabyte or more right in a folder whose folders are each followed (the home
+  folder, Movies, Documents, `~/Library/Caches`) is followed as itself: the one that keeps growing
+  is named, not the whole folder. Where there are more than 1,024 of them, the biggest are.
+
+### Fixed
+- Clean Up kept what you ticked and unticked only until the disk was measured again: a measure
+  that finished while it was open put the ticks back, and Clean Up then ran what you had unticked.
+  A clean-up that was only partly done now counts as not done at the foot.
 - Clean Up ticked tool caches whose tool doesn't download them again by itself: Playwright's and
   Puppeteer's browsers, LM Studio's, Hugging Face's, llama.cpp's, PyTorch's and Whisper's models,
   Cypress. They're listed with what emptying one costs, unticked, and the daily tidy-up leaves
   them. Emptying a tool's cache keeps what in it isn't cache (Hugging Face's sign-in and
   `accelerate` settings, the JetBrains IDEs' local history of your edits), and waits until its
   vendor's apps are closed.
-- A folder in the home folder named like build output (`build`, `dist`, `target` outside a
-  project in a code folder) got a ticked Delete Build Output. Only a project's is deleted now; a
-  `build` or `dist` beside a `package.json` only when git ignores it and tracks nothing in it.
-- A worktree holding another live worktree counted as finished, and removing it deleted the
-  inner one's work. It stays now, and so does one whose ignored folders hold anything main's
-  don't (a folder of the same name isn't enough).
-- Docker's clean-ups acted on whatever engine `docker`'s current context pointed at, a remote
-  one included. They act on this Mac's Docker Desktop only, and leave networks alone (Remove
-  Old Leftovers no longer removes those of stopped projects).
-- Clean Up ticked its defaults again when a measurement landed while it was open, so a row you
-  had unticked could be deleted. What you tick or untick stays.
-- The forecast said "Not filling up" for days after a clean-up done in several steps outside the
-  app. Steps one after another count as one.
+- A `build`, `dist` or `target` folder, or `~/.gradle`, right in the home folder is never build
+  output: a `package.json` left there by `npm install` made it a ticked, permanent delete.
+- Build output that holds a git repository of its own (a deploy clone in `dist`) is left alone,
+  and an npm project's `build` or `dist` folder counts as build output only when its git ignores
+  it and tracks nothing in it (electron-builder keeps the app's icon and entitlements there).
+- A worktree counted as finished when its ignored files only had the same names as main's, or
+  when it held another worktree still in use: removing it lost what was in them. Every ignored
+  file must now match main's, and a worktree with another inside it is never finished.
+- Worktree checks leave alone a repository whose own git config runs filters or merge drivers
+  (they would run code nobody asked for), as git itself reads it: after a byte-order mark, with
+  two sections on a line, or set for one worktree. One that includes another file is left alone
+  without opening it (it may be in a folder that asks for permission). A partial clone is left
+  alone too, git never fetches, and a worktree with submodules is never finished (git refuses to
+  remove one).
+- Emptying the Trash honours what you keep: a kept file in it stays, and so does the Trash.
+- A folder git tracks counted as untracked build output when its name's case, or a folder's above
+  it, differed from git's (`Build` on disk, `build` in git), and could be deleted.
+- Ask AI sends no folder whose name has your account's in it.
+- Docker's clean-ups (Remove Old Leftovers and the daily tidy) followed the shell's Docker
+  context, which could be a remote engine: they now always reach this Mac's Docker Desktop, and
+  leave networks alone (Remove Old Leftovers no longer removes those of stopped projects).
+- `mdif clean` of a link given with a trailing slash (`link/`) emptied what the link points to.
+- `mdif keep add ../target` kept nothing, and `mdif clean src/../target` got past what you keep:
+  `..` is resolved now. A keep list saved with a byte-order mark is read.
 - Measuring went into volumes mounted inside a folder, and deleting the folder would have gone
   into them too. A mount point is skipped, and a folder with a volume mounted in it isn't
   deleted.
+- Code folders whose names differ only in case (`Projects`, `projects`) were looked at twice:
+  the daily tidy's dry run listed each folder twice, and each finished worktree was suggested
+  twice.
+- After the watcher stopped, the app kept saying the disk would be full within a day, around a
+  date already past.
+- One afternoon of builds could pass the forecast's check that a trend holds without any one
+  day, and raise an alert.
+- Clean-up suggestions planned from the background could open a folder that asks for permission
+  (another app's, a cloud folder's).
+- Ask AI's requests, and updating the folder list, read `~/.curlrc`, which could send the reply
+  to a file or switch off certificate checks.
+- A period the history couldn't save (the disk full) now shows as a gap.
+- A folder named like build output outside a project in a code folder (`~/Research/build`) got
+  a ticked Delete Build Output: only a project's is deleted now.
+- The forecast said "Not filling up" for days after a clean-up done in several steps outside the
+  app. Steps one after another count as one.
 - The backups tidy-up kept your own folders out of Time Machine when they were named like a
   cache. Only a tool's folders (a dot-folder in the home folder, or one with a cache's
   `CACHEDIR.TAG`) are kept out now, never one that holds something you keep.
@@ -43,7 +129,6 @@ All notable changes to this project are documented here. The format is based on
   another app's data; they skip what would ask, as the watcher does. So do the watcher's daily
   tidy-ups when they run git, which now gives up after 30 seconds and never fetches what a
   partial clone lacks.
-- Asking ChatGPT and updating the folder list read your `~/.curlrc`: they don't now.
 - Signing out of ChatGPT could be stopped before the sign-in was forgotten here, and the app
   said "Signed out" anyway. It's forgotten first, and the app says what mdif answered. A
   sign-in OpenAI no longer recognises is forgotten too, so signing in again works instead of
@@ -52,7 +137,6 @@ All notable changes to this project are documented here. The format is based on
   breakdown, and a breakdown patched only in part showed the difference as System data. A
   clean-up's patch is kept until a measurement covers it, and a partial one is measured again
   in the background.
-- A keep list entry with `..` in it protected another path than the one named.
 - The growth incident's "at least 8 points" rule could never fail; it now needs three samples
   that grew. Two downloads in a day no longer raise it.
 - The growth incident and the History chart read free space without what macOS can purge,
@@ -62,10 +146,6 @@ All notable changes to this project are documented here. The format is based on
   sample to sample, now.
 - A file growing out of control directly in a folder like `~/Library` never counted as that
   folder's growth.
-- `~/Code` and `~/code` (and `~/Projects`, `~/projects`) were walked twice, so each finished
-  worktree in them was suggested twice.
-- `mdif clean` with a trailing slash (`~/dist/`) followed a link to a folder, and the keep list
-  didn't see the folder it pointed to.
 - A watcher started with `mdif agent install` that had stopped looked healthy, and Settings
   said "Not watching" while it ran.
 - Restart picked a same-named helper of another app.
@@ -89,7 +169,6 @@ All notable changes to this project are documented here. The format is based on
   could resume from an event that wasn't there and miss what grew.
 - A "cloud folder left behind" (with Move to Trash) could be a live one whose name has
   brackets: "OneDrive-Org (UK)". Only a name with the date macOS gives it counts now.
-- Emptying the Trash ignored the keep list (Storage offers Keep on its row).
 - A folder an app's handler suggests moving to the Trash, or emptying, still had the button with
   something you keep inside it.
 - Deleting build output didn't check that nothing runs from it (a tool started from
@@ -747,6 +826,9 @@ The first release.
 - File, folder and process names are printed with control characters and bidi overrides escaped
   (`\u{1b}`), so a crafted file name in a scanned folder can't inject terminal escape sequences.
 
+[0.1.8]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.8
+[0.1.7]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.7
+[0.1.6]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.6
 [0.1.5]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.5
 [0.1.4]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.4
 [0.1.3]: https://github.com/lgibelli/mydiskisfull/releases/tag/v0.1.3

@@ -8,7 +8,7 @@ use mdif_core::profile::{self, Profile};
 use mdif_core::settings::Setting;
 use mdif_core::store::Store;
 use mdif_core::suggest::{self, Fix};
-use mdif_core::text::printable;
+use mdif_core::text::{printable, shell_quote};
 use mdif_core::tweaks::{self, After, CATALOGUE, Check, Status, Step, Tweak};
 use mdif_core::units::bytes;
 use mdif_core::watch::unix_now;
@@ -32,7 +32,7 @@ fn find(id: &str) -> Result<&'static Tweak> {
 }
 
 pub fn list(db: &Path, json_out: bool) -> Result<()> {
-    mdif_macos::fs::forbid_dataless_materialization()?;
+    mdif_core::os::fs::forbid_dataless_materialization()?;
     let home = home();
     let store = store(db)?;
     let now = unix_now();
@@ -95,17 +95,25 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
         return Ok(());
     }
     println!("Each tweak stops something from filling the disk again, and can be undone.");
+    // As wide as the longest id and two spaces (`recycle-bin-auto-empty` ran
+    // into its title at a fixed 20).
+    let w = rows
+        .iter()
+        .map(|(t, ..)| t.id.len() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(20);
     for (t, status, check, size) in &rows {
         println!();
-        println!("{:<20}{}", t.id, t.title);
+        println!("{:<w$}{}", t.id, t.title);
         println!(
-            "{:<20}{}",
+            "{:<w$}{}",
             "",
             state_line(t, *status, check.as_ref(), *size)
         );
         if let Some(c) = check {
             for line in evidence(t, c) {
-                println!("{:<20}{line}", "");
+                println!("{:<w$}{line}", "");
             }
         }
     }
@@ -193,7 +201,8 @@ pub fn apply(db: &Path, id: &str, dry_run: bool, json_out: bool) -> Result<()> {
     let t = find(id)?;
     let home = home();
     if let Status::Absent(why) = t.status(&home)? {
-        bail!("{id} doesn't apply to this Mac: {why}.");
+        let here = if cfg!(windows) { "this PC" } else { "this Mac" };
+        bail!("{id} doesn't apply to {here}: {why}.");
     }
     // It has an app clear out its folders: not what you keep.
     let keep = crate::keep_cmd::load(db)?;
@@ -278,6 +287,7 @@ fn next_line(after: After, profile: Option<&Profile>) -> String {
         After::Nothing => "Done; it takes effect from now on.".into(),
         After::Relaunch(app) => format!("Done; it takes effect once {app} restarts."),
         After::Restart => "Done; restart the Mac when it suits you to finish.".into(),
+        After::SignOut => "Done; it takes effect once you sign out of Windows and back in.".into(),
         After::Approve(app) => format!(
             "Next: System Settings is open at {}. Double-click “{}”, read what it holds, then \
              click Install and enter your password. If macOS says it's unsigned or unverified, \
@@ -334,6 +344,7 @@ pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
         .map(|(s, v)| format!("{}: {}", setting_name(s), value_text(s, v.as_ref())))
         .collect();
     let restart = t.after == After::Restart && !restored.is_empty();
+    let sign_out = t.after == After::SignOut && !restored.is_empty();
     if json_out {
         let out = json!({
             "id": t.id,
@@ -341,6 +352,7 @@ pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
             "restored": restored,
             "kept": kept,
             "restart": restart,
+            "sign_out": sign_out,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -362,6 +374,9 @@ pub fn revert(db: &Path, id: &str, json_out: bool) -> Result<()> {
     }
     if restart {
         println!("It takes effect after a restart.");
+    }
+    if sign_out {
+        println!("It takes effect once you sign out of Windows and back in.");
     }
     Ok(())
 }
@@ -409,7 +424,7 @@ pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
     }
-    let st = mdif_macos::fs::statfs(volume)?;
+    let st = mdif_core::os::fs::statfs(volume)?;
     println!(
         "Free now: {} of {} on {}.",
         bytes(st.avail),
@@ -446,16 +461,12 @@ pub fn suggest(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
             let paths: Vec<String> = a.paths.iter().map(|p| shell_quote(p)).collect();
             println!(
                 "    Or `mdif clean {}`: {}, after checking again.",
-                paths.join(" "),
+                printable(&paths.join(" ")),
                 a.label.to_lowercase()
             );
         }
     }
     Ok(())
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A fix as printed: commands' paths already quoted, but control characters

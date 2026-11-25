@@ -1,0 +1,858 @@
+{
+  "root": "C:\\",
+  "container": {
+    "ContainerReference": "C:\\",
+    "CapacityCeiling": 494400000000,
+    "CapacityFree": 21000000000,
+    "Volumes": []
+  },
+  "volume": {
+    "Name": "Windows",
+    "DeviceIdentifier": "C:\\",
+    "Roles": [],
+    "CapacityInUse": 473400000000
+  },
+  "snapshots": [],
+  "scan": {
+    "root": {
+      "path": "C:\\",
+      "totals": {
+        "allocated": 240299999999,
+        "private": 240299999999,
+        "logical": 240299999999,
+        "files": 10,
+        "dirs": 6,
+        "dataless_files": 0,
+        "dataless_logical": 0,
+        "purgeable": 0,
+        "unreadable_dirs": 0,
+        "other_volumes": 0,
+        "linked_elsewhere": 0,
+        "links_unknown": 0
+      },
+      "children": [
+        {
+          "path": "C:\\Users",
+          "totals": {
+            "allocated": 129000000000,
+            "private": 129000000000,
+            "logical": 129000000000,
+            "files": 10,
+            "dirs": 1,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": [
+            {
+              "path": "C:\\Users\\me",
+              "totals": {
+                "allocated": 128800000000,
+                "private": 128800000000,
+                "logical": 128800000000,
+                "files": 10,
+                "dirs": 6,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": [
+                {
+                  "path": "C:\\Users\\me\\AppData",
+                  "totals": {
+                    "allocated": 59600000000,
+                    "private": 59600000000,
+                    "logical": 59600000000,
+                    "files": 10,
+                    "dirs": 2,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": [
+                    {
+                      "path": "C:\\Users\\me\\AppData\\Local",
+                      "totals": {
+                        "allocated": 55800000000,
+                        "private": 55800000000,
+                        "logical": 55800000000,
+                        "files": 10,
+                        "dirs": 4,
+                        "dataless_files": 0,
+                        "dataless_logical": 0,
+                        "purgeable": 0,
+                        "unreadable_dirs": 0,
+                        "other_volumes": 0,
+                        "linked_elsewhere": 0,
+                        "links_unknown": 0
+                      },
+                      "children": [
+                        {
+                          "path": "C:\\Users\\me\\AppData\\Local\\Packages",
+                          "totals": {
+                            "allocated": 25600000000,
+                            "private": 25600000000,
+                            "logical": 25600000000,
+                            "files": 10,
+                            "dirs": 1,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": [
+                            {
+                              "path": "C:\\Users\\me\\AppData\\Local\\Packages\\CanonicalGroupLimited.Ubuntu_79rhkp1fndgsc",
+                              "totals": {
+                                "allocated": 24500000000,
+                                "private": 24500000000,
+                                "logical": 24500000000,
+                                "files": 10,
+                                "dirs": 0,
+                                "dataless_files": 0,
+                                "dataless_logical": 0,
+                                "purgeable": 0,
+                                "unreadable_dirs": 0,
+                                "other_volumes": 0,
+                                "linked_elsewhere": 0,
+                                "links_unknown": 0
+                              },
+                              "children": []
+                            }
+                          ]
+                        },
+                        {
+                          "path": "C:\\Users\\me\\AppData\\Local\\Docker",
+                          "totals": {
+                            "allocated": 18200000000,
+                            "private": 18200000000,
+                            "logical": 18200000000,
+                            "files": 10,
+                            "dirs": 0,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": []
+                        },
+                        {
+                          "path": "C:\\Users\\me\\AppData\\Local\\Temp",
+                          "totals": {
+                            "allocated": 6200000000,
+                            "private": 6200000000,
+                            "logical": 6200000000,
+                            "files": 10,
+                            "dirs": 0,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": []
+                        },
+                        {
+                          "path": "C:\\Users\\me\\AppData\\Local\\Google",
+                          "totals": {
+                            "allocated": 4600000000,
+                            "private": 4600000000,
+                            "logical": 4600000000,
+                            "files": 10,
+                            "dirs": 1,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": [
+                            {
+                              "path": "C:\\Users\\me\\AppData\\Local\\Google\\Chrome",
+                              "totals": {
+                                "allocated": 4300000000,
+                                "private": 4300000000,
+                                "logical": 4300000000,
+                                "files": 10,
+                                "dirs": 0,
+                                "dataless_files": 0,
+                                "dataless_logical": 0,
+                                "purgeable": 0,
+                                "unreadable_dirs": 0,
+                                "other_volumes": 0,
+                                "linked_elsewhere": 0,
+                                "links_unknown": 0
+                              },
+                              "children": []
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "path": "C:\\Users\\me\\AppData\\Roaming",
+                      "totals": {
+                        "allocated": 3400000000,
+                        "private": 3400000000,
+                        "logical": 3400000000,
+                        "files": 10,
+                        "dirs": 1,
+                        "dataless_files": 0,
+                        "dataless_logical": 0,
+                        "purgeable": 0,
+                        "unreadable_dirs": 0,
+                        "other_volumes": 0,
+                        "linked_elsewhere": 0,
+                        "links_unknown": 0
+                      },
+                      "children": [
+                        {
+                          "path": "C:\\Users\\me\\AppData\\Roaming\\Code",
+                          "totals": {
+                            "allocated": 1300000000,
+                            "private": 1300000000,
+                            "logical": 1300000000,
+                            "files": 10,
+                            "dirs": 0,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": []
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "C:\\Users\\me\\source",
+                  "totals": {
+                    "allocated": 40200000000,
+                    "private": 40200000000,
+                    "logical": 40200000000,
+                    "files": 10,
+                    "dirs": 1,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": [
+                    {
+                      "path": "C:\\Users\\me\\source\\repos",
+                      "totals": {
+                        "allocated": 40200000000,
+                        "private": 40200000000,
+                        "logical": 40200000000,
+                        "files": 10,
+                        "dirs": 2,
+                        "dataless_files": 0,
+                        "dataless_logical": 0,
+                        "purgeable": 0,
+                        "unreadable_dirs": 0,
+                        "other_volumes": 0,
+                        "linked_elsewhere": 0,
+                        "links_unknown": 0
+                      },
+                      "children": [
+                        {
+                          "path": "C:\\Users\\me\\source\\repos\\app",
+                          "totals": {
+                            "allocated": 33300000000,
+                            "private": 33300000000,
+                            "logical": 33300000000,
+                            "files": 10,
+                            "dirs": 2,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": [
+                            {
+                              "path": "C:\\Users\\me\\source\\repos\\app\\target",
+                              "totals": {
+                                "allocated": 31200000000,
+                                "private": 31200000000,
+                                "logical": 31200000000,
+                                "files": 10,
+                                "dirs": 0,
+                                "dataless_files": 0,
+                                "dataless_logical": 0,
+                                "purgeable": 0,
+                                "unreadable_dirs": 0,
+                                "other_volumes": 0,
+                                "linked_elsewhere": 0,
+                                "links_unknown": 0
+                              },
+                              "children": []
+                            },
+                            {
+                              "path": "C:\\Users\\me\\source\\repos\\app\\node_modules",
+                              "totals": {
+                                "allocated": 1600000000,
+                                "private": 1600000000,
+                                "logical": 1600000000,
+                                "files": 10,
+                                "dirs": 0,
+                                "dataless_files": 0,
+                                "dataless_logical": 0,
+                                "purgeable": 0,
+                                "unreadable_dirs": 0,
+                                "other_volumes": 0,
+                                "linked_elsewhere": 0,
+                                "links_unknown": 0
+                              },
+                              "children": []
+                            }
+                          ]
+                        },
+                        {
+                          "path": "C:\\Users\\me\\source\\repos\\Shop",
+                          "totals": {
+                            "allocated": 6500000000,
+                            "private": 6500000000,
+                            "logical": 6500000000,
+                            "files": 10,
+                            "dirs": 1,
+                            "dataless_files": 0,
+                            "dataless_logical": 0,
+                            "purgeable": 0,
+                            "unreadable_dirs": 0,
+                            "other_volumes": 0,
+                            "linked_elsewhere": 0,
+                            "links_unknown": 0
+                          },
+                          "children": [
+                            {
+                              "path": "C:\\Users\\me\\source\\repos\\Shop\\Shop.Web",
+                              "totals": {
+                                "allocated": 5900000000,
+                                "private": 5900000000,
+                                "logical": 5900000000,
+                                "files": 10,
+                                "dirs": 2,
+                                "dataless_files": 0,
+                                "dataless_logical": 0,
+                                "purgeable": 0,
+                                "unreadable_dirs": 0,
+                                "other_volumes": 0,
+                                "linked_elsewhere": 0,
+                                "links_unknown": 0
+                              },
+                              "children": [
+                                {
+                                  "path": "C:\\Users\\me\\source\\repos\\Shop\\Shop.Web\\bin",
+                                  "totals": {
+                                    "allocated": 3900000000,
+                                    "private": 3900000000,
+                                    "logical": 3900000000,
+                                    "files": 10,
+                                    "dirs": 0,
+                                    "dataless_files": 0,
+                                    "dataless_logical": 0,
+                                    "purgeable": 0,
+                                    "unreadable_dirs": 0,
+                                    "other_volumes": 0,
+                                    "linked_elsewhere": 0,
+                                    "links_unknown": 0
+                                  },
+                                  "children": []
+                                },
+                                {
+                                  "path": "C:\\Users\\me\\source\\repos\\Shop\\Shop.Web\\obj",
+                                  "totals": {
+                                    "allocated": 1700000000,
+                                    "private": 1700000000,
+                                    "logical": 1700000000,
+                                    "files": 10,
+                                    "dirs": 0,
+                                    "dataless_files": 0,
+                                    "dataless_logical": 0,
+                                    "purgeable": 0,
+                                    "unreadable_dirs": 0,
+                                    "other_volumes": 0,
+                                    "linked_elsewhere": 0,
+                                    "links_unknown": 0
+                                  },
+                                  "children": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "C:\\Users\\me\\Videos",
+                  "totals": {
+                    "allocated": 13900000000,
+                    "private": 13900000000,
+                    "logical": 13900000000,
+                    "files": 10,
+                    "dirs": 1,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": [
+                    {
+                      "path": "C:\\Users\\me\\Videos\\Captures",
+                      "totals": {
+                        "allocated": 12800000000,
+                        "private": 12800000000,
+                        "logical": 12800000000,
+                        "files": 10,
+                        "dirs": 0,
+                        "dataless_files": 0,
+                        "dataless_logical": 0,
+                        "purgeable": 0,
+                        "unreadable_dirs": 0,
+                        "other_volumes": 0,
+                        "linked_elsewhere": 0,
+                        "links_unknown": 0
+                      },
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "path": "C:\\Users\\me\\Downloads",
+                  "totals": {
+                    "allocated": 7900000000,
+                    "private": 7900000000,
+                    "logical": 7900000000,
+                    "files": 10,
+                    "dirs": 0,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": []
+                },
+                {
+                  "path": "C:\\Users\\me\\OneDrive",
+                  "totals": {
+                    "allocated": 3300000000,
+                    "private": 3300000000,
+                    "logical": 3300000000,
+                    "files": 10,
+                    "dirs": 0,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": []
+                },
+                {
+                  "path": "C:\\Users\\me\\Documents",
+                  "totals": {
+                    "allocated": 2400000000,
+                    "private": 2400000000,
+                    "logical": 2400000000,
+                    "files": 10,
+                    "dirs": 0,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "C:\\Program Files (x86)",
+          "totals": {
+            "allocated": 64500000000,
+            "private": 64500000000,
+            "logical": 64500000000,
+            "files": 10,
+            "dirs": 1,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": [
+            {
+              "path": "C:\\Program Files (x86)\\Steam",
+              "totals": {
+                "allocated": 64000000000,
+                "private": 64000000000,
+                "logical": 64000000000,
+                "files": 10,
+                "dirs": 1,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": [
+                {
+                  "path": "C:\\Program Files (x86)\\Steam\\steamapps",
+                  "totals": {
+                    "allocated": 63000000000,
+                    "private": 63000000000,
+                    "logical": 63000000000,
+                    "files": 10,
+                    "dirs": 1,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": [
+                    {
+                      "path": "C:\\Program Files (x86)\\Steam\\steamapps\\common",
+                      "totals": {
+                        "allocated": 61000000000,
+                        "private": 61000000000,
+                        "logical": 61000000000,
+                        "files": 10,
+                        "dirs": 0,
+                        "dataless_files": 0,
+                        "dataless_logical": 0,
+                        "purgeable": 0,
+                        "unreadable_dirs": 0,
+                        "other_volumes": 0,
+                        "linked_elsewhere": 0,
+                        "links_unknown": 0
+                      },
+                      "children": []
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "C:\\Windows",
+          "totals": {
+            "allocated": 23399999999,
+            "private": 23399999999,
+            "logical": 23399999999,
+            "files": 10,
+            "dirs": 4,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": [
+            {
+              "path": "C:\\Windows\\WinSxS",
+              "totals": {
+                "allocated": 9400000000,
+                "private": 9400000000,
+                "logical": 9400000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            },
+            {
+              "path": "C:\\Windows\\System32",
+              "totals": {
+                "allocated": 6299999999,
+                "private": 6299999999,
+                "logical": 6299999999,
+                "files": 10,
+                "dirs": 1,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": [
+                {
+                  "path": "C:\\Windows\\System32\\DriverStore",
+                  "totals": {
+                    "allocated": 2200000000,
+                    "private": 2200000000,
+                    "logical": 2200000000,
+                    "files": 10,
+                    "dirs": 0,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": []
+                }
+              ]
+            },
+            {
+              "path": "C:\\Windows\\SoftwareDistribution",
+              "totals": {
+                "allocated": 2800000000,
+                "private": 2800000000,
+                "logical": 2800000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            },
+            {
+              "path": "C:\\Windows\\Installer",
+              "totals": {
+                "allocated": 1900000000,
+                "private": 1900000000,
+                "logical": 1900000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "path": "C:\\Program Files",
+          "totals": {
+            "allocated": 15600000000,
+            "private": 15600000000,
+            "logical": 15600000000,
+            "files": 10,
+            "dirs": 3,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": [
+            {
+              "path": "C:\\Program Files\\Adobe",
+              "totals": {
+                "allocated": 10000000000,
+                "private": 10000000000,
+                "logical": 10000000000,
+                "files": 10,
+                "dirs": 1,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": [
+                {
+                  "path": "C:\\Program Files\\Adobe\\Adobe Premiere Pro 2026",
+                  "totals": {
+                    "allocated": 4400000000,
+                    "private": 4400000000,
+                    "logical": 4400000000,
+                    "files": 10,
+                    "dirs": 0,
+                    "dataless_files": 0,
+                    "dataless_logical": 0,
+                    "purgeable": 0,
+                    "unreadable_dirs": 0,
+                    "other_volumes": 0,
+                    "linked_elsewhere": 0,
+                    "links_unknown": 0
+                  },
+                  "children": []
+                }
+              ]
+            },
+            {
+              "path": "C:\\Program Files\\Microsoft Office",
+              "totals": {
+                "allocated": 3200000000,
+                "private": 3200000000,
+                "logical": 3200000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            },
+            {
+              "path": "C:\\Program Files\\NVIDIA Corporation",
+              "totals": {
+                "allocated": 1400000000,
+                "private": 1400000000,
+                "logical": 1400000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "path": "C:\\ProgramData",
+          "totals": {
+            "allocated": 3400000000,
+            "private": 3400000000,
+            "logical": 3400000000,
+            "files": 10,
+            "dirs": 1,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": [
+            {
+              "path": "C:\\ProgramData\\Package Cache",
+              "totals": {
+                "allocated": 2600000000,
+                "private": 2600000000,
+                "logical": 2600000000,
+                "files": 10,
+                "dirs": 0,
+                "dataless_files": 0,
+                "dataless_logical": 0,
+                "purgeable": 0,
+                "unreadable_dirs": 0,
+                "other_volumes": 0,
+                "linked_elsewhere": 0,
+                "links_unknown": 0
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "path": "C:\\$Recycle.Bin",
+          "totals": {
+            "allocated": 2400000000,
+            "private": 2400000000,
+            "logical": 2400000000,
+            "files": 10,
+            "dirs": 0,
+            "dataless_files": 0,
+            "dataless_logical": 0,
+            "purgeable": 0,
+            "unreadable_dirs": 0,
+            "other_volumes": 0,
+            "linked_elsewhere": 0,
+            "links_unknown": 0
+          },
+          "children": []
+        }
+      ]
+    },
+    "real": 246299999999,
+    "shared_once": 6000000000,
+    "shared_uncertain": 0,
+    "unreadable": []
+  },
+  "notes": [
+    "A file under 1 MiB is taken to have one name, so a small hard-linked file is counted once per name here and its share can be off.",
+    "A file held open for writing can be listed behind what it really takes; the next scan after it closes shows it."
+  ]
+}

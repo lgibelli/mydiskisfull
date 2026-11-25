@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mdif_macos::bulk::{self, EF_MAY_SHARE_BLOCKS, Entry, Kind};
-use mdif_macos::extents;
+use crate::os::bulk::{self, Entry, Kind};
+use crate::os::extents;
 use rayon::prelude::*;
 use serde::Serialize;
 
@@ -56,6 +56,10 @@ pub struct Totals {
     /// Private bytes of hard-linked files that also have links outside this
     /// folder: deleting the folder doesn't free them.
     pub linked_elsewhere: u64,
+    /// Private bytes of files whose names couldn't be counted (Windows: one
+    /// it holds open, such as the page file): counted once, but not as freed
+    /// by deleting the folder, as they may have other names.
+    pub links_unknown: u64,
     /// Allocated bytes times their file's modification time, summed: see
     /// [`Totals::mean_mtime`].
     #[serde(skip)]
@@ -91,6 +95,7 @@ impl Totals {
         self.unreadable_dirs += o.unreadable_dirs;
         self.other_volumes += o.other_volumes;
         self.linked_elsewhere += o.linked_elsewhere;
+        self.links_unknown += o.links_unknown;
         self.mtime_weighted += o.mtime_weighted;
         self.cold += o.cold;
         self.cloned += o.cloned;
@@ -118,7 +123,7 @@ impl Totals {
         if e.mtime < cold_before {
             self.cold += e.allocated;
         }
-        if e.ext_flags & EF_MAY_SHARE_BLOCKS != 0 {
+        if e.may_share_blocks() {
             self.cloned += e.shared();
         }
         if e.is_dataless() {
@@ -133,6 +138,7 @@ impl Totals {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Node {
+    #[serde(serialize_with = "crate::text::lossy_path")]
     pub path: PathBuf,
     pub totals: Totals,
     /// Largest first. Only kept down to `Options::max_depth` and for
@@ -188,6 +194,7 @@ pub struct Scan {
     /// high.
     pub shared_uncertain: u64,
     /// Sample of directories we could not read (permissions).
+    #[serde(serialize_with = "crate::text::lossy_paths")]
     pub unreadable: Vec<PathBuf>,
     /// With [`Options::big_files`]: the files that big, in no order.
     #[serde(skip)]
@@ -229,6 +236,25 @@ struct Clones {
 /// The physical extents of a file that shares blocks, and the bytes they
 /// cover.
 type Shared = (Arc<[(u64, u64)]>, u64);
+
+/// Bytes covered by `extents`, overlaps counted once. Sorts in place.
+pub fn union_len(extents: &mut [(u64, u64)]) -> u64 {
+    extents.sort_unstable();
+    let mut total = 0;
+    let mut cur: Option<(u64, u64)> = None;
+    for &(start, len) in extents.iter() {
+        let end = start + len;
+        cur = match cur {
+            Some((s, e)) if start <= e => Some((s, e.max(end))),
+            Some((s, e)) => {
+                total += e - s;
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    total + cur.map_or(0, |(s, e)| e - s)
+}
 
 /// Extents of the files under a folder that share blocks, each counted
 /// once, and what they'd add up to file by file.
@@ -305,9 +331,12 @@ impl Ctx<'_> {
     /// blocks with clones comes back with its extents.
     fn account(&self, path: &Path, e: &Entry) -> Option<Shared> {
         if e.is_dataless() {
+            // Nothing on the disk on a Mac; a cloud file on Windows can be partly
+            // here, and what is here is counted (from the entry, not its contents).
+            self.plain.fetch_add(e.allocated, Ordering::Relaxed);
             return None;
         }
-        if e.kind != Kind::File || e.ext_flags & EF_MAY_SHARE_BLOCKS == 0 || e.shared() == 0 {
+        if e.kind != Kind::File || !e.may_share_blocks() || e.shared() == 0 {
             // Its shared bytes, if any, are only shared with a snapshot.
             self.plain.fetch_add(e.allocated, Ordering::Relaxed);
             return None;
@@ -316,7 +345,7 @@ impl Ctx<'_> {
             return s.clone();
         }
         let read = extents::physical(path, BLOCK).ok().map(|mut x| {
-            let mapped = extents::union_len(&mut x);
+            let mapped = union_len(&mut x);
             (Arc::<[(u64, u64)]>::from(x), mapped)
         });
         let mut clones = self.clones.lock().unwrap();
@@ -363,8 +392,11 @@ pub fn size_of(path: &Path) -> Option<u64> {
 /// made, frees nothing or less), a file's allocated ones, none while it
 /// has another link. 0 when it doesn't exist, `None` when it can't be read.
 pub fn freed_by(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    measured(path, |t| t.private, |m| m.nlink() <= 1)
+    measured(
+        path,
+        |t| t.private,
+        |m| crate::portable::links(path, m) <= 1,
+    )
 }
 
 /// A folder's `total`, or a file's allocated bytes when it `counts`.
@@ -373,9 +405,8 @@ fn measured(
     total: impl Fn(&Totals) -> u64,
     counts: impl Fn(&std::fs::Metadata) -> bool,
 ) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
     // Measuring must never download a cloud placeholder.
-    mdif_macos::fs::forbid_dataless_materialization().ok()?;
+    crate::os::fs::forbid_dataless_materialization().ok()?;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => {
             let opts = Options {
@@ -386,19 +417,21 @@ fn measured(
             scan(path, &opts).ok().map(|s| total(&s.root.totals))
         }
         Ok(m) if !counts(&m) => Some(0),
-        Ok(m) => Some(m.blocks() * 512),
+        Ok(m) => Some(crate::portable::allocated(path, &m)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
         Err(_) => None,
     }
 }
 
 pub fn scan(root: &Path, opts: &Options) -> io::Result<Scan> {
+    // Every scan, whoever asks: a listing must never download a cloud folder.
+    crate::os::fs::forbid_dataless_materialization()?;
     if !crate::privacy::may_open(root) {
-        return Err(io::Error::from_raw_os_error(libc::EPERM));
+        return Err(crate::portable::denied());
     }
     // Whoever calls it: listing a cloud placeholder must never download it.
-    mdif_macos::fs::forbid_dataless_materialization()?;
-    let dev = mdif_macos::fs::dev_of(root)?;
+    crate::os::fs::forbid_dataless_materialization()?;
+    let dev = crate::os::fs::dev_of(root)?;
     // Fails loudly instead of reporting an empty tree.
     bulk::open_dir(root)?;
     let started = std::time::SystemTime::now()
@@ -443,9 +476,27 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
     let listed = if crate::privacy::may_open(dir) {
         bulk::read_dir(dir)
     } else {
-        Err(io::Error::from_raw_os_error(libc::EPERM))
+        Err(crate::portable::denied())
     };
     let entries = match listed {
+        // A volume mounted here: its folder was listed above with this
+        // volume's device (the folder it covers), but what's in it is the
+        // other volume's, which this scan doesn't cross into.
+        Ok(e) if e.first().is_some_and(|f| f.dev != ctx.dev) => {
+            base.dirs = 0;
+            base.other_volumes = 1;
+            return Walked {
+                node: Node {
+                    path: dir.to_path_buf(),
+                    totals: base,
+                    children: Vec::new(),
+                },
+                base,
+                links,
+                blocks: Blocks::default(),
+                unreadable: Vec::new(),
+            };
+        }
         Ok(e) => e,
         Err(_) => {
             base.unreadable_dirs = 1;
@@ -532,7 +583,11 @@ fn walk(dir: &Path, depth: usize, ctx: &Ctx) -> Walked {
     let mut totals = base;
     for l in links.values() {
         totals.add_linked(&l.entry, ctx.cold_before);
-        totals.linked_elsewhere += l.entry.private;
+        if l.entry.nlink == bulk::LINKS_UNKNOWN {
+            totals.links_unknown += l.entry.private;
+        } else {
+            totals.linked_elsewhere += l.entry.private;
+        }
     }
     children.sort_by_key(|n| std::cmp::Reverse(n.totals.allocated));
     Walked {
@@ -562,12 +617,22 @@ fn merge(into: &mut Links, mut from: Links) {
     }
 }
 
+// What these tests assert is macOS: its folders, tools and file system.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "macos")]
     use std::process::Command;
+
+    #[test]
+    fn union_merges_overlaps() {
+        let mut v = vec![(10, 10), (0, 5), (15, 10), (40, 1)];
+        assert_eq!(union_len(&mut v), 5 + 15 + 1);
+        assert_eq!(union_len(&mut []), 0);
+    }
 
     fn write(path: &Path, len: usize) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -577,7 +642,13 @@ mod tests {
             .collect();
         fs::write(path, data).unwrap();
         // APFS reports a private size of 0 until dirty data is flushed.
-        fs::File::open(path).unwrap().sync_all().unwrap();
+        // Opened for writing: Windows flushes only a handle that may write.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
     }
 
     fn opts(min: u64) -> Options {
@@ -588,6 +659,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn clones_are_counted_once() {
         let t = tempfile::tempdir().unwrap();
@@ -624,6 +696,7 @@ mod tests {
         assert_eq!(s.shared_uncertain, 0);
     }
 
+    #[cfg(target_os = "macos")]
     fn clone(from: &Path, to: &Path) {
         fs::create_dir_all(to.parent().unwrap()).unwrap();
         assert!(
@@ -639,6 +712,7 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_modified_clone_is_counted_once() {
         // Clone 8 MiB, then overwrite 1 MiB of the clone: it gets its own
@@ -699,6 +773,7 @@ mod tests {
 
     /// A pnpm `node_modules` is hard links into its store: deleting it
     /// frees nothing, however big it is, and that's what's said freed.
+    #[cfg(target_os = "macos")]
     #[test]
     fn what_deleting_frees_leaves_out_what_is_linked_elsewhere() {
         let t = tempfile::tempdir().unwrap();
@@ -716,6 +791,7 @@ mod tests {
         assert_eq!(freed_by(&t.path().join("gone")), Some(0));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn small_sparse_files_count_what_apfs_reserves() {
         // APFS reserves the whole length of a small sparse file although its
@@ -750,6 +826,7 @@ mod tests {
         assert_eq!(s.root.totals.dirs, 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_dirs_are_reported_not_fatal() {
         let t = tempfile::tempdir().unwrap();
@@ -763,6 +840,7 @@ mod tests {
         assert_eq!(s.unreadable, [locked]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed() {
         let t = tempfile::tempdir().unwrap();
@@ -771,6 +849,58 @@ mod tests {
         let s = scan(t.path(), &opts(0)).unwrap();
         assert_eq!(s.root.totals.files, 2, "data.bin + the symlink itself");
         assert!(s.root.totals.allocated < 5_000_000);
+    }
+
+    // A disk image mounted inside the scanned folder: its folder is listed with
+    // this volume's device, but nothing in it is this volume's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_volume_mounted_inside_is_not_crossed_into() {
+        let t = tempfile::tempdir().unwrap();
+        let (img, mnt) = (t.path().join("v.dmg"), t.path().join("root/mnt"));
+        fs::create_dir_all(&mnt).unwrap();
+        let hdiutil = |args: &[&std::ffi::OsStr]| {
+            Command::new("/usr/bin/hdiutil")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let made = hdiutil(&[
+            "create".as_ref(),
+            "-quiet".as_ref(),
+            "-size".as_ref(),
+            "16m".as_ref(),
+            "-fs".as_ref(),
+            "APFS".as_ref(),
+            img.as_os_str(),
+        ]) && hdiutil(&[
+            "attach".as_ref(),
+            "-quiet".as_ref(),
+            "-nobrowse".as_ref(),
+            "-mountpoint".as_ref(),
+            mnt.as_os_str(),
+            img.as_os_str(),
+        ]);
+        if !made {
+            eprintln!("no disk image could be mounted: skipped");
+            return;
+        }
+        struct Detach<'a>(&'a Path);
+        impl Drop for Detach<'_> {
+            fn drop(&mut self) {
+                let _ = Command::new("/usr/bin/hdiutil")
+                    .args(["detach".as_ref(), "-force".as_ref(), self.0.as_os_str()])
+                    .status();
+            }
+        }
+        let _detach = Detach(&mnt);
+        write(&mnt.join("inside.bin"), 4_000_000);
+        write(&t.path().join("root/outside.bin"), 1_000_000);
+        let s = scan(&t.path().join("root"), &opts(0)).unwrap();
+        let totals = s.root.totals;
+        assert_eq!(totals.files, 1, "{totals:?}");
+        assert_eq!(totals.other_volumes, 1, "{totals:?}");
+        assert!(totals.allocated < 2_000_000, "{totals:?}");
     }
 
     #[test]
@@ -811,9 +941,8 @@ mod tests {
                 .unwrap()
                 .set_modified(now - std::time::Duration::from_secs(days * 86_400))
                 .unwrap();
-            fs::metadata(&p).unwrap().blocks() * 512
+            crate::portable::allocated(&p, &fs::metadata(&p).unwrap())
         };
-        use std::os::unix::fs::MetadataExt;
         let old = aged("old/a.bin", 3_000_000, 400);
         let older = aged("mixed/b.bin", 1_000_000, 900);
         aged("mixed/c.bin", 2_000_000, 300);
@@ -835,7 +964,6 @@ mod tests {
 
     #[test]
     fn big_files_are_listed_only_when_asked() {
-        use std::os::unix::fs::MetadataExt;
         let t = tempfile::tempdir().unwrap();
         let big = t.path().join("a/b/big.bin");
         write(&big, 3 * MIB as usize);
@@ -862,7 +990,7 @@ mod tests {
             ..opts(0)
         };
         let s = scan(t.path(), &o).unwrap();
-        let allocated = fs::metadata(&big).unwrap().blocks() * 512;
+        let allocated = crate::portable::allocated(&big, &fs::metadata(&big).unwrap());
         assert_eq!(
             s.big_files,
             [BigFile {
@@ -876,9 +1004,13 @@ mod tests {
         // Listing them changes nothing else.
         assert_eq!(s.root.totals, none.root.totals);
         // And reads no file: its access time is as it was.
-        assert_eq!(fs::metadata(&big).unwrap().atime(), 1_600_000_000);
+        assert_eq!(
+            crate::portable::atime(&fs::metadata(&big).unwrap()),
+            1_600_000_000
+        );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn shared_bytes_of_clones_are_told_apart() {
         let t = tempfile::tempdir().unwrap();
@@ -891,6 +1023,7 @@ mod tests {
         assert_eq!(tot.allocated - tot.private, tot.cloned);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_folder_of_copies_is_measured_by_what_it_really_takes() {
         // What Chrome leaves when it's killed: copies of the same files,

@@ -44,6 +44,25 @@ use crate::scan::{self, Node, Options};
 use crate::suggest::display;
 use crate::units::bytes;
 
+mod windows;
+
+/// What Windows calls a folder of its own, or a well-known one in a profile,
+/// and what it is; nothing elsewhere.
+fn windows_known(path: &Path, home: &Path) -> Option<(String, &'static str)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let rel = path.strip_prefix(home).ok().map(names);
+    windows::known(rel.as_deref(), &names(path))
+}
+
+/// A user's folder in a drive's Recycle Bin (`C:\$Recycle.Bin\<SID>`).
+fn in_recycle_bin(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n.eq_ignore_ascii_case("$Recycle.Bin"))
+}
+
 /// What [`Measured`] looks like; a kept one of another version is measured
 /// again.
 pub const VERSION: u32 = 3;
@@ -129,6 +148,7 @@ impl Kind {
 
     pub fn title(self) -> &'static str {
         match self {
+            Kind::Macos if cfg!(windows) => "Windows",
             Kind::Macos => "macOS",
             Kind::Apps => "Apps",
             Kind::Build => "Build output",
@@ -136,6 +156,7 @@ impl Kind {
             Kind::Cloud => "Cloud copies",
             Kind::Vms => "Virtual machines",
             Kind::Media => "Photos, music and video",
+            Kind::Mail if cfg!(windows) => "Mail",
             Kind::Mail => "Mail and Messages",
             Kind::Caches => "Caches",
             Kind::Appdata => "App data",
@@ -192,6 +213,14 @@ pub struct Measured {
     /// used: `None` when they weren't read (none is offered then).
     #[serde(skip)]
     pub avds: Option<Vec<crate::android::Avd>>,
+    /// Windows' own files in the drive's root folder (the page and
+    /// hibernation files), each an item of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_files: Vec<BigFile>,
+    /// The disk's figures are a quota's, or can't be trusted: what the scan
+    /// couldn't see isn't worked out from them.
+    #[serde(default)]
+    pub quota_limited: bool,
     /// A clean-up was in a folder [`update`] couldn't measure again (too
     /// big, or the whole home folder): the volume's figures are now, that
     /// folder's aren't, and what it freed shows as less System data until
@@ -325,6 +354,11 @@ pub struct Report {
     /// [`clean::UNUSED_FOR`] when they were measured, biggest first. The
     /// app picks the size and how long.
     pub old_files: Vec<OldFile>,
+    /// The disk doesn't record when a file was last opened (most Windows
+    /// PCs: [`crate::os::fs::records_last_access`]), so `old_files` are
+    /// those nothing changed, and their `accessed` says nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub last_opened_unknown: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -432,7 +466,12 @@ pub struct About {
 /// snapshots, purgeable caches, cloud files it can download again): Finder's
 /// "available" less `free`, the free space now.
 pub fn purgeable(path: &Path, free: u64) -> u64 {
-    mdif_macos::fs::available_for_important_usage(path)
+    // Only macOS frees space by itself. Elsewhere "available" less an earlier
+    // reading of "free" would only be what has been deleted since.
+    if !cfg!(target_os = "macos") {
+        return 0;
+    }
+    crate::os::fs::available_for_important_usage(path)
         .unwrap_or(0)
         .saturating_sub(free)
 }
@@ -440,37 +479,57 @@ pub fn purgeable(path: &Path, free: u64) -> u64 {
 /// Scans the Data volume and reads what else the report needs. As long as
 /// the disk map takes (`mdif map`); never downloads a cloud file.
 pub fn measure(home: &Path) -> Result<Measured> {
-    use mdif_macos::fs;
+    use crate::os::fs;
     let started = Instant::now();
     let measured = crate::watch::unix_now();
     fs::forbid_dataless_materialization().context("disabling cloud downloads for this process")?;
-    let root = Path::new(DATA_ROOT);
-    let s = scan::scan(root, &TREE).with_context(|| format!("scanning {DATA_ROOT}"))?;
+    let volume = crate::map::boot_volume();
+    let root = volume.as_path();
+    #[cfg(windows)]
+    crate::map::ntfs_only(root)?;
+    let s = scan::scan(root, &TREE).with_context(|| format!("scanning {}", root.display()))?;
 
     // The volumes as they are now that the scan is done.
-    let st = fs::statfs(root).with_context(|| format!("statfs {DATA_ROOT}"))?;
-    let (mut container, mut data) =
-        crate::apfs::find_volume(crate::apfs::containers()?, &st.device)?;
-    if data.capacity_in_use == 0 {
-        crate::apfs::fill_missing_sizes(&mut container, &st);
-        data = crate::apfs::find_volume(vec![container.clone()], &st.device)?.1;
-    }
-    let mounts = fs::mounts().unwrap_or_default();
-    let volumes = container
-        .volumes
-        .iter()
-        .filter(|v| v.device_identifier != data.device_identifier)
-        .map(|v| OtherVolume {
-            name: v.name.clone(),
-            role: v.roles.first().cloned(),
-            mount: mount_of(&mounts, &v.device_identifier),
-            bytes: v.capacity_in_use,
-        })
-        .collect();
+    let st = fs::statfs(root).with_context(|| format!("statfs {}", root.display()))?;
+    #[cfg(target_os = "macos")]
+    let (volumes, data_in_use, snapshots, system_files, quota_limited) = {
+        let (mut container, mut data) =
+            crate::apfs::find_volume(crate::apfs::containers()?, &st.device)?;
+        if data.capacity_in_use == 0 {
+            crate::apfs::fill_missing_sizes(&mut container, &st);
+            data = crate::apfs::find_volume(vec![container.clone()], &st.device)?.1;
+        }
+        let mounts = fs::mounts().unwrap_or_default();
+        let volumes = container
+            .volumes
+            .iter()
+            .filter(|v| v.device_identifier != data.device_identifier)
+            .map(|v| OtherVolume {
+                name: v.name.clone(),
+                role: v.roles.first().cloned(),
+                mount: mount_of(&mounts, &v.device_identifier),
+                bytes: v.capacity_in_use,
+            })
+            .collect();
+        let snapshots = crate::apfs::local_snapshots(Path::new(&st.mount_point))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        (volumes, data.capacity_in_use, snapshots, Vec::new(), false)
+    };
+    // A Windows drive stands alone: what it has in use, its own big files,
+    // no snapshots listed yet (restore points are only Windows' to read).
+    #[cfg(windows)]
+    let (volumes, data_in_use, snapshots, system_files, quota_limited) = {
+        let quota = fs::quota_limited(root).unwrap_or(true);
+        (
+            Vec::new(),
+            st.total.saturating_sub(st.avail),
+            0,
+            system_files(root),
+            quota,
+        )
+    };
     let free = st.avail;
-    let snapshots = crate::apfs::local_snapshots(Path::new(&st.mount_point))
-        .map(|s| s.len())
-        .unwrap_or(0);
 
     let mut m = Measured {
         version: VERSION,
@@ -484,7 +543,7 @@ pub fn measure(home: &Path) -> Result<Measured> {
             purgeable: purgeable(root, free),
         },
         volumes,
-        data_in_use: data.capacity_in_use,
+        data_in_use,
         data_real: s.real,
         snapshots,
         unreadable_dirs: s.root.totals.unreadable_dirs,
@@ -494,6 +553,8 @@ pub fn measure(home: &Path) -> Result<Measured> {
         files: own_files(&s.big_files, home),
         simulators: Vec::new(),
         avds: None,
+        system_files,
+        quota_limited,
         partial: false,
     };
     let sorted = sort(&m, &Keep::default());
@@ -518,10 +579,12 @@ pub fn measure(home: &Path) -> Result<Measured> {
 /// folder deleted or moved away is measured as its parent). The volume's
 /// free space is read again.
 pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
-    mdif_macos::fs::forbid_dataless_materialization()
+    crate::os::fs::forbid_dataless_materialization()
         .context("disabling cloud downloads for this process")?;
+    let base = tree_base(m);
+    let under = |names: &[String]| names.iter().fold(base.clone(), |p, n| p.join(n));
     for p in paths {
-        let names: Vec<String> = match p.strip_prefix("/") {
+        let names: Vec<String> = match p.strip_prefix(&base) {
             Ok(rel) => rel
                 .iter()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -539,7 +602,7 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             d = c;
             depth += 1;
         }
-        while depth > 0 && !Path::new("/").join(names[..depth].join("/")).is_dir() {
+        while depth > 0 && !under(&names[..depth]).is_dir() {
             depth -= 1;
         }
         // Never the whole disk, a whole home folder or another folder too big
@@ -550,7 +613,7 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             m.partial = true;
             continue;
         }
-        let at = Path::new("/").join(names[..depth].join("/"));
+        let at = under(&names[..depth]);
         let opts = scan::Options {
             max_depth: TREE.max_depth.saturating_sub(depth),
             ..TREE
@@ -595,16 +658,18 @@ pub fn update(m: &mut Measured, paths: &[PathBuf]) -> Result<()> {
             .sort_by(|a, b| b.allocated.cmp(&a.allocated).then(a.path.cmp(&b.path)));
         m.files.truncate(FILES);
     }
-    let st = mdif_macos::fs::statfs(Path::new(DATA_ROOT))
-        .with_context(|| format!("statfs {DATA_ROOT}"))?;
+    let volume = crate::map::boot_volume();
+    let st =
+        crate::os::fs::statfs(&volume).with_context(|| format!("statfs {}", volume.display()))?;
     let used = st.total.saturating_sub(st.avail);
     m.data_in_use = (m.data_in_use as i128 + used as i128 - m.volume.used as i128).max(0) as u64;
     m.volume.total = st.total;
     m.volume.free = st.avail;
     m.volume.used = used;
-    m.volume.purgeable = purgeable(Path::new(DATA_ROOT), st.avail);
+    m.volume.purgeable = purgeable(&volume, st.avail);
     // Snapshots deleted: what they held isn't purgeable any more.
-    if paths.iter().any(|p| clean::snapshot_date(p).is_some())
+    if cfg!(target_os = "macos")
+        && paths.iter().any(|p| clean::snapshot_date(p).is_some())
         && let Ok(s) = crate::apfs::local_snapshots(Path::new(&st.mount_point))
     {
         m.snapshots = s.len();
@@ -641,8 +706,43 @@ fn own_files(found: &[scan::BigFile], home: &Path) -> Vec<BigFile> {
     files
 }
 
+/// Whether a file of the profile (its path below it, lowercase names, the
+/// file last) is yours as Windows has it: [`windows::own_file`].
+pub(crate) fn own_file_on_windows(names: &[String]) -> bool {
+    windows::own_file(names)
+}
+
 /// Where the volume `id` (`disk3s6`) is mounted: itself, or one of its
 /// snapshots (the System volume starts up from `disk3s1s1`).
+/// Windows' own files in the drive's root folder ([`windows::SYSTEM_FILES`]),
+/// as its listing gives them: names, never contents.
+#[cfg(windows)]
+fn system_files(root: &Path) -> Vec<BigFile> {
+    let Ok(entries) = crate::os::bulk::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<BigFile> = entries
+        .iter()
+        .filter(|e| e.kind == crate::os::bulk::Kind::File && e.allocated > 0)
+        .filter_map(|e| {
+            let name = e.name.to_str()?;
+            windows::SYSTEM_FILES
+                .iter()
+                .any(|(f, _, _)| f.eq_ignore_ascii_case(name))
+                .then(|| BigFile {
+                    path: root.join(name).to_string_lossy().into_owned(),
+                    allocated: e.allocated,
+                    private: 0,
+                    accessed: e.atime,
+                    modified: e.mtime,
+                })
+        })
+        .collect();
+    found.sort_by_key(|f| std::cmp::Reverse(f.allocated));
+    found
+}
+
+#[cfg(target_os = "macos")]
 fn mount_of(mounts: &[(String, String)], id: &str) -> Option<String> {
     let rest = |dev: &str| {
         dev.strip_prefix("/dev/")?
@@ -950,11 +1050,36 @@ fn classify(path: &Path, home: &Path, up: &Up, allocated: u64) -> Option<Class> 
     if ext.as_deref().is_some_and(|e| VM_BUNDLES.contains(&e)) {
         return item(Kind::Vms, What::Vm);
     }
-    match path.strip_prefix(home) {
+    let class = match path.strip_prefix(home) {
+        Ok(rel) if cfg!(windows) => windows::in_home(&names(rel)),
         Ok(rel) => in_home(&names(rel), &name),
+        Err(_) if cfg!(windows) => windows::in_system(&names(path)),
         Err(_) => in_system(&names(path), &name),
+    };
+    // A `bin` or `obj` is .NET's build output only beside a project file
+    // (`bin` is also where people keep their scripts): otherwise it goes with
+    // the folder above, as any other folder in a project does.
+    let dotnet = crate::owners::dotnet_output(&name);
+    if class.is_some_and(|c| c.what == What::Artifact)
+        && dotnet
+        && !path.parent().is_some_and(clean::dotnet_project)
+    {
+        return None;
     }
+    // Folders a project often keeps in git (CocoaPods' `Pods`, a library's
+    // `dist`, electron-builder's `build` with its icons): part of the project
+    // when git keeps files in them, not build output the next build makes.
+    if class.is_some_and(|c| c.what == What::Artifact)
+        && COMMITTED.contains(&&*name)
+        && crate::worktrees::tracks_files_in(path) == Some(true)
+    {
+        return None;
+    }
+    class
 }
+
+/// Build output's names that projects also commit (see [`classify`]).
+const COMMITTED: &[&str] = &["dist", "Pods", "build"];
 
 fn names(p: &Path) -> Vec<String> {
     p.components()
@@ -1297,11 +1422,19 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
 
     let dates: HashMap<&str, &AppDates> = m.apps.iter().map(|a| (a.path.as_str(), a)).collect();
     let mut kinds: HashMap<Kind, (Vec<Item>, u64, u64, u64)> = HashMap::new();
-    let mut trash = 0;
+    let own_bin = own_recycle_bin(m);
+    let (mut trash, mut own_bin_listed) = (0, false);
     for s in &t.items {
         let (bytes, frees) = size(&s.part);
         if s.what == What::Trash {
-            trash += bytes;
+            own_bin_listed |= is_own_bin(&s.path, own_bin.as_deref());
+            // A Recycle Bin as it is now, as a Mac's Trash is (`comes_back`):
+            // emptying it shows at once, not at the next measurement.
+            trash += if cfg!(windows) {
+                scan::size_of(&s.path).unwrap_or(bytes)
+            } else {
+                bytes
+            };
         }
         let it = describe(s, bytes, frees, m, keep, &dates);
         let reclaim = reclaimable(s, &it, bytes);
@@ -1376,7 +1509,39 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
         });
     }
 
-    // What the scan couldn't see, so the kinds add up to what's used.
+    // Windows' own big files: in its kind already, with the drive root's own
+    // bytes, and listed as items of their own.
+    for f in &m.system_files {
+        let name = Path::new(&f.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some((_, title, what)) = windows::SYSTEM_FILES
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(&name))
+        else {
+            continue;
+        };
+        kinds.entry(Kind::Macos).or_default().0.push(Item {
+            path: f.path.clone(),
+            name: title.to_string(),
+            bytes: f.allocated,
+            frees: 0,
+            age: None,
+            last_used: None,
+            flags: Vec::new(),
+            note: Some(what.to_string()),
+            detail: None,
+            action: None,
+            parts: Vec::new(),
+            about: None,
+            known: None,
+            unexplained: None,
+        });
+    }
+
+    // What the scan couldn't see, so the kinds add up to what's used. Not
+    // when the disk's figures are a quota's: they aren't the disk's.
     let counted: u64 = kinds.values().map(|k| k.1).sum();
     let unmeasured = m.volume.used as i128 - counted as i128;
     let back = ComingBack {
@@ -1387,7 +1552,9 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
             .map(|v| v.bytes)
             .sum(),
         trash,
+        own_bin_listed,
     };
+    let unmeasured = if m.quota_limited { 0 } else { unmeasured };
     if unmeasured > 0 {
         let k = kinds.entry(Kind::Other).or_default();
         k.1 += unmeasured as u64;
@@ -1437,6 +1604,9 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
         comes_back: comes_back(m, &back),
         kinds: out,
         old_files: old_files(m, keep),
+        // A Mac whose home can't be looked at (a test's) is as it was.
+        last_opened_unknown: crate::os::fs::records_last_access(&m.home)
+            .map_or(cfg!(windows), |recorded| !recorded),
     }
 }
 
@@ -1445,6 +1615,36 @@ pub fn report(m: &Measured, keep: &Keep, snapshots: &[String]) -> Report {
 /// as purgeable, with the button that deletes them; and what macOS keeps
 /// where apps aren't let in, which nothing can measure or clean.
 fn unseen(bytes: u64, m: &Measured, snapshots: &[String]) -> Item {
+    let count = match m.unreadable_dirs {
+        0 => "folders".to_string(),
+        1 => "a folder".to_string(),
+        n => format!("{n} folders"),
+    };
+    if cfg!(windows) {
+        return Item {
+            path: String::new(),
+            name: "System data".into(),
+            bytes,
+            frees: 0,
+            age: None,
+            last_used: None,
+            flags: Vec::new(),
+            note: Some(
+                "Folders only Windows can read, and the file system's own records".to_string(),
+            ),
+            detail: Some(format!(
+                "In {count} only Windows can read (System Volume Information, with its restore \
+                 points and indexes, and other accounts' folders), and in the file system's own \
+                 records: its table of every file, and its journal of changes. Windows looks \
+                 after them itself."
+            )),
+            action: None,
+            parts: Vec::new(),
+            about: None,
+            known: None,
+            unexplained: None,
+        };
+    }
     let folders = format!(
         "{} macOS keeps to itself (Spotlight's index, system logs, caches and databases) and \
          the file system's own records. Apps aren't let in to measure or clean them: macOS \
@@ -1545,11 +1745,18 @@ fn unseen(bytes: u64, m: &Measured, snapshots: &[String]) -> Item {
 /// Your big files nothing had opened or changed for [`clean::UNUSED_FOR`]
 /// when `m` was measured, biggest first, each with what `mdif clean` would
 /// do with it now. Those gone since (moved to the Trash) are left out.
+///
+/// Where the disk doesn't record when a file was last opened (most Windows
+/// PCs), "nothing opened it" can't be told: those listed are the ones
+/// nothing changed, and the report says so ([`Report::last_opened_unknown`]).
 fn old_files(m: &Measured, keep: &Keep) -> Vec<OldFile> {
+    // Gone since, or hidden by Windows (`NTUSER.DAT`): not listed.
     let gone = |path: &Path| {
         crate::privacy::may_open(path)
-            && std::fs::symlink_metadata(path)
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            && match std::fs::symlink_metadata(path) {
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                Ok(meta) => crate::portable::hidden(&meta),
+            }
     };
     let mut out: Vec<OldFile> = m
         .files
@@ -1559,7 +1766,11 @@ fn old_files(m: &Measured, keep: &Keep) -> Vec<OldFile> {
         .map(|f| {
             let path = Path::new(&f.path);
             let kept = keep.covering(path).is_some();
+            // A name Windows allows and text can't hold (half a UTF-16 pair)
+            // was written down with U+FFFD in its place: the path may name
+            // another file, so it's shown without the button.
             let trash = !kept
+                && !f.path.contains(char::REPLACEMENT_CHARACTER)
                 && crate::privacy::may_open(path)
                 && matches!(
                     clean::plan(path, &m.home, keep, &[], &[]),
@@ -1578,7 +1789,12 @@ fn old_files(m: &Measured, keep: &Keep) -> Vec<OldFile> {
                 kept,
                 action: trash.then(|| Action {
                     kind: "trash",
-                    label: "Move to Trash".into(),
+                    label: if cfg!(windows) {
+                        "Move to Recycle Bin"
+                    } else {
+                        "Move to Trash"
+                    }
+                    .into(),
                     paths: vec![f.path.clone()],
                     confirm: None,
                     done: None,
@@ -1724,8 +1940,13 @@ fn describe(
                 None => "What Android's emulators start from".into(),
             });
         }
+        What::Trash if cfg!(windows) => note = Some("Freed when you empty the Recycle Bin".into()),
         What::Trash => note = Some("Freed when you empty the Trash".into()),
-        What::Plain => note = crate::knowledge::note(&s.path, &m.home),
+        What::Plain => {
+            note = windows_known(&s.path, &m.home)
+                .map(|(_, what)| what.to_string())
+                .or_else(|| crate::knowledge::note(&s.path, &m.home));
+        }
     }
     let cold_share = if p.allocated > 0 {
         p.cold.max(0) as f64 / p.allocated as f64
@@ -1896,10 +2117,20 @@ impl Measured {
     }
 }
 
+/// Where the tree's names start: `/` on a Mac (the Data volume's folders
+/// are where you know them), the drive's root on Windows.
+fn tree_base(m: &Measured) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(&m.tree.name)
+    } else {
+        PathBuf::from("/")
+    }
+}
+
 /// The item's folder in the tree.
 fn dir_of<'a>(m: &'a Measured, item: &Path) -> Option<&'a Dir> {
     let mut d = &m.tree;
-    for name in item.strip_prefix("/").ok()?.iter() {
+    for name in item.strip_prefix(tree_base(m)).ok()?.iter() {
         d = d.children.iter().find(|c| *c.name == *name)?;
     }
     Some(d)
@@ -2082,6 +2313,9 @@ fn name(s: &Sorted, m: &Measured) -> String {
             .unwrap_or(last.clone())
     };
     let rel = s.path.strip_prefix(&m.home).ok();
+    if let Some((known, _)) = windows_known(&s.path, &m.home) {
+        return known;
+    }
     match s.what {
         What::App => return stem(".app"),
         What::Vm => {
@@ -2098,7 +2332,7 @@ fn name(s: &Sorted, m: &Measured) -> String {
                     .skip(1)
                     .map(|n| n.to_string_lossy())
                     .collect::<Vec<_>>()
-                    .join("/");
+                    .join(std::path::MAIN_SEPARATOR_STR);
             }
         }
         What::Avd => {
@@ -2127,6 +2361,7 @@ fn name(s: &Sorted, m: &Measured) -> String {
                     format!("{platform} Simulator").trim().to_string()
                 });
         }
+        What::Trash if cfg!(windows) => return "Recycle Bin".into(),
         What::Trash => return "Trash".into(),
         What::Cache => {
             // An app's cache is called after the app.
@@ -2176,13 +2411,16 @@ fn name(s: &Sorted, m: &Measured) -> String {
 /// simulator runtimes and simulators, and what Docker hasn't used in a
 /// week, unless kept.
 fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
+    // `mdif clean` on Windows deletes build output and a project's packages
+    // so far (`clean::plan` refuses the rest there): nothing else is offered.
+    let mac = cfg!(target_os = "macos");
     let home = m.home.as_path();
     let s = t
         .items
         .iter()
         .find(|s| s.path.as_os_str() == i.path.as_str())?;
     let shown = display(&s.path, home);
-    if !keep.touches(&s.path) {
+    if mac && !keep.touches(&s.path) {
         if s.what == What::Simulator {
             return runtime_action(i, m, s.whole);
         }
@@ -2199,7 +2437,8 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
             return avd_action(i, m, s.whole);
         }
     }
-    if matches!(s.what, What::Plain)
+    if mac
+        && matches!(s.what, What::Plain)
         && crate::privacy::may_open(&s.path)
         && clean::minecraft(&s.path)
         && !keep.touches(&s.path)
@@ -2223,8 +2462,9 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
             ..Default::default()
         });
     }
-    // Planning looks inside it (and asks git): not where that would prompt
-    // with nobody there to answer (the watcher's report after a tidy).
+    // Planning looks inside it (and asks git), which may prompt (another
+    // app's container): not where nobody is there to answer (this runs in the
+    // watcher too, after a tidy-up).
     if !matches!(
         s.what,
         What::Artifact | What::Incremental | What::Cache | What::DerivedData | What::DevCache
@@ -2291,12 +2531,17 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
         }
         _ => return None,
     }
+    let bin = if cfg!(windows) {
+        "the Recycle Bin"
+    } else {
+        "the Trash"
+    };
     let (label, confirm) = if s.path.file_name() == Some("node_modules".as_ref()) {
         (
             "Delete node_modules",
             format!(
-                "Delete {shown}? {} on disk. It's deleted, not moved to the Trash; `npm \
-                 install` (or the project's package manager) puts it back as its lockfile says, \
+                "Delete {shown}? {} on disk. It's deleted, not moved to {bin}; `npm install` \
+                 (or the project's package manager) puts it back as its lockfile says, \
                  downloading what isn't in its cache.",
                 bytes(s.whole)
             ),
@@ -2306,7 +2551,7 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
             "Delete Incremental Caches",
             format!(
                 "Delete the incremental caches in {shown}? {} on disk. They're deleted, not \
-                 moved to the Trash; only the next build of your own crates is slower.",
+                 moved to {bin}; only the next build of your own crates is slower.",
                 bytes(s.whole)
             ),
         )
@@ -2314,8 +2559,8 @@ fn action(i: &Item, m: &Measured, keep: &Keep, t: &Tree) -> Option<Action> {
         (
             "Delete Build Output",
             format!(
-                "Delete {shown}? {} on disk. It's deleted, not moved to the Trash; the next \
-                 build makes it again.",
+                "Delete {shown}? {} on disk. It's deleted, not moved to {bin}; the next build \
+                 makes it again.",
                 bytes(s.whole)
             ),
         )
@@ -2428,7 +2673,8 @@ fn simulators_action(sims: &[crate::xcode::Simulator], keep: &Keep, now: i64) ->
 /// running and holds enough to matter, those nothing used for a month
 /// ticked.
 fn pieces(i: &Item, m: &Measured, keep: &Keep) -> Vec<Piece> {
-    if i.path != m.home.join(crate::xcode::DEVICES).to_string_lossy()
+    if !cfg!(target_os = "macos")
+        || i.path != m.home.join(crate::xcode::DEVICES).to_string_lossy()
         || keep.touches(Path::new(&i.path))
     {
         return Vec::new();
@@ -2568,6 +2814,15 @@ fn docker_action() -> Action {
 struct ComingBack {
     swap: u64,
     trash: u64,
+    /// Whether the tree keeps this account's Recycle Bin (`trash` is what
+    /// the bins it keeps hold now).
+    own_bin_listed: bool,
+}
+
+/// Whether `path`, a Recycle Bin the tree keeps, is this account's (`own`):
+/// Windows' names compare without case.
+fn is_own_bin(path: &Path, own: Option<&Path>) -> bool {
+    own.is_some_and(|own| path.as_os_str().eq_ignore_ascii_case(own.as_os_str()))
 }
 
 /// What the disk is made of, in layers for the history (`strata`): each
@@ -2584,7 +2839,9 @@ pub fn strata(r: &Report) -> Vec<(&'static str, u64)> {
             .map(|i| i.bytes)
             .sum()
     };
-    let trash = item("files", &|i| i.path.ends_with("/.Trash"));
+    let trash = item("files", &|i| {
+        i.path.ends_with("/.Trash") || (cfg!(windows) && in_recycle_bin(Path::new(&i.path)))
+    });
     let unseen = item("other", &|i| i.path.is_empty());
     let mut out: Vec<(&'static str, u64)> = r
         .kinds
@@ -2609,6 +2866,19 @@ pub fn strata(r: &Report) -> Vec<(&'static str, u64)> {
 /// there, and deletes them when space is needed); what the scan couldn't
 /// see is mostly macOS's own files and metadata, which stay, so it isn't
 /// here.
+/// The account's folder in the measured drive's Recycle Bin
+/// (`C:\$Recycle.Bin\<SID>`), where what they delete there waits.
+#[cfg(windows)]
+fn own_recycle_bin(m: &Measured) -> Option<PathBuf> {
+    let sid = crate::os::sys::user_sid().ok()?;
+    Some(tree_base(m).join("$Recycle.Bin").join(sid))
+}
+
+#[cfg(not(windows))]
+fn own_recycle_bin(_: &Measured) -> Option<PathBuf> {
+    None
+}
+
 fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
     let mut out = vec![
         ComesBack {
@@ -2625,17 +2895,40 @@ fn comes_back(m: &Measured, b: &ComingBack) -> Vec<ComesBack> {
         },
     ];
     // The Trash as it is now, not as it was at the scan: emptying it in
-    // Finder shows at once.
-    let trash = m.home.join(".Trash");
-    let trash = if crate::privacy::may_open(&trash) && trash.is_dir() {
-        scan::freed_by(&trash).unwrap_or(b.trash)
+    // Finder shows at once. On Windows the Recycle Bins the tree keeps were
+    // measured again; this account's, if the scan found it too small to
+    // keep, is measured now, as it may have filled since: walked, for what
+    // its files take on the disk (what emptying frees; the bin's own index
+    // counts their sizes, more than a sparse or compressed one takes), unless
+    // the index says it's empty.
+    let trash = if cfg!(windows) {
+        let own = if b.own_bin_listed
+            || crate::os::fs::recycle_bin_items(&tree_base(m)).is_ok_and(|n| n == 0)
+        {
+            0
+        } else {
+            own_recycle_bin(m)
+                .and_then(|bin| scan::size_of(&bin))
+                .unwrap_or(0)
+        };
+        b.trash + own
     } else {
-        b.trash
+        let trash = m.home.join(".Trash");
+        if crate::privacy::may_open(&trash) && trash.is_dir() {
+            scan::freed_by(&trash).unwrap_or(b.trash)
+        } else {
+            b.trash
+        }
     };
     out.push(ComesBack {
         what: "trash",
         bytes: trash,
-        how: "freed when the Trash is emptied".into(),
+        how: if cfg!(windows) {
+            "freed when the Recycle Bin is emptied"
+        } else {
+            "freed when the Trash is emptied"
+        }
+        .into(),
         kind: Some("files"),
     });
     out.retain(|c| c.bytes > 0);
@@ -2763,7 +3056,8 @@ fn month(t: i64, now: i64) -> String {
     }
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -2853,6 +3147,8 @@ mod tests {
             files: Vec::new(),
             simulators: Vec::new(),
             avds: None,
+            system_files: Vec::new(),
+            quota_limited: false,
             partial: false,
         }
     }
@@ -4033,6 +4329,17 @@ mod tests {
     }
 
     #[test]
+    fn this_accounts_recycle_bin_is_told_from_anothers() {
+        let own = Path::new(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001");
+        let listed = |p: &str| is_own_bin(Path::new(p), Some(own));
+        assert!(listed(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001"));
+        assert!(listed(r"C:\$RECYCLE.BIN\s-1-5-21-1-2-3-1001"));
+        assert!(!listed(r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1002"));
+        assert!(!listed(r"D:\$Recycle.Bin\S-1-5-21-1-2-3-1001"));
+        assert!(!is_own_bin(own, None));
+    }
+
+    #[test]
     fn an_old_file_that_is_there_is_offered_for_the_trash() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
@@ -4075,6 +4382,13 @@ mod tests {
         let keep = Keep::parse(&format!("{}\n", h.join("Movies").display()), h);
         let r = report(&m, &keep, &[]);
         assert!(r.old_files[0].kept && r.old_files[0].action.is_none());
+        // A name written down with U+FFFD in it may be another file's: listed,
+        // no button.
+        let odd = h.join("Movies/old\u{FFFD}.mov");
+        std::fs::rename(&file, &odd).unwrap();
+        m.files[0].path = odd.to_string_lossy().into_owned();
+        let r = report(&m, &Keep::default(), &[]);
+        assert!(!r.old_files[0].kept && r.old_files[0].action.is_none());
     }
 
     #[test]
@@ -4178,6 +4492,8 @@ mod tests {
                     ..Default::default()
                 }),
             }],
+            // As a Mac's: the key isn't printed.
+            last_opened_unknown: false,
         })
         .unwrap();
         let keys = |v: &serde_json::Value| {
@@ -4249,5 +4565,92 @@ mod tests {
             .map(|k| k["bytes"].as_u64().unwrap())
             .sum();
         assert_eq!(kinds, used);
+    }
+}
+
+/// .NET's `bin` and `obj` are build output beside a project file, and go with
+/// the folder above without one: Windows sorts them so, so it runs there.
+#[cfg(all(test, windows))]
+mod dotnet_tests {
+    use super::*;
+
+    #[test]
+    fn a_bin_is_build_output_only_beside_a_project_file() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        let app = home.join(r"source\repos\Shop\Shop.Web");
+        let tools = home.join(r"devel\tools");
+        for dir in [app.join("bin"), app.join("obj"), tools.join("bin")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let top = Up {
+            what: What::Plain,
+            item: None,
+        };
+        let sorted = |p: &Path| classify(p, home, &top, 1 << 30).map(|c| (c.kind, c.what));
+        assert_eq!(sorted(&app.join("bin")), None);
+        std::fs::write(app.join("Shop.Web.csproj"), "<Project/>").unwrap();
+        for out in ["bin", "obj"] {
+            assert_eq!(
+                sorted(&app.join(out)),
+                Some((Kind::Build, What::Artifact)),
+                "{out}"
+            );
+        }
+        // Scripts: no project file beside them.
+        assert_eq!(sorted(&tools.join("bin")), None);
+        // Other build output is still sorted by its name alone.
+        assert_eq!(
+            sorted(&home.join(r"devel\app\target")),
+            Some((Kind::Build, What::Artifact))
+        );
+    }
+}
+
+/// A `dist`, `Pods` or `build` git keeps files in is part of the project.
+#[cfg(test)]
+mod committed_tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_git_keeps_files_in_is_not_build_output() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        let app = home.join("devel").join("app");
+        for dir in ["Pods", "dist", "build", "target"] {
+            std::fs::create_dir_all(app.join(dir)).unwrap();
+            std::fs::write(app.join(dir).join("f"), "x").unwrap();
+        }
+        let top = Up {
+            what: What::Plain,
+            item: None,
+        };
+        let sorted = |p: &Path| classify(p, home, &top, 1 << 30).map(|c| (c.kind, c.what));
+        let build = Some((Kind::Build, What::Artifact));
+        // No repository: sorted by name.
+        assert_eq!(sorted(&app.join("Pods")), build);
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(["-c", "init.defaultBranch=main"])
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(app.join(".gitignore"), "dist/\ntarget/\n").unwrap();
+        git(&["add", ".gitignore", "Pods", "build"]);
+        // Kept in git: the project's own.
+        assert_eq!(sorted(&app.join("Pods")), None);
+        assert_eq!(sorted(&app.join("build")), None);
+        // Ignored: what a build makes.
+        assert_eq!(sorted(&app.join("dist")), build);
+        // Not asked about: git keeping a `target` is too rare to ask.
+        assert_eq!(sorted(&app.join("target")), build);
     }
 }

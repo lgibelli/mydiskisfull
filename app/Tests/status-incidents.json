@@ -61,6 +61,7 @@
     "first": 1792146600,
     "last": 1792405800,
     "interval_secs": 300,
+    "stale": false,
     "bytes": 1048576
   },
   "incidents": [

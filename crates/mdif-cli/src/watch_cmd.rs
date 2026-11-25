@@ -15,17 +15,58 @@ use mdif_core::units::bytes;
 use mdif_core::watch::{self, Cost, Watcher};
 use serde_json::{Value, json};
 
+/// How to start the watcher, for whoever has no history: the agent where
+/// the OS has one, or running it by hand.
+pub(crate) fn start_hint() -> &'static str {
+    "Start the watcher with `mdif agent install` (or run `mdif watch`)."
+}
+
+/// How to look up whether the watcher runs, where there is a way; with its
+/// leading space.
+pub(crate) fn running_hint() -> &'static str {
+    " (`mdif agent status`)"
+}
+
 /// The watcher's own budget, from the plan.
 const BUDGET_CPU_PER_HOUR: Duration = Duration::from_secs(1);
 const BUDGET_WRITES_PER_HOUR: u64 = 1_000_000;
 
 pub fn default_db() -> PathBuf {
-    data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    #[cfg(target_os = "macos")]
+    {
+        data_home().join("Library/Application Support/MyDiskIsFull/history.sqlite3")
+    }
+    // The installer looks for `agent stop`'s marker beside it here
+    // (app-windows/src-tauri/windows/hooks.nsh): keep the two in step.
+    #[cfg(windows)]
+    {
+        data_dir().join("history.sqlite3")
+    }
 }
 
 /// Where the agent's errors go.
 pub fn log_path() -> PathBuf {
-    data_home().join("Library/Logs/MyDiskIsFull/watch.log")
+    #[cfg(target_os = "macos")]
+    {
+        data_home().join("Library/Logs/MyDiskIsFull/watch.log")
+    }
+    #[cfg(windows)]
+    {
+        data_dir().join("Logs").join("watch.log")
+    }
+}
+
+/// `%LOCALAPPDATA%\MyDiskIsFull`: per user, and not roamed to other PCs.
+#[cfg(windows)]
+fn data_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(mdif_core::os::sys::local_app_data)
+        .or_else(|| mdif_core::portable::home_dir().map(|home| home.join("AppData").join("Local")))
+        // Not the drive's root: whatever the user's temporary folder is.
+        .unwrap_or_else(std::env::temp_dir)
+        .join("MyDiskIsFull")
 }
 
 /// How long after it starts the watcher first looks at the tidy-ups.
@@ -35,20 +76,33 @@ const TIDY_DELAY: i64 = 600;
 const LOG_MAX: u64 = 1_000_000;
 
 /// Send standard error to the log: the LaunchAgent inside the app can't name
-/// a path in the user's home folder in its plist.
-fn open_log() -> Result<()> {
+/// a path in the user's home folder in its plist. `rotate`: start it afresh
+/// first when it's grown past [`LOG_MAX`] (on Windows only once this watcher
+/// holds the history, [`rotate_log`]).
+fn open_log(rotate: bool) -> Result<()> {
     let path = log_path();
     std::fs::create_dir_all(path.parent().expect("has a parent"))?;
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX) {
-        std::fs::rename(&path, path.with_extension("log.old"))?;
+    if rotate && std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX) {
+        // A reader holding it open may refuse the rename: then it grows on.
+        if let Err(e) = std::fs::rename(&path, path.with_extension("log.old")) {
+            eprintln!("The log wasn't started afresh: {e}");
+        }
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    mdif_macos::sys::redirect_stderr(&file).context("redirecting errors to the log")?;
+    mdif_core::os::sys::redirect_stderr(&file).context("redirecting errors to the log")?;
     Ok(())
+}
+
+/// The log started afresh, once this watcher holds the history ([`open_log`]).
+#[cfg(windows)]
+fn rotate_log() {
+    if let Err(e) = open_log(true) {
+        eprintln!("The log wasn't started afresh: {e:#}");
+    }
 }
 
 /// When this command started: `main` sets it first thing.
@@ -74,6 +128,23 @@ pub(crate) fn record_cleanup(store: &Store, start: i64, freed: u64) {
 
 /// [`record_cleanup`] for `mdif clean`: since the command started, in the
 /// history at `db` if there is one.
+/// The history `mdif agent status` reports: where it is, its size and rows.
+pub(crate) fn history_json(db: &Path) -> Result<serde_json::Value> {
+    if !db.exists() {
+        return Ok(serde_json::Value::Null);
+    }
+    let rows: i64 = Store::open(db)?
+        .row_counts()?
+        .iter()
+        .map(|(_, _, n)| n)
+        .sum();
+    Ok(serde_json::json!({
+        "path": db,
+        "bytes": history_bytes(db),
+        "rows": rows,
+    }))
+}
+
 pub(crate) fn record_clean(db: &Path, freed: u64) {
     if !db.exists() {
         return;
@@ -112,17 +183,56 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
         attached,
     } = o;
     if log {
-        open_log()?;
+        open_log(cfg!(not(windows)))?;
     }
+    // One watcher: two would sample the same history twice. (launchd sees to it
+    // on a Mac; here a lock file beside the history is held while this process lives.)
+    #[cfg(windows)]
+    let _only = {
+        if let Some(dir) = db.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let lock = crate::agent_windows::lock_path(db);
+        let busy = || {
+            anyhow::anyhow!(
+                "the watcher is already running on this history (`mdif agent status`); \
+                 `mdif status` shows what it has seen"
+            )
+        };
+        if once {
+            // One sample by hand doesn't take the lock (the agent may be installed
+            // while it runs), but doesn't write beside a watcher either.
+            if mdif_core::os::startup::is_claimed(&lock) {
+                return Err(busy());
+            }
+            None
+        } else {
+            let Some(guard) = mdif_core::os::startup::claim(&lock)? else {
+                return Err(busy());
+            };
+            let started = STARTED.get().copied().unwrap_or_else(watch::unix_now);
+            crate::agent_windows::clear_stale_stop(db, started);
+            crate::agent_windows::clear_stopped(db);
+            // Only the watcher that holds the history starts its log afresh: another
+            // one, refused above, has only added why.
+            if log {
+                rotate_log();
+            }
+            Some(guard)
+        }
+    };
     if attached {
         exit_when_stdin_closes();
     }
     // One watcher to a history: a second would count every write and
     // growth twice. Held until this process ends.
+    #[cfg(not(windows))]
     let _held = if once { None } else { Some(hold(db)?) };
     let store = Store::open(db)?;
     let mut w =
-        Watcher::new(store, volume)?.with_access_check(mdif_macos::sys::access_probes(&home()));
+        Watcher::new(store, volume)?.with_access_check(mdif_core::os::sys::access_probes(&home()));
+    // Growth per folder, from the file-system change journal (FSEvents, or the
+    // NTFS journal; a volume without a readable one is a gap each period).
     if owners_every > 0 && !once {
         w = w.with_owners(Rules::for_home(&home()), owners_every as i64)?;
     }
@@ -142,22 +252,34 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     // Tidy-ups (`mdif tidy`) are looked at once an hour, after a sample, and
     // run when one that's on hasn't for a day; not in the first minutes,
     // while what starts at login settles.
-    let tidy_store = Store::open(db)
-        .inspect_err(|e| eprintln!("No tidy-ups: {e:#}"))
-        .ok();
+    let tidy_store = if cfg!(any(target_os = "macos", windows)) {
+        Store::open(db)
+            .inspect_err(|e| eprintln!("No tidy-ups: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
     let mut tidy_next = watch::unix_now() + TIDY_DELAY;
+    #[cfg(windows)]
+    let mut acknowledged = false;
     watch::run(
         &mut w,
         interval,
-        || false,
+        // `mdif agent uninstall` asks a Windows watcher to go by making a file.
+        stop_asked(db),
         |s| {
             // Rotated as it runs, not only when it starts: it may run for
             // weeks.
             if log && std::fs::metadata(log_path()).is_ok_and(|m| m.len() > LOG_MAX) {
-                let _ = open_log();
+                let _ = open_log(true);
             }
             match s {
                 Ok(s) => {
+                    #[cfg(windows)]
+                    if !acknowledged {
+                        acknowledged = true;
+                        crate::agent_windows::acknowledge(db);
+                    }
                     if !quiet {
                         print_sample(s);
                     }
@@ -188,10 +310,23 @@ pub fn watch(db: &Path, volume: &Path, o: WatchOptions) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn stop_asked(db: &Path) -> impl FnMut() -> bool + '_ {
+    move || crate::agent_windows::stop_asked(db)
+}
+
+#[cfg(not(windows))]
+fn stop_asked(_db: &Path) -> impl FnMut() -> bool {
+    || false
+}
+
 /// The history's lock, `watch.lock` beside it, once no other watcher holds
 /// it: one started while another runs (the app's and `mdif agent`'s, or one
 /// in a terminal) waits for that one to stop rather than exiting, which
-/// launchd would answer by starting it again every few seconds.
+/// launchd would answer by starting it again every few seconds. (On Windows
+/// `agent_windows::lock_path`'s claim refuses a second one instead: nothing
+/// starts it again.)
+#[cfg(not(windows))]
 fn hold(db: &Path) -> Result<std::fs::File> {
     let dir = db.parent().context("no folder for the history")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -202,13 +337,13 @@ fn hold(db: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    if !mdif_macos::fs::try_lock(&file)? {
+    if !mdif_core::os::fs::try_lock(&file)? {
         eprintln!(
             "{} another watcher keeps {}: waiting for it to stop",
             local_now().format("%F %T"),
             db.display()
         );
-        mdif_macos::fs::lock(&file)?;
+        mdif_core::os::fs::lock(&file)?;
     }
     Ok(file)
 }
@@ -274,7 +409,7 @@ fn print_sample(s: &watch::Sample) {
 /// account's own.
 pub(crate) fn home() -> PathBuf {
     if sandboxed()
-        && let Some(home) = mdif_macos::sys::account_home()
+        && let Some(home) = mdif_core::os::sys::account_home()
     {
         return home;
     }
@@ -284,7 +419,7 @@ pub(crate) fn home() -> PathBuf {
 /// Where the history and the log are kept: `$HOME`, which in the App Sandbox
 /// is the app's container.
 fn data_home() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+    mdif_core::portable::home_dir().unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR))
 }
 
 /// Running in the App Sandbox (the App Store edition), which names the
@@ -293,14 +428,9 @@ pub(crate) fn sandboxed() -> bool {
     std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
 }
 
-/// `/Users/me/x` as `~/x`.
+/// `/Users/me/x` as `~/x` (`~\x` on Windows).
 pub(crate) fn tilde(path: &str) -> String {
-    let home = home();
-    match Path::new(path).strip_prefix(&home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.to_string(),
-    }
+    mdif_core::text::tilde(Path::new(path), &home()).unwrap_or_else(|| path.to_string())
 }
 
 pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Result<()> {
@@ -322,15 +452,16 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
         return Ok(());
     }
     if !db.exists() {
-        println!(
-            "No history yet. Start the watcher with `mdif agent install` (or run `mdif watch`)."
-        );
+        println!("No history yet. {}", start_hint());
         return Ok(());
     }
     let store = Store::open(db)?;
-    let key = mdif_macos::fs::statfs(volume)
-        .with_context(|| format!("statfs {}", volume.display()))?
-        .mount_point;
+    let st = mdif_core::os::fs::statfs(volume)
+        .with_context(|| format!("statfs {}", volume.display()))?;
+    // Kept under the volume's own name (its GUID on Windows), shown by where it's
+    // mounted.
+    let key = st.history_key();
+    let shown = st.mount_point;
     let now = watch::unix_now();
     let pts = store.space_since(&key, now - 400 * DAY)?;
     let cleanups = store.cleanups_since(pts.first().map_or(now, |p| p.ts))?;
@@ -360,7 +491,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
             // [unix seconds, bytes free], at the resolution the store keeps.
             out["series"] = pts.iter().map(|p| json!([p.ts, p.avail])).collect();
             out["writes_daily"] = store
-                .writes_daily(now - 400 * DAY, &mdif_macos::sys::utc_offset, 8)?
+                .writes_daily(now - 400 * DAY, &mdif_core::os::sys::utc_offset, 8)?
                 .iter()
                 .map(|d| {
                     json!({
@@ -386,7 +517,10 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     }
 
     let Some(f) = f else {
-        println!("No samples for {key} yet. Is the watcher running? (`mdif agent status`)");
+        println!(
+            "No samples for {shown} yet. Is the watcher running?{}",
+            running_hint()
+        );
         return Ok(());
     };
     let keep = crate::keep_cmd::load_or_warn(db);
@@ -403,7 +537,7 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     if !open.is_empty() {
         println!();
     }
-    print_forecast(&key, &f, pts.len(), pts.first().map(|p| p.ts));
+    print_forecast(&shown, &f, pts.len(), pts.first().map(|p| p.ts));
     print_growth(&store.growth_since(now - DAY)?);
     print_writers(&writers);
     if let Some(c) = cost {
@@ -415,11 +549,11 @@ pub fn forecast(db: &Path, volume: &Path, json_out: bool, series: bool) -> Resul
     Ok(())
 }
 
-fn print_forecast(key: &str, f: &Forecast, samples: usize, since: Option<i64>) {
+fn print_forecast(volume: &str, f: &Forecast, samples: usize, since: Option<i64>) {
     println!(
         "Free now: {} on {}  ({})",
         bytes(f.avail),
-        key,
+        volume,
         local(f.at).format("%b %-d %H:%M")
     );
     println!();

@@ -3,7 +3,8 @@
 A release is the full edition of the app as a universal disk image (Developer ID signed,
 notarized, stapled), the command line on its own, and the Sparkle feed that tells installed
 copies about it, all on a GitHub release; and MyDiskIsFull Lite, the App Store edition, uploaded
-to App Store Connect from the same commit, for TestFlight and review.
+to App Store Connect from the same commit, for TestFlight and review. The Windows edition isn't
+released yet: "The Windows edition" below says what it takes.
 
 ## How installed copies update
 
@@ -94,9 +95,82 @@ BUILD_NUMBER=102.1 app/app-store.sh --upload   # 0.1.2 again: each build number 
 Then, in App Store Connect, pick the build for the version and submit it for review. Releasing
 it once it's approved is the author's call, like publishing a GitHub release.
 
+## The Windows edition
+
+The Windows app (`app-windows/`, Tauri) ships as a per-user NSIS installer holding the app,
+`mdif.exe` and `mdif-watch.exe`; nothing needs an administrator. Its version is the workspace's:
+`app-windows/src-tauri/Cargo.toml` names the same one as `Cargo.toml` (a test checks they agree),
+and `tauri.conf.json` names none, so the installer and the app take it from there. Bump both.
+
+```sh
+app-windows/build.sh                           # x64, on Windows or cross-built from a Mac
+app-windows/build.sh aarch64-pc-windows-msvc   # ARM64
+```
+
+It lands in `app-windows/src-tauri/target/<target>/release/bundle/nsis/MyDiskIsFull_<version>_<arch>-setup.exe`.
+On Windows it needs Rust and the Tauri CLI (`cargo install tauri-cli --version 2.12.5 --locked`);
+from a Mac also `cargo install cargo-xwin` and `brew install makensis llvm`. CI's `windows-app`
+job builds the x64 one, installs, updates and uninstalls it on the runner, and keeps it as the
+`MyDiskIsFull-windows-x64-setup` artifact; then it builds the ARM64 one and keeps it as
+`MyDiskIsFull-windows-arm64-setup`, which `windows-app-arm` installs, updates and uninstalls on a
+Windows on ARM runner (both with `app-windows/tests/install.py`). The installer stops the watcher before it replaces its
+program and starts it after (`app-windows/src-tauri/windows/hooks.nsh`).
+
+What a first release is (`FINISH-UP-PLAN.md`, Phase 7):
+
+- **Unsigned, at first.** The programs and the installer have no Authenticode signature, so
+  SmartScreen warns on download ("Windows protected your PC": More info → Run anyway), which the
+  README says. A certificate (Azure Artifact Signing takes organisations in the US, Canada, the EU
+  and the UK, individuals only in the US and Canada) goes in `bundle > windows > signCommand`
+  later; nothing else changes.
+- **Updates.** As Sparkle on the Mac: once a day (Settings → Updates turns it off; Check Now checks
+  at once) the app reads `latest.json` from the latest *published* release, and offers Install and
+  Restart for a newer version (`app-windows/src-tauri/src/update.rs`). Each installer is signed
+  with the updater's key, an ed25519 (minisign) key made once with `cargo tauri signer generate
+  --ci`: its public half is `plugins > updater > pubkey` in `tauri.conf.json`, its private half is
+  in the login keychain (service `https://v2.tauri.app/plugin/updater`, account
+  `io.github.lgibelli.mydiskisfull`, beside Sparkle's key) and in the `release` environment's
+  secret `TAURI_SIGNING_PRIVATE_KEY`, no password. The app checks the signature before it runs
+  the installer, and the version signed in it (`requireSignedVersion`: the bundler writes it),
+  and refuses what fails either: lose the key and installed copies can't update (a
+  new key needs a manual install). To put it on GitHub:
+
+  ```sh
+  security find-generic-password -a io.github.lgibelli.mydiskisfull \
+    -s https://v2.tauri.app/plugin/updater -w | gh secret set TAURI_SIGNING_PRIVATE_KEY --env release
+  ```
+
+  With the key set, `build.sh` adds `tauri.updater.json` (`createUpdaterArtifacts`), and Tauri
+  writes the installer's `.sig` beside it; `app-windows/feed.sh <version> <folder>` writes
+  `latest.json` from both installers, their signatures and the version's CHANGELOG section. A
+  release without the Windows installers gets the latest release's `latest.json`
+  (`app-windows/keep-feed.sh`, which `app/release.sh --upload` runs, from a Mac and in
+  `release.yml`: a draft with a feed of its own keeps it, and a release it can't read stops the
+  upload), so it still names the last Windows installers: only if each one it names is still on a
+  published release, and a copy taken earlier is removed once the latest release has none. With
+  `windows=true` the Mac job skips it (`WINDOWS_FEED_FOLLOWS`): the windows job uploads the feed.
+  Withdrawing a Windows release (deleted, or a draft or prerelease again): installed copies read
+  the latest published release's `latest.json`, which may be a copy naming it, so replace that
+  file (with the previous Windows release's) or delete it, at once; the app doesn't ask GitHub
+  anything else. Before any Windows release there is none (a 404), which the app takes as
+  nothing new; any other answer is a failed check, said as one.
+- **No Backups page.** Windows keeps its five pages; one for File History or another backup can
+  come in a later version.
+- **The release job.** `release.yml`'s `windows` job builds both installers (unsigned for
+  Windows, signed for the updater), attests them and puts them, with their `.sig`, `latest.json`
+  and `SHA256SUMS-windows.txt`, on the draft the macOS job made; only when asked: `gh workflow
+  run release.yml --ref main -f windows=true`, never on a push to `release/**`. It fails without
+  the updater key, and before uploading when a signature isn't the app's key's (Tauri signs with
+  any key it's given; `the_release_feed_is_signed_with_the_apps_key`). It has never run.
+
+Publishing a draft without the Windows installers: run `app-windows/keep-feed.sh <tag>` again
+just before, so its feed is the latest published one's (a Windows release published since the
+draft was made would otherwise be hidden by it).
+
 ## After publishing
 
-- Installed copies see the update within a day; "Check for Updates…" sees it at once.
+- Installed copies see the update within a day; "Check for Updates…" sees it at once (on Windows,
+  Settings → Updates → Check Now, once the release has the Windows installers and `latest.json`).
 - `https://github.com/lgibelli/mydiskisfull/releases/latest/download/MyDiskIsFull.dmg` always
   downloads the latest, for links that shouldn't change.
 

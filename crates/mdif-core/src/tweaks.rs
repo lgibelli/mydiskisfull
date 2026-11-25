@@ -16,14 +16,24 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+#[cfg(not(windows))]
+use serde_json::Map;
+use serde_json::{Value, json};
 
 use crate::forecast::DAY;
 use crate::owners::Rules;
+#[cfg(not(windows))]
 use crate::profile::Profile;
 use crate::scan;
-use crate::settings::{self, Setting};
+use crate::settings::Setting;
+#[cfg(not(windows))]
+use crate::settings::{self};
 use crate::store::{Store, TweakRecord};
+
+/// Whether MyDiskIsFull can change settings on this OS yet.
+pub const fn supported_here() -> bool {
+    cfg!(any(target_os = "macos", windows))
+}
 
 pub struct Tweak {
     pub id: &'static str,
@@ -55,6 +65,8 @@ pub enum After {
     Restart,
     /// You approve a profile in System Settings, then restart the app.
     Approve(&'static str),
+    /// Windows reads it when you sign in again.
+    SignOut,
 }
 
 /// A setting and the value a tweak wants (`None`: removed).
@@ -145,167 +157,227 @@ pub struct Reverted {
 
 const GB: u64 = 1_000_000_000;
 
+/// The tweaks for this OS, in the order they're shown.
+#[cfg(not(windows))]
 pub const CATALOGUE: &[Tweak] = &[
-    Tweak {
-        id: "apple-intelligence",
-        title: "Turn Apple Intelligence off",
-        why: "Apple Intelligence keeps several GB of on-device models, and macOS downloads them \
-              again with updates while it is on.",
-        cost: "Writing Tools, Genmoji, Image Playground and notification summaries go away.",
-        after: After::Restart,
-        what: "Apple Intelligence's models",
-        plural: true,
-        suggest_from: 0,
-        // Its model folders are protected even from reading, so the effect
-        // shows as free space, not as a folder that shrinks.
-        targets: |_| Vec::new(),
-        changes: ai_changes,
-        absent: ai_absent,
-    },
-    Tweak {
-        id: "chrome-ai-model",
-        title: "Stop Chrome downloading its on-device AI model",
-        why: "Chrome downloads it (about 4 GB) for its built-in AI features, and fetches it \
-              again if the folder is deleted.",
-        cost: "Chrome's features that run AI on this Mac stop working; nothing else changes.",
-        after: After::Approve("Google Chrome"),
-        what: "Chrome's on-device AI model",
-        plural: false,
-        suggest_from: GB,
-        targets: |h| vec![h.join(CHROME_MODEL)],
-        changes: |h| {
-            Ok(vec![chrome_policy(
-                h,
-                "chrome-ai-model",
-                "MyDiskIsFull: no on-device AI model in Chrome",
-                "Chrome doesn't download its on-device AI model (about 4 GB), and deletes the copy \
-                 it has",
-                "GenAILocalFoundationalModelSettings",
-                json!(1),
-            )])
-        },
-        absent: chrome_absent,
-    },
-    Tweak {
-        id: "chrome-cache",
-        title: "Cap Chrome's cache at 500 MB",
-        why: "Chrome keeps a disk cache in every profile, sized by the free space it sees.",
-        cost: "Sites you come back to may load a little slower.",
-        after: After::Approve("Google Chrome"),
-        what: "Chrome's cache",
-        plural: false,
-        suggest_from: 2 * GB,
-        targets: |h| vec![h.join("Library/Caches/Google/Chrome")],
-        changes: |h| {
-            Ok(vec![chrome_policy(
-                h,
-                "chrome-cache",
-                "MyDiskIsFull: Chrome cache at most 500 MB",
-                "Chrome keeps at most 500 MB of cache for each person using it",
-                "DiskCacheSize",
-                json!(500 << 20),
-            )])
-        },
-        absent: chrome_absent,
-    },
-    Tweak {
-        id: "gradle-caches",
-        title: "Let Gradle clear caches unused for 14 days",
-        why: "Gradle keeps downloaded dependencies and Gradle distributions for 30 days after \
-              their last use, and every Gradle version has a cache of its own.",
-        cost: "A project not built for two weeks downloads its dependencies again.",
-        after: After::Nothing,
-        what: "Gradle's caches",
-        plural: true,
-        suggest_from: 3 * GB,
-        targets: |h| {
-            let g = gradle_home(h);
-            vec![g.join("caches"), g.join("wrapper/dists")]
-        },
-        changes: |h| {
-            Ok(vec![Change {
-                setting: Setting::File {
-                    path: gradle_home(h).join("init.d/mydiskisfull-caches.gradle"),
-                },
-                to: Some(Value::String(GRADLE_INIT.into())),
-                at_most: false,
-            }])
-        },
-        absent: |h| (!gradle_home(h).is_dir()).then_some("Gradle isn't used here"),
-    },
-    Tweak {
-        id: "claude-transcripts",
-        title: "Keep Claude Code transcripts for 14 days",
-        why: "Claude Code keeps every session's transcript for 30 days; with agents working all \
-              day they add up to gigabytes.",
-        cost: "Sessions older than 14 days can't be resumed.",
-        after: After::Nothing,
-        what: "Claude Code's transcripts",
-        plural: true,
-        suggest_from: GB,
-        targets: |h| vec![h.join(".claude/projects")],
-        changes: |h| {
-            Ok(vec![Change {
-                setting: Setting::Json {
-                    file: h.join(".claude/settings.json"),
-                    key: "cleanupPeriodDays".into(),
-                },
-                to: Some(json!(14)),
-                at_most: true,
-            }])
-        },
-        absent: |h| (!h.join(".claude").is_dir()).then_some("Claude Code isn't used here"),
-    },
-    Tweak {
-        id: "homebrew-downloads",
-        title: "Let Homebrew clear downloads after 30 days",
-        why: "Homebrew keeps the bottles and source archives it downloaded for 120 days.",
-        cost: "Reinstalling something it already cleared downloads it again.",
-        after: After::Nothing,
-        what: "Homebrew's download cache",
-        plural: false,
-        suggest_from: GB,
-        targets: |h| vec![h.join("Library/Caches/Homebrew")],
-        changes: |h| {
-            Ok(vec![Change {
-                setting: Setting::Env {
-                    file: brew_env(h),
-                    key: "HOMEBREW_CLEANUP_MAX_AGE_DAYS".into(),
-                },
-                to: Some(json!("30")),
-                at_most: true,
-            }])
-        },
-        absent: |_| {
-            (!["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-                .iter()
-                .any(|b| Path::new(b).exists()))
-            .then_some("Homebrew isn't installed")
-        },
-    },
-    Tweak {
-        id: "trash-auto-empty",
-        title: "Empty the Trash automatically after 30 days",
-        why: "Files in the Trash take space until the Trash is emptied.",
-        cost: "Items deleted more than 30 days ago can't be put back.",
-        after: After::Relaunch("Finder"),
-        what: "the Trash",
-        plural: false,
-        suggest_from: GB,
-        targets: |h| vec![h.join(".Trash")],
-        changes: |_| {
-            Ok(vec![Change {
-                setting: Setting::Defaults {
-                    domain: "com.apple.finder".into(),
-                    key: "FXRemoveOldTrashItems".into(),
-                },
-                to: Some(json!(true)),
-                at_most: false,
-            }])
-        },
-        absent: |_| None,
-    },
+    APPLE_INTELLIGENCE,
+    CHROME_AI_MODEL,
+    CHROME_CACHE,
+    GRADLE_CACHES,
+    CLAUDE_TRANSCRIPTS,
+    HOMEBREW_DOWNLOADS,
+    TRASH_AUTO_EMPTY,
 ];
+
+/// The tweaks for this OS, in the order they're shown: Gradle and Claude
+/// Code keep the same files on every OS.
+#[cfg(windows)]
+pub const CATALOGUE: &[Tweak] = &[RECYCLE_BIN_AUTO_EMPTY, GRADLE_CACHES, CLAUDE_TRANSCRIPTS];
+
+#[cfg(not(windows))]
+const APPLE_INTELLIGENCE: Tweak = Tweak {
+    id: "apple-intelligence",
+    title: "Turn Apple Intelligence off",
+    why: "Apple Intelligence keeps several GB of on-device models, and macOS downloads them \
+          again with updates while it is on.",
+    cost: "Writing Tools, Genmoji, Image Playground and notification summaries go away.",
+    after: After::Restart,
+    what: "Apple Intelligence's models",
+    plural: true,
+    suggest_from: 0,
+    // Its model folders are protected even from reading, so the effect
+    // shows as free space, not as a folder that shrinks.
+    targets: |_| Vec::new(),
+    changes: ai_changes,
+    absent: ai_absent,
+};
+
+#[cfg(not(windows))]
+const CHROME_AI_MODEL: Tweak = Tweak {
+    id: "chrome-ai-model",
+    title: "Stop Chrome downloading its on-device AI model",
+    why: "Chrome downloads it (about 4 GB) for its built-in AI features, and fetches it \
+          again if the folder is deleted.",
+    cost: "Chrome's features that run AI on this Mac stop working; nothing else changes.",
+    after: After::Approve("Google Chrome"),
+    what: "Chrome's on-device AI model",
+    plural: false,
+    suggest_from: GB,
+    targets: |h| vec![h.join(CHROME_MODEL)],
+    changes: |h| {
+        Ok(vec![chrome_policy(
+            h,
+            "chrome-ai-model",
+            "MyDiskIsFull: no on-device AI model in Chrome",
+            "Chrome doesn't download its on-device AI model (about 4 GB), and deletes the copy \
+             it has",
+            "GenAILocalFoundationalModelSettings",
+            json!(1),
+        )])
+    },
+    absent: chrome_absent,
+};
+
+#[cfg(not(windows))]
+const CHROME_CACHE: Tweak = Tweak {
+    id: "chrome-cache",
+    title: "Cap Chrome's cache at 500 MB",
+    why: "Chrome keeps a disk cache in every profile, sized by the free space it sees.",
+    cost: "Sites you come back to may load a little slower.",
+    after: After::Approve("Google Chrome"),
+    what: "Chrome's cache",
+    plural: false,
+    suggest_from: 2 * GB,
+    targets: |h| vec![h.join("Library/Caches/Google/Chrome")],
+    changes: |h| {
+        Ok(vec![chrome_policy(
+            h,
+            "chrome-cache",
+            "MyDiskIsFull: Chrome cache at most 500 MB",
+            "Chrome keeps at most 500 MB of cache for each person using it",
+            "DiskCacheSize",
+            json!(500 << 20),
+        )])
+    },
+    absent: chrome_absent,
+};
+
+const GRADLE_CACHES: Tweak = Tweak {
+    id: "gradle-caches",
+    title: "Let Gradle clear caches unused for 14 days",
+    why: "Gradle keeps downloaded dependencies and Gradle distributions for 30 days after \
+          their last use, and every Gradle version has a cache of its own.",
+    cost: "A project not built for two weeks downloads its dependencies again.",
+    after: After::Nothing,
+    what: "Gradle's caches",
+    plural: true,
+    suggest_from: 3 * GB,
+    targets: |h| {
+        let g = gradle_home(h);
+        vec![g.join("caches"), g.join("wrapper/dists")]
+    },
+    changes: |h| {
+        Ok(vec![Change {
+            setting: Setting::File {
+                path: gradle_home(h).join("init.d/mydiskisfull-caches.gradle"),
+            },
+            to: Some(Value::String(GRADLE_INIT.into())),
+            at_most: false,
+        }])
+    },
+    absent: |h| (!gradle_home(h).is_dir()).then_some("Gradle isn't used here"),
+};
+
+const CLAUDE_TRANSCRIPTS: Tweak = Tweak {
+    id: "claude-transcripts",
+    title: "Keep Claude Code transcripts for 14 days",
+    why: "Claude Code keeps every session's transcript for 30 days; with agents working all \
+          day they add up to gigabytes.",
+    cost: "Sessions older than 14 days can't be resumed.",
+    after: After::Nothing,
+    what: "Claude Code's transcripts",
+    plural: true,
+    suggest_from: GB,
+    targets: |h| vec![h.join(".claude/projects")],
+    changes: |h| {
+        Ok(vec![Change {
+            setting: Setting::Json {
+                file: h.join(".claude/settings.json"),
+                key: "cleanupPeriodDays".into(),
+            },
+            to: Some(json!(14)),
+            at_most: true,
+        }])
+    },
+    absent: |h| (!h.join(".claude").is_dir()).then_some("Claude Code isn't used here"),
+};
+
+#[cfg(not(windows))]
+const HOMEBREW_DOWNLOADS: Tweak = Tweak {
+    id: "homebrew-downloads",
+    title: "Let Homebrew clear downloads after 30 days",
+    why: "Homebrew keeps the bottles and source archives it downloaded for 120 days.",
+    cost: "Reinstalling something it already cleared downloads it again.",
+    after: After::Nothing,
+    what: "Homebrew's download cache",
+    plural: false,
+    suggest_from: GB,
+    targets: |h| vec![h.join("Library/Caches/Homebrew")],
+    changes: |h| {
+        Ok(vec![Change {
+            setting: Setting::Env {
+                file: brew_env(h),
+                key: "HOMEBREW_CLEANUP_MAX_AGE_DAYS".into(),
+            },
+            to: Some(json!("30")),
+            at_most: true,
+        }])
+    },
+    absent: |_| {
+        (!["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .iter()
+            .any(|b| Path::new(b).exists()))
+        .then_some("Homebrew isn't installed")
+    },
+};
+
+#[cfg(windows)]
+const RECYCLE_BIN_AUTO_EMPTY: Tweak = Tweak {
+    id: "recycle-bin-auto-empty",
+    title: "Empty the Recycle Bin automatically after 30 days",
+    why: "Files in the Recycle Bin take space until it is emptied.",
+    cost: "Files in the Recycle Bin for over 30 days can't be restored. It turns Storage Sense on, \
+           which then runs at least once a week and also deletes temporary files apps no longer \
+           use, unless that is turned off in Settings → System → Storage.",
+    after: After::SignOut,
+    what: "the Recycle Bin",
+    plural: false,
+    suggest_from: GB,
+    targets: recycle_bin,
+    changes: |_| {
+        let now = storage_sense_now()?;
+        Ok(storage_sense_changes(&|v| now.user(v))
+            .into_iter()
+            .map(|(value, name, to)| Change {
+                setting: Setting::Registry {
+                    key: STORAGE_POLICY.into(),
+                    value: value.into(),
+                    name: name.into(),
+                },
+                to: Some(json!(to)),
+                at_most: false,
+            })
+            .collect())
+    },
+    absent: |_| match storage_sense_now() {
+        Ok(now) => storage_sense_refusal(&now),
+        Err(_) => Some("Storage Sense's settings can't be read"),
+    },
+};
+
+#[cfg(not(windows))]
+const TRASH_AUTO_EMPTY: Tweak = Tweak {
+    id: "trash-auto-empty",
+    title: "Empty the Trash automatically after 30 days",
+    why: "Files in the Trash take space until the Trash is emptied.",
+    cost: "Items deleted more than 30 days ago can't be put back.",
+    after: After::Relaunch("Finder"),
+    what: "the Trash",
+    plural: false,
+    suggest_from: GB,
+    targets: |h| vec![h.join(".Trash")],
+    changes: |_| {
+        Ok(vec![Change {
+            setting: Setting::Defaults {
+                domain: "com.apple.finder".into(),
+                key: "FXRemoveOldTrashItems".into(),
+            },
+            to: Some(json!(true)),
+            at_most: false,
+        }])
+    },
+    absent: |_| None,
+};
 
 pub fn find(id: &str) -> Option<&'static Tweak> {
     CATALOGUE.iter().find(|t| t.id == id)
@@ -367,9 +439,10 @@ impl Tweak {
     }
 
     /// Whether what `record` set still holds, judged by the settings it
-    /// recorded rather than by where they would be looked for now: the app
-    /// runs without the shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME`, so
-    /// [`Tweak::status`] could look in the wrong place and see it undone.
+    /// recorded rather than by where they would be looked for now: your
+    /// shell's `GRADLE_USER_HOME` or `XDG_CONFIG_HOME` may have changed since,
+    /// or be out of reach ([`crate::shell_env`]), so [`Tweak::status`] could
+    /// look in the wrong place and see it undone.
     pub fn record_status(&self, record: &TweakRecord) -> Result<Status> {
         self.records_status(std::slice::from_ref(record))
     }
@@ -435,7 +508,7 @@ impl Tweak {
         if steps.is_empty() {
             return Ok(steps);
         }
-        mdif_macos::fs::forbid_dataless_materialization()?;
+        crate::os::fs::forbid_dataless_materialization()?;
         let sizes: Vec<(PathBuf, Option<u64>)> = self
             .targets(home)
             .into_iter()
@@ -507,7 +580,7 @@ impl Tweak {
         let (Some(first), Some(latest)) = (records.last(), records.first()) else {
             return Ok(None);
         };
-        mdif_macos::fs::forbid_dataless_materialization()?;
+        crate::os::fs::forbid_dataless_materialization()?;
         let then: Vec<(PathBuf, Option<u64>)> =
             serde_json::from_str(&first.sizes).unwrap_or_default();
         let sizes = then
@@ -518,10 +591,9 @@ impl Tweak {
             })
             .collect::<Vec<_>>();
         let restart_pending = self.after == After::Restart
-            && mdif_macos::sys::boot_time().is_ok_and(|b| b < latest.applied);
-        // By the settings it recorded, not where this process's environment
-        // would look (the app's has no XDG_CONFIG_HOME): unless its tool is
-        // gone.
+            && crate::os::sys::boot_time().is_ok_and(|b| b < latest.applied);
+        // By the settings it recorded, not where they'd be looked for now
+        // (see `record_status`): unless its tool is gone.
         let status = match self.status(home)? {
             gone @ Status::Absent(_) => gone,
             _ => self.records_status(&records)?,
@@ -586,11 +658,13 @@ fn trend(
 
 pub const CHROME_MODEL: &str = "Library/Application Support/Google/Chrome/OptGuideOnDeviceModel";
 
+#[cfg(not(windows))]
 const AI_DOMAIN: &str = "com.apple.CloudSubscriptionFeatures.optIn";
 
 /// The opt-in flags: a numeric key per feature set (the number differs
 /// between macOS versions), and `auto_opt_in`, which would switch them back
 /// on by itself.
+#[cfg(not(windows))]
 fn ai_keys(domain: &Map<String, Value>) -> Vec<String> {
     let mut keys: Vec<String> = domain
         .iter()
@@ -601,6 +675,7 @@ fn ai_keys(domain: &Map<String, Value>) -> Vec<String> {
     keys
 }
 
+#[cfg(not(windows))]
 fn ai_changes(_: &Path) -> Result<Vec<Change>> {
     Ok(ai_keys(&settings::defaults(AI_DOMAIN)?)
         .into_iter()
@@ -615,6 +690,7 @@ fn ai_changes(_: &Path) -> Result<Vec<Change>> {
         .collect())
 }
 
+#[cfg(not(windows))]
 fn ai_absent(_: &Path) -> Option<&'static str> {
     match settings::defaults(AI_DOMAIN) {
         Ok(d) if ai_keys(&d).iter().any(|k| d.contains_key(k)) => None,
@@ -622,6 +698,7 @@ fn ai_absent(_: &Path) -> Option<&'static str> {
     }
 }
 
+#[cfg(not(windows))]
 fn chrome_absent(home: &Path) -> Option<&'static str> {
     let app = "Applications/Google Chrome.app";
     (!(Path::new("/").join(app).exists() || home.join(app).exists()))
@@ -637,6 +714,7 @@ pub fn profiles_dir(home: &Path) -> PathBuf {
 /// `effect`. A plain user default won't do: Chrome reads one as a
 /// *recommended* policy, which most policies (these two among them) can't be,
 /// so it ignores it. Only a managed preference is mandatory.
+#[cfg(not(windows))]
 fn chrome_policy(
     home: &Path,
     id: &str,
@@ -671,15 +749,233 @@ fn chrome_policy(
     }
 }
 
-fn gradle_home(home: &Path) -> PathBuf {
-    std::env::var_os("GRADLE_USER_HOME")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| home.join(".gradle"), PathBuf::from)
+/// Where Settings → System → Storage keeps Storage Sense's choices, in
+/// values named by numbers: "01" Storage Sense itself, "2048" how often it
+/// runs (days; 0: only when space is low), "08" and "256" the Recycle Bin's
+/// clean-up and its days, "32" and "512" the Downloads folder's, "04"
+/// temporary files; "02" and "128" OneDrive's (also in a subkey per
+/// account), which makes files online-only.
+#[cfg_attr(not(windows), allow(dead_code))]
+const STORAGE_POLICY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy";
+
+/// OneDrive's own record of the accounts it syncs: a key each (`Personal`,
+/// `Business1`), the folder it syncs in `UserFolder`.
+#[cfg_attr(not(windows), allow(dead_code))]
+const ONEDRIVE_ACCOUNTS: &str = r"Software\Microsoft\OneDrive\Accounts";
+
+/// Group Policy's Storage Sense settings (`HKEY_LOCAL_MACHINE`), which win
+/// over the user's.
+#[cfg_attr(not(windows), allow(dead_code))]
+const STORAGE_SENSE_POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows\StorageSense";
+
+/// Storage Sense as it is set: the user's values, each OneDrive account's
+/// ("02" and "128" of each subkey), and Group Policy's; and whether
+/// Windows' own default makes OneDrive's files online-only (OneDrive syncs
+/// an account here, on Windows 11 22H2 or later).
+#[derive(Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct StorageSense {
+    user: Vec<(&'static str, u32)>,
+    accounts: Vec<(Option<u32>, Option<u32>)>,
+    policy: Vec<(&'static str, u32)>,
+    onedrive_default: bool,
 }
 
-/// Homebrew's user `brew.env`, found the way `brew` itself finds it.
+#[cfg_attr(not(windows), allow(dead_code))]
+impl StorageSense {
+    fn user(&self, value: &str) -> Option<u32> {
+        self.user.iter().find(|(v, _)| *v == value).map(|(_, n)| *n)
+    }
+
+    fn policy(&self, value: &str) -> Option<u32> {
+        self.policy
+            .iter()
+            .find(|(v, _)| *v == value)
+            .map(|(_, n)| *n)
+    }
+}
+
+/// Storage Sense's values now; one that can't be read (another type than a
+/// number) fails it all, since a clean-up nobody can see might start.
+#[cfg(windows)]
+fn storage_sense_now() -> Result<StorageSense> {
+    use crate::os::sys::{machine_number, user_number, user_subkeys, user_text, windows_build};
+    let mut now = StorageSense::default();
+    for v in ["01", "02", "04", "08", "32", "128", "256", "512", "2048"] {
+        if let Some(n) = user_number(STORAGE_POLICY, v)? {
+            now.user.push((v, n));
+        }
+    }
+    for account in user_subkeys(STORAGE_POLICY)? {
+        let key = format!(r"{STORAGE_POLICY}\{account}");
+        now.accounts
+            .push((user_number(&key, "02")?, user_number(&key, "128")?));
+    }
+    let mut synced = false;
+    for account in user_subkeys(ONEDRIVE_ACCOUNTS)? {
+        let folder = user_text(&format!(r"{ONEDRIVE_ACCOUNTS}\{account}"), "UserFolder")?;
+        synced |= folder.is_some_and(|f| !f.trim().is_empty());
+    }
+    // 22H2 is build 22621; one that can't be read counts as later.
+    now.onedrive_default = synced && windows_build().is_none_or(|b| b >= 22_621);
+    for v in [
+        "AllowStorageSenseGlobal",
+        "ConfigStorageSenseGlobalCadence",
+        "ConfigStorageSenseRecycleBinCleanupThreshold",
+        "ConfigStorageSenseDownloadsCleanupThreshold",
+        "ConfigStorageSenseCloudContentDehydrationThreshold",
+    ] {
+        if let Some(n) = machine_number(STORAGE_SENSE_POLICY, v)? {
+            now.policy.push((v, n));
+        }
+    }
+    Ok(now)
+}
+
+/// Why turning the Recycle Bin's clean-up on doesn't apply, if it doesn't:
+/// Group Policy decides it, or turning Storage Sense on, or running it
+/// weekly where it runs less often now, would also start or hasten a
+/// clean-up of your own files set before, in Settings or by Group Policy
+/// (Downloads, or OneDrive's files made online-only), or Windows' own (since
+/// Windows 11 22H2, OneDrive's files unopened for 30 days are made
+/// online-only unless that's set to never). MyDiskIsFull never starts those,
+/// nor runs them sooner.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn storage_sense_refusal(now: &StorageSense) -> Option<&'static str> {
+    if now.policy("AllowStorageSenseGlobal") == Some(0) {
+        return Some("your organization has turned Storage Sense off");
+    }
+    if now
+        .policy("ConfigStorageSenseRecycleBinCleanupThreshold")
+        .is_some()
+    {
+        return Some("your organization sets when the Recycle Bin is emptied");
+    }
+    if now
+        .policy("ConfigStorageSenseGlobalCadence")
+        .is_some_and(|days| days != 1 && days != 7)
+    {
+        return Some("your organization sets when Storage Sense runs");
+    }
+    let on = now.user("01") == Some(1) || now.policy("AllowStorageSenseGlobal") == Some(1);
+    // Weekly at least ([`storage_sense_changes`]): sooner than now, unless it
+    // runs daily or weekly already, or Group Policy says so (as above).
+    let sooner = !matches!(now.user("2048"), Some(1 | 7))
+        && now.policy("ConfigStorageSenseGlobalCadence").is_none();
+    if on && !sooner {
+        // Already on, as often: the Recycle Bin's clean-up starts nothing else.
+        return None;
+    }
+    if cleans(
+        now.policy("ConfigStorageSenseDownloadsCleanupThreshold"),
+        [now.user("32"), now.user("512")],
+    ) {
+        return Some(if on {
+            "Storage Sense also deletes files in your Downloads folder, and this would run it \
+             weekly, more often than now; set how often in Settings → System → Storage if you \
+             want that"
+        } else {
+            "Storage Sense, which it turns on, is set to delete files in your Downloads folder \
+             too; turn it on yourself in Settings → System → Storage if you want that"
+        });
+    }
+    // OneDrive's: Group Policy's where it sets one; else as set in Settings,
+    // for every account or one; else Windows' default wherever OneDrive
+    // syncs. An account's own Never doesn't count: which key here is whose
+    // isn't known, so it may be an account no longer synced.
+    let set = |n: Option<u32>| n.is_some_and(|n| n != 0);
+    let onedrive = match now.policy("ConfigStorageSenseCloudContentDehydrationThreshold") {
+        Some(days) => days != 0,
+        None => {
+            cleans(None, [now.user("02"), now.user("128")])
+                || now.accounts.iter().any(|&(on, days)| set(on) || set(days))
+                || now.onedrive_default
+        }
+    };
+    if onedrive {
+        return Some(if on {
+            "Storage Sense may also make OneDrive files online-only, and this would run it weekly, \
+             more often than now; set how often in Settings → System → Storage if you want that"
+        } else {
+            "Storage Sense, which it turns on, may also make OneDrive files online-only when they \
+             haven't been opened for a while; turn it on yourself in Settings → System → Storage \
+             if you want that"
+        });
+    }
+    None
+}
+
+/// Whether a clean-up of your own files is set: by Group Policy, where it
+/// sets a number of days (0: never), whatever Settings says; else in
+/// Settings (`user`, any value but 0).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cleans(policy: Option<u32>, user: impl IntoIterator<Item = Option<u32>>) -> bool {
+    match policy {
+        Some(days) => days != 0,
+        None => user.into_iter().any(|n| n.is_some_and(|n| n != 0)),
+    }
+}
+
+/// The values that make Storage Sense delete what has been in the Recycle
+/// Bin over 30 days, at least weekly: `(value, what it is, number)`. A
+/// shorter wait already in effect, and runs more frequent than weekly, are
+/// kept.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn storage_sense_changes(
+    user: &dyn Fn(&str) -> Option<u32>,
+) -> Vec<(&'static str, &'static str, u32)> {
+    let running = user("01") == Some(1);
+    let emptying = running && user("08") == Some(1);
+    let mut out = vec![
+        ("01", "Storage Sense, 1 if on", 1),
+        ("08", "Storage Sense emptying the Recycle Bin, 1 if on", 1),
+    ];
+    if !(emptying && matches!(user("256"), Some(1 | 14))) {
+        out.push((
+            "256",
+            "Days in the Recycle Bin before Storage Sense deletes a file",
+            30,
+        ));
+    }
+    if !matches!(user("2048"), Some(1 | 7)) {
+        out.push((
+            "2048",
+            "Days between Storage Sense's runs, 0 if only when space is low",
+            7,
+        ));
+    }
+    out
+}
+
+/// The user's folder in the Recycle Bin of the drive their home is on
+/// (`C:\$Recycle.Bin\<SID>`), where what they delete there waits.
+#[cfg(windows)]
+fn recycle_bin(home: &Path) -> Vec<PathBuf> {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(p)) = home.components().next() else {
+        return Vec::new();
+    };
+    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = p.kind() else {
+        return Vec::new();
+    };
+    match crate::os::sys::user_sid() {
+        Ok(sid) => vec![PathBuf::from(format!(r"{}:\$Recycle.Bin", letter as char)).join(sid)],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Gradle's home, as your shell tells Gradle ([`crate::shell_env`]: the app
+/// and the watcher aren't started from one).
+fn gradle_home(home: &Path) -> PathBuf {
+    crate::shell_env::var("GRADLE_USER_HOME").map_or_else(|| home.join(".gradle"), PathBuf::from)
+}
+
+/// Homebrew's user `brew.env`, found the way `brew` itself finds it, with
+/// your shell's variables.
+#[cfg(not(windows))]
 fn brew_env(home: &Path) -> PathBuf {
-    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
+    let var = crate::shell_env::var;
     match var("XDG_CONFIG_HOME").or_else(|| var("HOMEBREW_XDG_CONFIG_HOME")) {
         Some(x) => PathBuf::from(x).join("homebrew/brew.env"),
         None => home.join(".homebrew/brew.env"),
@@ -703,7 +999,361 @@ if (GradleVersion.current() >= GradleVersion.version('8.0')) {
 }
 ";
 
+/// Storage Sense's rules, from its values alone: they run on every OS.
 #[cfg(test)]
+mod storage_sense_tests {
+    use super::*;
+
+    fn sense(
+        user: &[(&'static str, u32)],
+        accounts: &[(Option<u32>, Option<u32>)],
+        policy: &[(&'static str, u32)],
+    ) -> StorageSense {
+        StorageSense {
+            user: user.to_vec(),
+            accounts: accounts.to_vec(),
+            policy: policy.to_vec(),
+            onedrive_default: false,
+        }
+    }
+
+    fn values(now: &StorageSense) -> Vec<(&'static str, u32)> {
+        storage_sense_changes(&|v| now.user(v))
+            .into_iter()
+            .map(|(v, _, n)| (v, n))
+            .collect()
+    }
+
+    #[test]
+    fn storage_sense_is_turned_on_only_where_it_starts_nothing_else() {
+        // Never set: on, emptying the Recycle Bin after 30 days, weekly.
+        let fresh = sense(&[], &[], &[]);
+        assert_eq!(storage_sense_refusal(&fresh), None);
+        assert_eq!(
+            values(&fresh),
+            [("01", 1), ("08", 1), ("256", 30), ("2048", 7)]
+        );
+
+        // Off, with a Downloads clean-up set before: it would start too.
+        for v in ["32", "512"] {
+            let why = storage_sense_refusal(&sense(&[("01", 0), (v, 1)], &[], &[]));
+            assert!(why.unwrap().contains("Downloads"), "{v}");
+        }
+        // Off, with OneDrive's files to be made online-only: its own value,
+        // or an account's.
+        for s in [
+            sense(&[("02", 1)], &[], &[]),
+            sense(&[("128", 30)], &[], &[]),
+            sense(&[], &[(Some(1), None)], &[]),
+            sense(&[], &[(Some(0), Some(30))], &[]),
+        ] {
+            assert!(
+                storage_sense_refusal(&s).unwrap().contains("OneDrive"),
+                "{s:?}"
+            );
+        }
+        // Set to nothing, they're no reason.
+        let none = sense(
+            &[("32", 0), ("512", 0), ("02", 0), ("128", 0)],
+            &[(Some(0), Some(0)), (None, None)],
+            &[],
+        );
+        assert_eq!(storage_sense_refusal(&none), None);
+        // Windows' own default (11 22H2 on) where OneDrive syncs: its files
+        // made online-only after 30 days. An account's Never may be another
+        // account's, so only Group Policy's 0 rules it out.
+        let syncing = |accounts: &[(Option<u32>, Option<u32>)], policy| StorageSense {
+            onedrive_default: true,
+            ..sense(&[], accounts, policy)
+        };
+        for s in [syncing(&[], &[]), syncing(&[(Some(0), Some(0))], &[])] {
+            let why = storage_sense_refusal(&s).unwrap_or_default();
+            assert!(why.contains("OneDrive"), "{s:?}");
+        }
+        let ruled_out = syncing(
+            &[(Some(1), Some(30))],
+            &[("ConfigStorageSenseCloudContentDehydrationThreshold", 0)],
+        );
+        assert_eq!(storage_sense_refusal(&ruled_out), None);
+        // On already and run as often: it changes nothing for them.
+        let on = StorageSense {
+            onedrive_default: true,
+            ..sense(&[("01", 1), ("2048", 7)], &[], &[])
+        };
+        assert_eq!(storage_sense_refusal(&on), None);
+        // Already on, they're the user's choice in effect, left as they are,
+        // and run as often as before.
+        for cadence in [1, 7] {
+            let on = sense(
+                &[("01", 1), ("32", 1), ("512", 14), ("2048", cadence)],
+                &[(Some(1), Some(30))],
+                &[],
+            );
+            assert_eq!(storage_sense_refusal(&on), None);
+            assert!(
+                values(&on)
+                    .iter()
+                    .all(|(v, _)| !["32", "512", "02", "128", "2048"].contains(v))
+            );
+        }
+        // Not run more often: weekly where it runs only when space is low, or
+        // monthly, would delete Downloads or make OneDrive's files
+        // online-only sooner than they're set to.
+        for cadence in [None, Some(0), Some(30)] {
+            let with = |values: &[(&'static str, u32)]| {
+                let mut user = vec![("01", 1)];
+                user.extend(cadence.map(|c| ("2048", c)));
+                user.extend_from_slice(values);
+                sense(&user, &[], &[])
+            };
+            let why = storage_sense_refusal(&with(&[("32", 1)])).unwrap();
+            assert!(
+                why.contains("Downloads") && why.contains("more often"),
+                "{cadence:?}"
+            );
+            let why = storage_sense_refusal(&with(&[("02", 1)])).unwrap();
+            assert!(
+                why.contains("OneDrive") && why.contains("more often"),
+                "{cadence:?}"
+            );
+            assert_eq!(storage_sense_refusal(&with(&[])), None, "{cadence:?}");
+        }
+
+        // Group Policy decides.
+        for policy in [
+            ("AllowStorageSenseGlobal", 0),
+            ("ConfigStorageSenseRecycleBinCleanupThreshold", 60),
+            ("ConfigStorageSenseRecycleBinCleanupThreshold", 0),
+            ("ConfigStorageSenseGlobalCadence", 0),
+            ("ConfigStorageSenseGlobalCadence", 30),
+        ] {
+            assert!(
+                storage_sense_refusal(&sense(&[], &[], &[policy])).is_some(),
+                "{policy:?}"
+            );
+        }
+        assert_eq!(
+            storage_sense_refusal(&sense(&[], &[], &[("ConfigStorageSenseGlobalCadence", 7)])),
+            None
+        );
+        // Forced on by policy, a Downloads clean-up is in effect already: run
+        // as often as before, or as Group Policy says.
+        let forced = sense(
+            &[("32", 1), ("2048", 7)],
+            &[],
+            &[("AllowStorageSenseGlobal", 1)],
+        );
+        assert_eq!(storage_sense_refusal(&forced), None);
+        let forced = sense(
+            &[("32", 1)],
+            &[],
+            &[
+                ("AllowStorageSenseGlobal", 1),
+                ("ConfigStorageSenseGlobalCadence", 7),
+            ],
+        );
+        assert_eq!(storage_sense_refusal(&forced), None);
+        let forced = sense(&[("32", 1)], &[], &[("AllowStorageSenseGlobal", 1)]);
+        assert!(
+            storage_sense_refusal(&forced)
+                .unwrap()
+                .contains("more often")
+        );
+        // Group Policy's own Downloads and cloud clean-ups would start with it.
+        let downloads = sense(
+            &[],
+            &[],
+            &[("ConfigStorageSenseDownloadsCleanupThreshold", 30)],
+        );
+        assert!(
+            storage_sense_refusal(&downloads)
+                .unwrap()
+                .contains("Downloads")
+        );
+        let cloud = sense(
+            &[],
+            &[],
+            &[("ConfigStorageSenseCloudContentDehydrationThreshold", 7)],
+        );
+        assert!(storage_sense_refusal(&cloud).unwrap().contains("OneDrive"));
+        // Where Group Policy sets one to 0 it's never, whatever was chosen in
+        // Settings: off, or on and run less often. An account's own OneDrive
+        // choice still counts where the policy is the Downloads one.
+        for (policy, mine) in [
+            ("ConfigStorageSenseDownloadsCleanupThreshold", ("32", 1)),
+            (
+                "ConfigStorageSenseCloudContentDehydrationThreshold",
+                ("02", 1),
+            ),
+        ] {
+            for user in [vec![("01", 0), mine], vec![("01", 1), ("2048", 30), mine]] {
+                assert_eq!(
+                    storage_sense_refusal(&sense(&user, &[], &[(policy, 0)])),
+                    None,
+                    "{policy} {user:?}"
+                );
+                let why =
+                    storage_sense_refusal(&sense(&user, &[(Some(1), Some(30))], &[(policy, 0)]));
+                if policy.contains("Downloads") {
+                    assert!(
+                        why.is_some_and(|w| w.contains("OneDrive")),
+                        "{user:?}: {why:?}"
+                    );
+                } else {
+                    assert_eq!(why, None, "{user:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sooner_emptying_or_more_frequent_runs_already_set_are_kept() {
+        let all = [("01", 1), ("08", 1), ("256", 30), ("2048", 7)];
+        // On, emptying after 14 days, daily: nothing more.
+        let s = sense(&[("01", 1), ("08", 1), ("256", 14), ("2048", 1)], &[], &[]);
+        assert_eq!(values(&s), [("01", 1), ("08", 1)]);
+        // After 60 days, monthly: 30 days, weekly.
+        let s = sense(&[("01", 1), ("08", 1), ("256", 60), ("2048", 30)], &[], &[]);
+        assert_eq!(values(&s), all);
+        // Never (0), and only when space is low (0).
+        let s = sense(&[("01", 1), ("08", 1), ("256", 0), ("2048", 0)], &[], &[]);
+        assert_eq!(values(&s), all);
+        // 14 days, set while the clean-up was off, isn't what it says: 30.
+        let s = sense(&[("01", 1), ("08", 0), ("256", 14), ("2048", 7)], &[], &[]);
+        assert_eq!(values(&s), [("01", 1), ("08", 1), ("256", 30)]);
+        let s = sense(&[("01", 0), ("08", 1), ("256", 1), ("2048", 7)], &[], &[]);
+        assert_eq!(values(&s), [("01", 1), ("08", 1), ("256", 30)]);
+        // Daily, set while Storage Sense was off, is at least weekly.
+        let s = sense(&[("01", 0), ("2048", 1)], &[], &[]);
+        assert_eq!(values(&s), [("01", 1), ("08", 1), ("256", 30)]);
+    }
+}
+
+/// A tweak over a scratch registry key, applied and undone for real: the
+/// tests never touch a real setting (CI applies the real tweak on its
+/// runner, which is thrown away).
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::os::sys::{set_user_number, user_number};
+
+    fn key() -> String {
+        format!(r"Software\MyDiskIsFull-test-tweaks-{}", std::process::id())
+    }
+
+    struct Scratch;
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new(r"C:\Windows\System32\reg.exe")
+                .args(["delete", &format!(r"HKCU\{}", key()), "/f"])
+                .output();
+        }
+    }
+
+    fn registry_tweak() -> Tweak {
+        Tweak {
+            id: "test-registry",
+            title: "",
+            why: "",
+            cost: "",
+            after: After::SignOut,
+            what: "the test folder",
+            plural: false,
+            suggest_from: 0,
+            targets: |h| vec![h.join("data")],
+            changes: |_| {
+                let setting = |value: &str| Setting::Registry {
+                    key: key(),
+                    value: value.into(),
+                    name: format!("test {value}"),
+                };
+                Ok(vec![
+                    Change {
+                        setting: setting("01"),
+                        to: Some(json!(1)),
+                        at_most: false,
+                    },
+                    Change {
+                        setting: setting("256"),
+                        to: Some(json!(30)),
+                        at_most: false,
+                    },
+                ])
+            },
+            absent: |_| None,
+        }
+    }
+
+    #[test]
+    fn a_registry_tweak_is_applied_and_undone_exactly() {
+        let _scratch = Scratch;
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir(h.join("data")).unwrap();
+        let store = Store::open(&h.join("history.sqlite3")).unwrap();
+        let t = registry_tweak();
+        // "256" was set before; "01" wasn't.
+        set_user_number(&key(), "256", Some(60)).unwrap();
+        assert_eq!(t.status(h).unwrap(), Status::NotApplied);
+
+        let steps = t.apply(h, &store, 1_000).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(user_number(&key(), "01").unwrap(), Some(1));
+        assert_eq!(user_number(&key(), "256").unwrap(), Some(30));
+        assert_eq!(t.status(h).unwrap(), Status::Applied);
+        assert!(t.plan(h).unwrap().is_empty());
+        // As shown: what it is, and where.
+        assert_eq!(
+            steps[0].setting.to_string(),
+            format!(
+                r"test 01 (HKCU\…\{}\01)",
+                key().rsplit('\\').next().unwrap()
+            )
+        );
+
+        let r = t.revert(&store, 2_000).unwrap();
+        assert_eq!(r.restored.len(), 2);
+        assert_eq!(user_number(&key(), "01").unwrap(), None);
+        assert_eq!(user_number(&key(), "256").unwrap(), Some(60));
+
+        // Changed since by hand: that one is kept.
+        t.apply(h, &store, 3_000).unwrap();
+        set_user_number(&key(), "256", Some(14)).unwrap();
+        let r = t.revert(&store, 4_000).unwrap();
+        assert_eq!(r.restored.len(), 1);
+        assert_eq!(r.kept.len(), 1);
+        assert_eq!(user_number(&key(), "01").unwrap(), None);
+        assert_eq!(user_number(&key(), "256").unwrap(), Some(14));
+    }
+
+    #[test]
+    fn this_pcs_tweaks_read_without_failing_and_the_bin_is_the_users() {
+        // Reads only: Storage Sense's values, Gradle's and Claude Code's files.
+        let home = crate::os::sys::account_home().unwrap();
+        for t in CATALOGUE {
+            let status = t
+                .status(&home)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", t.id));
+            println!("{}: {status:?}", t.id);
+        }
+        let sid = crate::os::sys::user_sid().unwrap();
+        assert_eq!(
+            recycle_bin(Path::new(r"D:\Users\someone")),
+            [PathBuf::from(r"D:\$Recycle.Bin").join(&sid)]
+        );
+        assert_eq!(
+            recycle_bin(Path::new(r"\\?\C:\Users\someone")),
+            [PathBuf::from(r"C:\$Recycle.Bin").join(&sid)]
+        );
+        assert!(recycle_bin(Path::new(r"\\server\share\someone")).is_empty());
+        assert!(find("recycle-bin-auto-empty").is_some());
+        assert!(find("trash-auto-empty").is_none());
+    }
+}
+
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

@@ -34,21 +34,21 @@ impl Applied {
 }
 
 pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
-    let st =
-        mdif_macos::fs::statfs(volume).with_context(|| format!("statfs {}", volume.display()))?;
+    let st = mdif_core::os::fs::statfs(volume)
+        .with_context(|| format!("statfs {}", volume.display()))?;
     let now = unix_now();
     let home = home();
     // The app runs this every few minutes, unattended: a privacy prompt
     // would wait for an answer (see mdif_core::privacy).
-    let probes = mdif_macos::sys::access_probes(&home);
-    privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+    let probes = mdif_core::os::sys::access_probes(&home);
+    privacy::avoid_prompts(mdif_core::os::sys::full_disk_access(&probes) != Some(true));
     let store = if db.exists() {
         Some(Store::open(db)?)
     } else {
         None
     };
     let pts = match &store {
-        Some(s) => s.space_since(&st.mount_point, now - 400 * DAY)?,
+        Some(s) => s.space_since(&st.history_key(), now - 400 * DAY)?,
         None => Vec::new(),
     };
     let cleanups = match (&store, pts.first()) {
@@ -66,7 +66,14 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         &facts(volume, &pts, &cleanups, now),
         &Params::default(),
     );
-    let alert = user.alert(f.as_ref(), st.avail, st.total);
+    let interval = watch_cmd::sampling_interval(&pts);
+    // A forecast is as of the last sample. Once the watcher has stopped, its
+    // dates are about a disk that has changed since, so no alert comes of it;
+    // free space under the floor still does, as it's read now.
+    let stale = pts
+        .last()
+        .is_some_and(|last| now - last.ts > 3 * interval.max(60));
+    let alert = user.alert(f.as_ref().filter(|_| !stale), st.avail, st.total);
     let keep = crate::keep_cmd::load_or_warn(db);
     let open: Vec<Episode> = match &store {
         Some(s) => s
@@ -88,7 +95,12 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         Some(s) => watch::recorded_cost(s)?,
         None => None,
     };
-    let interval = watch_cmd::sampling_interval(&pts);
+    // When the folders last weren't all checked (a gap in the journal, a
+    // rescan cut short): incidents can be missing since then.
+    let last_gap = match &store {
+        Some(s) => watch::recorded_gap(s)?,
+        None => None,
+    };
 
     if json_out {
         let out = json!({
@@ -104,7 +116,9 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
                 "first": pts.first().map(|p| p.ts),
                 "last": pts.last().map(|p| p.ts),
                 "interval_secs": interval,
+                "stale": stale,
                 "bytes": watch_cmd::history_bytes(db),
+                "last_gap": last_gap,
             },
             "incidents": open.iter().map(|e| episode_json(e, &home, &keep)).collect::<Vec<_>>(),
             "tweaks": applied.iter().map(|a| json!({
@@ -128,11 +142,21 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
     println!("{} free of {}.", bytes(st.avail), bytes(st.total));
     match (&store, &f) {
         (None, _) => {
-            println!("No history yet: `mdif agent install` starts the watcher.");
+            println!(
+                "No history yet: `{}` starts the watcher.",
+                if cfg!(target_os = "macos") {
+                    "mdif agent install"
+                } else {
+                    "mdif watch"
+                }
+            );
             return Ok(());
         }
         (Some(_), None) => {
-            println!("No samples yet. Is the watcher running? (`mdif agent status`)")
+            println!(
+                "No samples yet. Is the watcher running?{}",
+                crate::watch_cmd::running_hint()
+            )
         }
         (Some(_), Some(f)) => println!("{}", trend_line(f, pts.len())),
     }
@@ -154,8 +178,9 @@ pub fn status(db: &Path, volume: &Path, json_out: bool) -> Result<()> {
         let age = now - last.ts;
         if age > 3 * interval.max(60) {
             println!(
-                "Watcher: no sample for {}. Is it running? (`mdif agent status`)",
-                duration(age)
+                "Watcher: no sample for {}. Is it running?{}",
+                duration(age),
+                crate::watch_cmd::running_hint()
             );
         }
     }

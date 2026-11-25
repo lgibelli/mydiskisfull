@@ -32,7 +32,6 @@ use serde::Serialize;
 
 use crate::clean::{self, Action};
 use crate::keep::Keep;
-use crate::map::DATA_ROOT;
 use crate::owners::ARTIFACTS;
 use crate::store::Store;
 use crate::{privacy, scan, space, worktrees};
@@ -65,11 +64,11 @@ fn let_in_child(name: &std::ffi::OsStr) -> Option<String> {
 /// folder keeps for it. When that can't be read, it counts as yes: nothing
 /// is kept out on a guess.
 pub fn let_in(dir: &Path) -> bool {
-    if mdif_macos::fs::has_mark(dir, LET_IN).unwrap_or(true) {
+    if crate::os::fs::has_mark(dir, LET_IN).unwrap_or(true) {
         return true;
     }
     match (dir.parent(), dir.file_name().and_then(let_in_child)) {
-        (Some(parent), Some(mark)) => mdif_macos::fs::has_mark(parent, &mark).unwrap_or(true),
+        (Some(parent), Some(mark)) => crate::os::fs::has_mark(parent, &mark).unwrap_or(true),
         _ => false,
     }
 }
@@ -383,8 +382,8 @@ pub struct Snapshot {
 /// UTC). The offset is the one at that moment, not at `wall` taken as UTC:
 /// in the hours around a change of summer time those differ.
 fn from_wall(wall: i64) -> i64 {
-    let guess = wall - mdif_macos::sys::utc_offset(wall);
-    wall - mdif_macos::sys::utc_offset(guess)
+    let guess = wall - crate::os::sys::utc_offset(wall);
+    wall - crate::os::sys::utc_offset(guess)
 }
 
 /// Time Machine's own among `names`, oldest first, each backup disk's
@@ -676,7 +675,8 @@ pub fn glance(home: &Path, now: i64) -> Report {
     let all = tries(&finished, &attempts);
     let running = running();
 
-    let names = crate::apfs::local_snapshots(Path::new(DATA_ROOT)).unwrap_or_default();
+    let volume = crate::map::boot_volume();
+    let names = crate::apfs::local_snapshots(&volume).unwrap_or_default();
     // Each backup disk keeps the one its next backup starts from.
     let references: Vec<i64> = prefs
         .destinations
@@ -684,11 +684,11 @@ pub fn glance(home: &Path, now: i64) -> Report {
         .filter_map(|d| d.reference)
         .collect();
     let snaps = snapshots(&names, &references);
-    let free = mdif_macos::fs::statfs(Path::new(DATA_ROOT)).map_or(0, |s| s.avail);
+    let free = crate::os::fs::statfs(&volume).map_or(0, |s| s.avail);
     let held = if snaps.is_empty() {
         0
     } else {
-        space::purgeable(Path::new(DATA_ROOT), free)
+        space::purgeable(&volume, free)
     };
     let backlog = if set_up && prefs.auto {
         worst_backlog(
@@ -821,7 +821,7 @@ pub fn report(
             let backed_up = state
                 .get(&p)
                 .copied()
-                .unwrap_or_else(|| !mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false));
+                .unwrap_or_else(|| !crate::os::fs::excluded_from_backup(&p).unwrap_or(false));
             let (checkout, project) = match what {
                 "cache" => {
                     let tool = tool_folder(&p, home).unwrap_or_else(|| p.clone());
@@ -881,11 +881,10 @@ pub fn remember_excluded(
     exclude: bool,
     home: &Path,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let mut list = excluded_by_mdif(store);
     for p in paths {
         let path = p.to_string_lossy().into_owned();
-        let inode = std::fs::symlink_metadata(p).map_or(0, |m| m.ino());
+        let inode = std::fs::symlink_metadata(p).map_or(0, |m| crate::portable::file_id(p, &m));
         list.retain(|(q, _, i)| *q != path && (inode == 0 || *i != inode));
         if exclude && inode != 0 {
             let what = match rebuildable(p) {
@@ -908,8 +907,7 @@ fn kept_out_by_mdif(
     home: &Path,
     found: &[(PathBuf, &'static str)],
 ) -> Vec<(PathBuf, &'static str)> {
-    use std::os::unix::fs::MetadataExt;
-    let volume = mdif_macos::fs::fsid(home).ok();
+    let volume = crate::os::fs::fsid(home).ok();
     let mut out: Vec<(PathBuf, &'static str)> = Vec::new();
     for (path, what, inode) in excluded_by_mdif(store) {
         let what = match what.as_str() {
@@ -917,21 +915,24 @@ fn kept_out_by_mdif(
             "cache" => "cache",
             _ => "build",
         };
-        let same = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.ino() == inode);
+        let same = |p: &Path| {
+            std::fs::symlink_metadata(p).is_ok_and(|m| crate::portable::file_id(p, &m) == inode)
+        };
         let path = PathBuf::from(path);
         let now = if privacy::may_open(&path) && same(&path) {
             Some(path)
         } else {
             volume
-                .and_then(|v| mdif_macos::fs::path_of(v, inode).ok())
+                .and_then(|v| crate::os::fs::path_of(v, inode).ok())
                 .filter(|p| p.starts_with(home))
         };
         let Some(p) = now else { continue };
         if !found.iter().any(|(f, _)| *f == p)
             && !out.iter().any(|(f, _)| *f == p)
             && privacy::may_open(&p)
-            && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir() && m.ino() == inode)
-            && mdif_macos::fs::excluded_from_backup(&p).unwrap_or(false)
+            && std::fs::symlink_metadata(&p)
+                .is_ok_and(|m| m.is_dir() && crate::portable::file_id(&p, &m) == inode)
+            && crate::os::fs::excluded_from_backup(&p).unwrap_or(false)
         {
             out.push((p, what));
         }
@@ -986,7 +987,7 @@ fn set_excluded_with(
             let shown = crate::text::printable(&p.to_string_lossy()).into_owned();
             let skipped = || {
                 std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
-                    && mdif_macos::fs::excluded_from_backup(p).unwrap_or(false)
+                    && crate::os::fs::excluded_from_backup(p).unwrap_or(false)
             };
             let done = if exclude && keep.covering(p).is_some() {
                 Err(format!("{shown} is on your keep list."))
@@ -1006,14 +1007,14 @@ fn set_excluded_with(
                     "{shown} isn't a folder a build, an install or its tool makes again."
                 ))
             } else {
-                mdif_macos::fs::set_excluded_from_backup(p, exclude)
-                    .and_then(|()| mdif_macos::fs::set_mark(p, LET_IN, !exclude))
+                crate::os::fs::set_excluded_from_backup(p, exclude)
+                    .and_then(|()| crate::os::fs::set_mark(p, LET_IN, !exclude))
                     .map_err(|e| format!("{shown}: {e}"))
                     .inspect(|()| {
                         if let (Some(parent), Some(mark)) =
                             (p.parent(), p.file_name().and_then(let_in_child))
                         {
-                            let _ = mdif_macos::fs::set_mark(parent, &mark, !exclude);
+                            let _ = crate::os::fs::set_mark(parent, &mark, !exclude);
                         }
                     })
             };
@@ -1070,7 +1071,8 @@ pub fn back_up_now() -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -1493,13 +1495,13 @@ mod tests {
         let keep = Keep::default();
         let r = set_excluded(&[repo.join("docs/build")], true, &keep, &home);
         assert!(r[0].1.is_err());
-        assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("docs/build")).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&repo.join("docs/build")).unwrap());
         let r = set_excluded(&[repo.join("ios/build")], true, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
         let r = set_excluded(&[repo.join("ios/build")], false, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(!mdif_macos::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&repo.join("ios/build")).unwrap());
         // A project stands for its folders a build makes again; a folder
         // with none in it stays itself, to be refused.
         assert_eq!(
@@ -1520,7 +1522,7 @@ mod tests {
         std::fs::create_dir_all(&kept).unwrap();
         let store = Store::open_in_memory().unwrap();
         for p in [&dist, &kept] {
-            mdif_macos::fs::set_excluded_from_backup(p, true).unwrap();
+            crate::os::fs::set_excluded_from_backup(p, true).unwrap();
         }
         remember_excluded(&store, &[dist.clone(), kept.clone()], true, &home).unwrap();
         // Found as made again: listed there, not twice.
@@ -1538,9 +1540,9 @@ mod tests {
             [(release.clone(), "build")]
         );
         // Let back in: no longer listed, by mdif or by hand.
-        mdif_macos::fs::set_excluded_from_backup(&release, false).unwrap();
+        crate::os::fs::set_excluded_from_backup(&release, false).unwrap();
         assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
-        mdif_macos::fs::set_excluded_from_backup(&release, true).unwrap();
+        crate::os::fs::set_excluded_from_backup(&release, true).unwrap();
         remember_excluded(&store, std::slice::from_ref(&release), false, &home).unwrap();
         assert!(kept_out_by_mdif(&store, &home, &found).is_empty());
         // Deleted: gone from the list, and nothing else taken for it.
@@ -1601,7 +1603,7 @@ mod tests {
         // name read back is the same moment, but in the hour the clocks go
         // back, which two moments share.
         let start = 1_767_225_600; // 2026-01-01 UTC
-        let wall = |t: i64| t + mdif_macos::sys::utc_offset(t);
+        let wall = |t: i64| t + crate::os::sys::utc_offset(t);
         for t in (start..start + 365 * 86_400).step_by(900) {
             let w = wall(t);
             let shared = [-3600, 3600].iter().any(|d| wall(t + d) == w);
@@ -1676,7 +1678,7 @@ mod tests {
         ]);
         std::fs::create_dir_all(sdk.join(".git/lfs/cache")).unwrap();
         // Kept out already: so is what's in it.
-        mdif_macos::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
+        crate::os::fs::set_excluded_from_backup(&home.join(".gradle"), true).unwrap();
 
         // Tagged, named one by its tool, or in an XDG cache home; the
         // outermost only. Not in .git, macOS's or your folders (a research
@@ -1715,7 +1717,7 @@ mod tests {
         let cache = home.join(".bun/install/cache");
         let r = set_excluded(std::slice::from_ref(&cache), true, &keep, &home);
         assert_eq!(r[0].1, Ok(()));
-        assert!(mdif_macos::fs::excluded_from_backup(&cache).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&cache).unwrap());
 
         // The tidy-up keeps out the big ones, but not one you let back in.
         let pubs = home.join(".pub-cache");
@@ -1730,7 +1732,7 @@ mod tests {
         let o = crate::tidy::run(crate::tidy::Id::Backups, &home, &keep, 0, false);
         let done: Vec<&Path> = o.done.iter().map(|d| d.path.as_path()).collect();
         assert_eq!(done, [pubs.as_path()]);
-        assert!(!mdif_macos::fs::excluded_from_backup(&cache).unwrap());
-        assert!(mdif_macos::fs::excluded_from_backup(&pubs).unwrap());
+        assert!(!crate::os::fs::excluded_from_backup(&cache).unwrap());
+        assert!(crate::os::fs::excluded_from_backup(&pubs).unwrap());
     }
 }

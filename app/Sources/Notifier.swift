@@ -121,6 +121,23 @@ enum Notifier {
         post(id: "undone-\(t.id)", n)
     }
 
+    /// The backups tidy kept folders out of Time Machine by itself: which,
+    /// so none drops out of the backups unseen. Opens the Time Machine page,
+    /// where one is backed up again.
+    static func keptOut(count: Int, paths: [String]) {
+        let n = UNMutableNotificationContent()
+        n.title = count == 1 ? "A folder was kept out of Time Machine"
+            : "\(count) folders were kept out of Time Machine"
+        let named = paths.prefix(3).map(Format.path)
+        let more = count > named.count ? " and \(count - named.count) more" : ""
+        let what = named.isEmpty ? "" : named.joined(separator: ", ") + more + ": "
+        n.body = what + "a build, an install or its tool makes \(count == 1 ? "it" : "them") again. "
+            + "Back one up again on the Time Machine page."
+        n.categoryIdentifier = Category.alert.rawValue
+        n.userInfo = ["pane": Pane.timeMachine.rawValue]
+        post(id: "kept-out", n)
+    }
+
     static let updateID = "update"
 
     /// Sparkle's gentle reminder: an update is waiting behind other windows.

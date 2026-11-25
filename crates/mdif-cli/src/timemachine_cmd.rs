@@ -21,7 +21,7 @@ use crate::watch_cmd::{home, local, tilde};
 pub fn show(db: &Path, quick: bool, json_out: bool) -> Result<()> {
     // Its walks (what changed, what's rebuildable) never download a cloud
     // placeholder.
-    mdif_macos::fs::forbid_dataless_materialization()
+    mdif_core::os::fs::forbid_dataless_materialization()
         .context("disabling cloud downloads for this process")?;
     let r = if quick {
         timemachine::glance(&home(), unix_now())

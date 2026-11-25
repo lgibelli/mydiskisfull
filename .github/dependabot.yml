@@ -14,3 +14,10 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # Pinned to the commits of its `stable` and `master` branches, which
+      # still install the toolchain each names, the newest one each run. Its
+      # only tag (v1) is older and wants the toolchain named, which the
+      # `stable` steps don't: moved to it they'd fail. It's shell, so the
+      # commit doesn't age as an action on Node does; bump it by hand.
+      - dependency-name: dtolnay/rust-toolchain

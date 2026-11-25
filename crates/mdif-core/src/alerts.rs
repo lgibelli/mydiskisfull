@@ -53,6 +53,14 @@ impl Key {
         Key::NotifyChurn,
     ];
 
+    /// Whether it does anything on this OS: write churn needs each process's
+    /// disk writes, which Windows' counters don't tell apart from pipes, so
+    /// none are recorded there ([`crate::os::proc::WRITES_ARE_DISK_WRITES`]).
+    pub fn applies(self) -> bool {
+        crate::os::proc::WRITES_ARE_DISK_WRITES
+            || !matches!(self, Key::ChurnPerHour | Key::NotifyChurn)
+    }
+
     /// As in the JSON and on the command line.
     pub fn name(self) -> &'static str {
         match self {

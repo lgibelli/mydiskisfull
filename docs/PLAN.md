@@ -175,6 +175,9 @@ row; the sheet is the question, so no alert before or after (closed meanwhile, a
 
 **Keep tidy** (`mdif tidy`, switches under Prevent; full edition only, each off until turned
 on): clean-ups the watcher does by itself, once a day, at background priority, after a sample.
+On Windows: old build folders (.NET's `bin` and `obj` beside a project file too), old
+node_modules and old Rust build caches; the first two only where the disk records when a file was
+last opened (most PCs don't), as by the date changed alone a build still run from looks old.
 Old simulators: the runtimes `simctl runtime delete --notUsedSinceDays 60` would delete, deleted
 one by one (`simctl` straight from the selected Xcode, never `xcrun`, which offers a dialog
 without it), then the simulators left without a runtime. Old build folders: a project's build
@@ -267,7 +270,7 @@ than in the week before (from the watcher's history).
 | Agent worktrees piling up | remove merged, clean worktrees | finished ones found; Remove Worktrees (`mdif clean`, `git worktree remove` after a confirmation); automatic rule in M5 | no |
 | Homebrew, Gradle caches | retention settings | tweaks: `HOMEBREW_CLEANUP_MAX_AGE_DAYS=30` in `~/.homebrew/brew.env`; a Gradle init script (14 days, from Gradle 8.0). Cargo cleans its own cache since 1.88. | no |
 | AI coding tool transcripts | retention | tweak: Claude Code `cleanupPeriodDays = 14` | no |
-| Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days) | no |
+| Trash | empty it automatically | tweak: Finder's `FXRemoveOldTrashItems` (30 days); on Windows, Storage Sense's Recycle Bin clean-up (30 days, weekly), never where turning Storage Sense on would also start a clean-up of Downloads or OneDrive | no |
 | Docker disk image | prune it; cap it in Docker's settings | Review… (`mdif docker`): what `docker system prune` would remove, item by item, and the images no container uses (`-a`), asked from Docker since it has no dry run; what you tick goes through `mdif clean`, by id and unforced, after asking Docker again; volumes never. Start Docker there when it isn't running, quit again after. Remove Old Leftovers (`docker:old`, in Clean Up) takes what Docker hasn't used in a week, starting Docker if needed. Shrinking the image deletes its contents, so no tweak. The command in Lite. | no |
 | Xcode leftovers (DerivedData, Device Support, old simulators and runtimes) | empty, erase or delete them | Empty DerivedData / Device Support while Xcode is closed; Clean Up N Simulators (erase those unused for a month, delete those whose runtime is gone), and in Clean Up each simulator on its own; a runtime's Delete with when it was last used. All `mdif clean`, `simctl` from the selected Xcode | no |
 | Android emulators and system images | delete what isn't used | Delete System Image when no emulator uses it (ticked in Clean Up); Delete Emulator once nothing started it for a month (not ticked); refused while it runs. `mdif clean` | no |
@@ -415,6 +418,8 @@ mydiskisfull/
   crates/
     mdif-macos/   FFI: getattrlistbulk (private size, clone ID, dataless/sparse/purgeable flags),
                   proc_pid_rusage, statfs, setiopolicy_np, FSEvents, NSFileManager eviction
+    mdif-windows/ the same for Windows (windows-sys); mdif_core::os picks the backend.
+                  See docs/WINDOWS.md
     mdif-core/    scanner, owners, map; history store + decimation; forecast and incident
                   detection; rules, suggestions, tweaks; providers; TM monitor
     mdif-cli/     `mdif map | watch | forecast | owners | incidents | suggest | tweaks | writers`

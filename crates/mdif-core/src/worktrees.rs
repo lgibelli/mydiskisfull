@@ -20,18 +20,20 @@
 //!   isn't counted; a week for one made by hand ([`IDLE`]), a workspace
 //!   that may be used again. Git's HEAD and log for it count, and the folder
 //!   itself;
-//! - it isn't locked.
+//! - it isn't locked, and has no submodules (`git worktree remove` refuses
+//!   one with them checked out).
 //!
 //! Git reads, never writes: status runs without optional locks (no index
 //! refresh), and the trial merge writes its objects to a scratch folder
 //! instead of the repository. Repositories are the projects in the code
 //! folders ([`owners::code_folders`]) whose `.git` has worktrees, so git
-//! only runs where there are some.
+//! only runs where there are some. Git never fetches, and runs no command a
+//! repository's own configuration names: such a repository is left alone
+//! ([`Git::runs_its_own_commands`]).
 //!
 //! [`owners::code_folders`]: crate::owners::code_folders
 
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -58,6 +60,7 @@ const GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Real git binaries. `/usr/bin/git` is left out: without the developer
 /// tools it offers to install them, in a dialog.
+#[cfg(target_os = "macos")]
 const GITS: &[&str] = &[
     "/Library/Developer/CommandLineTools/usr/bin/git",
     "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
@@ -94,6 +97,14 @@ pub fn finished(home: &Path, now: i64) -> Vec<Finished> {
 /// is git's own.
 pub fn remove(f: &Finished) -> Result<(), String> {
     let git = Git::find().ok_or("No git found: install the Command Line Tools.")?;
+    // `git worktree remove` runs `git status` in it first.
+    if git.repo_runs_its_own_commands(&f.repo) || git.runs_its_own_commands(&f.path) {
+        return Err(format!(
+            "{}: its repository's own settings name a command that git would run (a filter \
+             or a merge driver), so it's left to you.",
+            f.path.display()
+        ));
+    }
     let out = git
         .cmd(&f.repo)
         .args(["worktree", "remove"])
@@ -170,18 +181,31 @@ fn may_run_with(dir: &Path, home: Option<&Path>) -> bool {
 }
 
 /// Whether git tracks a file in `dir`; `None` when no repository holds it.
-/// In one that git can't be asked about, it counts as tracked.
+/// In one that git can't be asked about, it counts as tracked. Its name
+/// without case, as the disk finds it (`Bin` opens the `bin` git tracks), and
+/// as it's spelled (a `*` in it is a `*`).
 pub fn tracks_files_in(dir: &Path) -> Option<bool> {
     let (parent, name) = (dir.parent()?, dir.file_name()?);
     parent.ancestors().find(|a| a.join(".git").exists())?;
     if !may_run_in(parent) {
         return Some(true);
     }
+    // The whole path from the top, without case: git matches the folder it
+    // runs in by case, as the disk spells it, which needn't be as git does
+    // (`App` in git, `app` on a disk that ignores case). On a disk that tells
+    // them apart, an `app` beside a tracked `App` counts as tracked too: it's
+    // kept, never deleted. Reading the index is most of the cost either way:
+    // about 28 ms a folder in a repository of 300,000 files, 18 ms before.
     let tracked = Git::find()
         .and_then(|git| {
+            let prefix =
+                String::from_utf8(git.out(parent, &["rev-parse", "--show-prefix"])?).ok()?;
+            let mut spec = std::ffi::OsString::from(":(top,icase,literal)");
+            spec.push(prefix.strip_suffix('\n')?);
+            spec.push(name);
             git.out(
                 parent,
-                &[OsStr::new("ls-files"), "-z".as_ref(), "--".as_ref(), name],
+                &[OsStr::new("ls-files"), "-z".as_ref(), "--".as_ref(), &spec],
             )
         })
         .is_none_or(|listed| !listed.is_empty());
@@ -213,6 +237,61 @@ pub fn ignores(dir: &Path) -> Option<bool> {
     }
 }
 
+/// Whether the repository checked out at `dir` holds nothing that isn't on
+/// one of its remotes too, as the clones build tools make do (SwiftPM's
+/// `.build/checkouts`, CMake's `_deps`): no changes, no untracked files,
+/// nothing hidden from status, no stash, and HEAD and every branch on a
+/// remote. An editable install's clone (pip's `.venv/src`) is made to be
+/// changed. `false` when git can't tell: none found, or the repository's
+/// settings name a command git would run.
+pub fn clone_has_nothing_to_lose(dir: &Path) -> bool {
+    let Some(git) = Git::find() else {
+        return false;
+    };
+    if git.runs_its_own_commands(dir) {
+        return false;
+    }
+    // `S` skip-worktree, lowercase assume-unchanged: changes status hides.
+    let Some(tags) = git.out(dir, &["ls-files", "-v", "-z"]) else {
+        return false;
+    };
+    if tags
+        .split(|&b| b == 0)
+        .filter(|e| !e.is_empty())
+        .any(|e| e[0] == b'S' || e[0].is_ascii_lowercase())
+    {
+        return false;
+    }
+    let status = [
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=normal",
+        // A submodule's commit as recorded; what's in it is a repository of
+        // its own, looked at as one.
+        "--ignore-submodules=dirty",
+    ];
+    if git.out(dir, &status).is_none_or(|s| !s.is_empty()) {
+        return false;
+    }
+    // `rev-parse --verify` fails without a stash.
+    if git.ok(dir, &["rev-parse", "--verify", "--quiet", "refs/stash"]) {
+        return false;
+    }
+    // No commit only here. With no remote every one is; with no commit
+    // `rev-list` fails.
+    let only_here = [
+        "rev-list",
+        "-n",
+        "1",
+        "HEAD",
+        "--branches",
+        "--not",
+        "--remotes",
+    ];
+    git.out(dir, &only_here).is_some_and(|o| o.is_empty())
+}
+
 /// Projects in the code folders ([`crate::owners::code_folders`]) with
 /// linked worktrees.
 fn repos(home: &Path) -> Vec<PathBuf> {
@@ -238,7 +317,7 @@ struct Base {
 }
 
 /// A worktree as `git worktree list` describes it.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Listed {
     path: PathBuf,
     head: String,
@@ -248,30 +327,46 @@ struct Listed {
 
 impl Git {
     fn find() -> Option<Git> {
-        let developer =
-            std::env::var_os("DEVELOPER_DIR").map(|d| Path::new(&d).join("usr/bin/git"));
-        developer
+        #[cfg(target_os = "macos")]
+        let candidates = std::env::var_os("DEVELOPER_DIR")
+            .map(|d| Path::new(&d).join("usr/bin/git"))
             .into_iter()
-            .chain(GITS.iter().map(PathBuf::from))
+            .chain(GITS.iter().map(PathBuf::from));
+        // Git for Windows puts itself on PATH; where it doesn't, it's where
+        // its installer puts it, for everyone or for the user alone.
+        #[cfg(windows)]
+        let candidates = crate::tools::on_path("git.exe")
+            .into_iter()
+            .chain(crate::tools::program_files(r"Git\cmd\git.exe"))
+            .chain(crate::os::sys::local_app_data().map(|d| d.join(r"Programs\Git\cmd\git.exe")));
+        candidates
+            .into_iter()
             .find(|p| p.is_file())
             .map(|bin| Git { bin })
     }
 
     /// git in `dir`, reading only, in a predictable language, with nothing
-    /// inherited that would point it at another repository. Never on the
-    /// network: in a partial clone, an object it doesn't have isn't fetched
-    /// (git 2.45 and later), the command fails instead.
+    /// inherited that would point it at another repository, read another
+    /// configuration file (`GIT_CONFIG`, which only `git config` reads), read
+    /// paths another way (a pathspec taken literally, or as a glob) or
+    /// history another way (replaced commits, another namespace's branches).
     fn cmd(&self, dir: &Path) -> Command {
         let mut c = Command::new(&self.bin);
-        c.arg("-C")
+        // No pager: choosing one reads the settings with what they include,
+        // before `config --no-includes` has a say.
+        c.arg("--no-pager")
+            .arg("-C")
             .arg(dir)
             .args(["-c", "core.fsmonitor=false"])
-            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // A partial clone fetches an object it's missing (git 2.44 on:
+            // older ones don't know it, and partial clones are left alone).
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stderr(Stdio::null());
+        c.env("GIT_NO_REPLACE_OBJECTS", "1");
         for var in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -279,6 +374,12 @@ impl Git {
             "GIT_COMMON_DIR",
             "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_LITERAL_PATHSPECS",
+            "GIT_GLOB_PATHSPECS",
+            "GIT_NOGLOB_PATHSPECS",
+            "GIT_ICASE_PATHSPECS",
+            "GIT_NAMESPACE",
         ] {
             c.env_remove(var);
         }
@@ -302,6 +403,9 @@ impl Git {
     }
 
     fn finished_in(&self, repo: &Path, now: i64) -> Vec<Finished> {
+        if self.repo_runs_its_own_commands(repo) {
+            return Vec::new();
+        }
         let Some(listed) = self.out(repo, &["worktree", "list", "--porcelain", "-z"]) else {
             return Vec::new();
         };
@@ -310,20 +414,18 @@ impl Git {
             return Vec::new();
         }
         let objects = repo.join(".git/objects");
-        let mut list = parse_list(&listed).into_iter();
+        let all = parse_list(&listed);
+        // Removing one takes every worktree inside it, and what they hold.
+        let holds_another = |w: &Listed| {
+            all.iter()
+                .any(|o| o.path != w.path && o.path.starts_with(&w.path))
+        };
+        let mut list = all.iter().cloned();
         // The first is the main worktree.
         let Some(main) = list.next() else {
             return Vec::new();
         };
-        let rest: Vec<Listed> = list.collect();
-        // One that holds another (an agent started in it made its own)
-        // would take the other's work with it.
-        let holds = |w: &Listed| {
-            rest.iter()
-                .any(|o| o.path != w.path && o.path.starts_with(&w.path))
-        };
-        rest.iter()
-            .filter(|w| !w.locked && !w.prunable && !holds(w) && privacy::may_open(&w.path))
+        list.filter(|w| !w.locked && !w.prunable && !holds_another(w) && privacy::may_open(&w.path))
             .filter_map(|w| {
                 let agents = is_agents(&w.path);
                 let touched = last_touched(&w.path)?;
@@ -332,7 +434,7 @@ impl Git {
                 }
                 // A session still open in it (a shell, an agent waiting for
                 // an answer) writes nothing for hours, and is using it.
-                if mdif_macos::proc::working_in(&w.path).is_some() {
+                if crate::os::proc::working_in(&w.path).is_some() {
                     return None;
                 }
                 let into = self.merged_into(repo, &objects, &w.head, &defaults)?;
@@ -420,6 +522,13 @@ impl Git {
     /// git was told not to look at (skip-worktree, assume-unchanged): its
     /// changes don't show, and would go with the worktree.
     fn nothing_to_lose(&self, worktree: &Path, main: &Path) -> bool {
+        // What git uses there (a worktree's `.git` file may name another
+        // repository). A submodule: `git worktree remove` refuses one with
+        // its submodules checked out, and looking into them would run git in
+        // each, with their own settings.
+        if self.runs_its_own_commands(worktree) || self.has_submodules(worktree) {
+            return false;
+        }
         // "H path": a file git looks at; `S` skip-worktree, lowercase
         // assume-unchanged.
         let Some(tags) = self.out(worktree, &["ls-files", "-v", "-z"]) else {
@@ -440,7 +549,9 @@ impl Git {
                 "-z",
                 "--untracked-files=normal",
                 "--ignored=matching",
-                "--ignore-submodules=none",
+                // A submodule's commit as recorded (a staged removal of one
+                // shows), never what's in it: that's git run in it.
+                "--ignore-submodules=dirty",
             ],
         ) else {
             return false;
@@ -448,7 +559,8 @@ impl Git {
         // "XY path", NUL-ended; an ignored folder is listed, not what's in it.
         out.split(|&b| b == 0).filter(|e| !e.is_empty()).all(|e| {
             e.strip_prefix(b"!! ").is_some_and(|rel| {
-                let rel = Path::new(OsStr::from_bytes(rel.strip_suffix(b"/").unwrap_or(rel)));
+                let rel = crate::portable::os_str_from_bytes(rel.strip_suffix(b"/").unwrap_or(rel));
+                let rel = Path::new(&*rel);
                 remade(worktree, main, rel)
             })
         })
@@ -456,55 +568,191 @@ impl Git {
 }
 
 /// Whether `rel`, ignored in `worktree`, can be made again: build output, a
-/// link, or what the main checkout has too: a file the same size, a folder
-/// whose every file main has, the same size ([`same_as`]). A folder only
-/// main's name has isn't enough: a worktree's `.idea` holds its own shelved
-/// changes, its `.claude/worktrees` another worktree's work.
+/// link, Finder's view settings, or what the main checkout has the same: a
+/// file with the same bytes, a folder whose every file main has the same.
+/// A folder of the same name isn't enough: `.idea/shelf`'s patches, a clone
+/// with commits of its own or a run's outputs are only in the worktree.
 fn remade(worktree: &Path, main: &Path, rel: &Path) -> bool {
+    let mut budget = REMADE_ENTRIES;
+    same_in_main(worktree, main, rel, &mut budget)
+}
+
+/// The most entries of one ignored folder [`remade`] looks at; past it, the
+/// folder is taken as the worktree's own.
+const REMADE_ENTRIES: usize = 5_000;
+
+/// The biggest file compared byte for byte; a bigger one (a database, a
+/// model) is taken as the worktree's own.
+const REMADE_BYTES: u64 = 256 * 1024;
+
+fn same_in_main(worktree: &Path, main: &Path, rel: &Path, budget: &mut usize) -> bool {
     if rel
         .file_name()
         .and_then(OsStr::to_str)
-        .is_some_and(|n| ARTIFACTS.contains(&n))
+        .is_some_and(|n| ARTIFACTS.contains(&n) || n == ".DS_Store")
     {
         return true;
     }
-    let mut budget = SAME_AS;
-    same_as(&worktree.join(rel), &main.join(rel), &mut budget)
-}
-
-/// How many entries [`same_as`] compares before it gives up: past that, a
-/// folder counts as not made again.
-const SAME_AS: usize = 5000;
-
-/// Whether `here` is what `there` has too: a link (made again with the
-/// checkout), a file the same size, or a folder whose every entry is.
-/// `budget` counts the entries looked at; none left, it's no.
-fn same_as(here: &Path, there: &Path, budget: &mut usize) -> bool {
     let Some(left) = budget.checked_sub(1) else {
         return false;
     };
     *budget = left;
-    let Ok(meta) = std::fs::symlink_metadata(here) else {
+    let here_at = worktree.join(rel);
+    let Ok(here) = std::fs::symlink_metadata(&here_at) else {
         return false;
     };
-    if meta.is_symlink() {
+    if here.is_symlink() {
         return true;
     }
-    let Ok(other) = std::fs::symlink_metadata(there) else {
+    // A cloud file or folder, on either side: listing or reading it may
+    // download it (Windows has no switch to forbid that), and what's online
+    // only is no copy here.
+    let there_at = main.join(rel);
+    let managed =
+        |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| crate::portable::managed(&m));
+    if crate::portable::managed(&here) || managed(&there_at) {
+        return false;
+    }
+    let Ok(there) = std::fs::metadata(&there_at) else {
         return false;
     };
-    if meta.is_file() {
-        return other.is_file() && other.len() == meta.len();
+    if here.is_dir() {
+        return there.is_dir()
+            && std::fs::read_dir(&here_at).is_ok_and(|entries| {
+                entries.into_iter().all(|e| {
+                    e.is_ok_and(|e| same_in_main(worktree, main, &rel.join(e.file_name()), budget))
+                })
+            });
     }
-    if !(meta.is_dir() && other.is_dir()) {
+    here.is_file()
+        && there.is_file()
+        && here.len() == there.len()
+        && here.len() <= REMADE_BYTES
+        && same_bytes(&here_at, &there_at)
+}
+
+/// Whether two small files hold the same bytes. Read with materialization
+/// forbidden: a cloud file not on this Mac fails to read, and is no copy.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    if crate::os::fs::forbid_dataless_materialization().is_err() {
         return false;
     }
-    let Ok(entries) = std::fs::read_dir(here) else {
-        return false;
-    };
-    entries
-        .into_iter()
-        .all(|e| e.is_ok_and(|e| same_as(&e.path(), &there.join(e.file_name()), budget)))
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+impl Git {
+    /// Whether the configuration git uses in `dir` sets, of the
+    /// repository's own, a command that checking it could run
+    /// ([`names_command`]), or git can't say. Asked of git, which reads it as
+    /// the commands that follow will: after a byte-order mark, with two
+    /// sections on a line, the repository a worktree's `.git` file names. An archive unpacked into a code folder brings its
+    /// `.git` with it, and nobody asked to run what that says: such a
+    /// repository is left alone, none of its worktrees ever finished.
+    fn runs_its_own_commands(&self, dir: &Path) -> bool {
+        // An include is refused, so what it names isn't opened (it may be in
+        // a folder that asks for permission first, and nobody's there).
+        let list = [
+            "config",
+            "--list",
+            "--no-includes",
+            "--show-scope",
+            "--name-only",
+            "-z",
+        ];
+        self.out(dir, &list)
+            .is_none_or(|listed| own_commands(&listed))
+    }
+
+    /// [`Git::runs_its_own_commands`] for the repository at `repo` and the
+    /// submodules' repositories it keeps (`.git/modules`), which a trial
+    /// merge opens.
+    fn repo_runs_its_own_commands(&self, repo: &Path) -> bool {
+        self.runs_its_own_commands(repo)
+            || submodule_repos(&repo.join(".git"))
+                .is_none_or(|subs| subs.iter().any(|s| self.runs_its_own_commands(s)))
+    }
+
+    /// Whether `worktree` has a submodule (or git can't say).
+    fn has_submodules(&self, worktree: &Path) -> bool {
+        self.out(worktree, &["ls-files", "--stage", "-z"])
+            .is_none_or(|listed| listed.split(|&b| b == 0).any(|e| e.starts_with(b"160000 ")))
+    }
+}
+
+/// Submodules' repositories (`modules/<name>`; a name may have folders in it,
+/// and theirs are in `modules/<name>/modules`), or `None` past a bound.
+fn submodule_repos(git_dir: &Path) -> Option<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut stack = vec![git_dir.join("modules")];
+    let mut looked = 0;
+    while let Some(dir) = stack.pop() {
+        looked += 1;
+        if looked > 1_000 {
+            return None;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let at = e.path();
+            if at.join("HEAD").is_file() {
+                stack.push(at.join("modules"));
+                found.push(at);
+            } else {
+                stack.push(at);
+            }
+        }
+    }
+    Some(found)
+}
+
+/// Whether `git config --list --show-scope --name-only -z` (a scope and a
+/// name, each ended by NUL) lists a name that [`names_command`] set by the
+/// repository: its own files and what they include. What the user set
+/// (`global`, `system`; git-lfs's filter is set globally) runs as it would
+/// for them, and `command` is what mdif passes.
+fn own_commands(listed: &[u8]) -> bool {
+    let mut fields = listed.split(|&b| b == 0);
+    while let (Some(scope), Some(name)) = (fields.next(), fields.next()) {
+        let users = matches!(scope, b"global" | b"system" | b"command" | b"unknown");
+        if !users && names_command(&String::from_utf8_lossy(name)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a configuration name (`filter.lfs.clean`, as git lists it) sets a
+/// command that what mdif runs could start, or pulls in another file:
+/// - a filter, run on a file `git status` compares with what's committed;
+/// - a merge driver (`merge.<driver>.driver`), run by the trial merge;
+/// - a promisor remote (a partial clone): an object it's missing is
+///   fetched, with whatever transport the remote names;
+/// - an include, for what it might bring in later (a conditional one).
+///
+/// `core.fsmonitor` is turned off on git's command line, and nothing mdif
+/// runs writes the index (the hook that would run then) or shows a diff.
+fn names_command(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let (section, rest) = name.split_once('.').unwrap_or((name.as_str(), ""));
+    // `merge.<driver>.driver` has a subsection; `merge.conflictstyle` doesn't.
+    let subsection = rest.contains('.');
+    match section {
+        "filter" | "include" | "includeif" => true,
+        // A driver, or which one files without an attribute get.
+        "merge" => subsection || rest == "default",
+        "extensions" => rest == "partialclone",
+        "remote" => {
+            subsection && (rest.ends_with(".promisor") || rest.ends_with(".partialclonefilter"))
+        }
+        _ => false,
+    }
 }
 
 /// A folder for a trial merge's objects, removed when done.
@@ -545,7 +793,7 @@ fn parse_list(out: &[u8]) -> Vec<Listed> {
             b"worktree" => {
                 list.extend(cur.take());
                 cur = Some(Listed {
-                    path: PathBuf::from(OsStr::from_bytes(value)),
+                    path: PathBuf::from(crate::portable::os_str_from_bytes(value).into_owned()),
                     head: String::new(),
                     locked: false,
                     prunable: false,
@@ -585,10 +833,13 @@ fn is_agents(path: &Path) -> bool {
 /// any `git status` rewrites it (a shell prompt, an editor looking), and
 /// work shows anyway, uncommitted (not finished) or committed (the log).
 fn last_touched(worktree: &Path) -> Option<i64> {
-    use std::os::unix::fs::MetadataExt;
     let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
     let admin = worktree.join(text.strip_prefix("gitdir:")?.trim());
-    let mtime = |p: PathBuf| std::fs::symlink_metadata(p).ok().map(|m| m.mtime());
+    let mtime = |p: PathBuf| {
+        std::fs::symlink_metadata(p)
+            .ok()
+            .map(|m| crate::portable::mtime(&m))
+    };
     [
         admin.join("HEAD"),
         admin.join("logs/HEAD"),
@@ -625,6 +876,22 @@ mod tests {
         assert!(!l[1].locked && l[2].locked && l[3].prunable);
     }
 
+    /// Where the disk ignores case, "Projects" and "projects" are one folder:
+    /// its repositories are listed once, as the disk spells them, or each
+    /// finished worktree would be suggested twice.
+    #[test]
+    fn a_repository_is_found_once_whatever_its_code_folders_case() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for repo in ["Projects/shop", "CODE/tool", "Elsewhere/site"] {
+            std::fs::create_dir_all(h.join(repo).join(".git/worktrees/feature")).unwrap();
+        }
+        std::fs::create_dir_all(h.join("Projects/plain/.git")).unwrap();
+        assert_eq!(repos(h), [h.join("CODE/tool"), h.join("Projects/shop")]);
+    }
+
+    // macOS's protected folders, and a link made the Unix way.
+    #[cfg(target_os = "macos")]
     #[test]
     fn git_doesnt_run_where_its_repository_would_prompt() {
         let _on = privacy::SWITCH.lock().unwrap_or_else(|e| e.into_inner());
@@ -684,20 +951,6 @@ mod tests {
         assert!(!settings);
         // Someone there to answer: git may ask.
         assert!(may_run_with(&desktop, home));
-    }
-
-    /// Where the disk ignores case, "Projects" and "projects" are one folder:
-    /// its repositories are listed once, as the disk spells them, or each
-    /// finished worktree would be suggested twice.
-    #[test]
-    fn a_repository_is_found_once_whatever_its_code_folders_case() {
-        let home = tempfile::tempdir().unwrap();
-        let h = home.path();
-        for repo in ["Projects/shop", "CODE/tool", "Elsewhere/site"] {
-            std::fs::create_dir_all(h.join(repo).join(".git/worktrees/feature")).unwrap();
-        }
-        std::fs::create_dir_all(h.join("Projects/plain/.git")).unwrap();
-        assert_eq!(repos(h), [h.join("CODE/tool"), h.join("Projects/shop")]);
     }
 
     /// A partial clone fetches what it lacks from its remote when asked for
@@ -784,6 +1037,8 @@ mod tests {
         std::fs::create_dir_all(repo.join("build")).unwrap();
         std::fs::write(repo.join("package.json"), "{}").unwrap();
         std::fs::write(repo.join("dist/lib.js"), "x").unwrap();
+        std::fs::create_dir_all(repo.join("App/target")).unwrap();
+        std::fs::write(repo.join("App/target/keep.txt"), "x").unwrap();
         std::fs::write(repo.join("build/out.js"), "x").unwrap();
         std::fs::write(repo.join(".gitignore"), "build/\n").unwrap();
         // Outside a repository there is nothing to ask, and a `build` beside
@@ -799,6 +1054,9 @@ mod tests {
                 .arg("-C")
                 .arg(&repo)
                 .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                // No maintenance after a commit or a merge: run in the
+                // background, it would pack the objects a test counts.
+                .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -809,8 +1067,113 @@ mod tests {
         }
         assert_eq!(tracks_files_in(&repo.join("dist")), Some(true));
         assert_eq!(tracks_files_in(&repo.join("build")), Some(false));
+        // As the disk finds it, without case; as it's spelled, with no
+        // wildcards.
+        assert_eq!(tracks_files_in(&repo.join("Dist")), Some(true));
+        assert_eq!(tracks_files_in(&repo.join("d*")), Some(false));
+        // A folder above it spelled otherwise on the disk than in git (`App`
+        // renamed `app` outside git): git runs in it as the disk spells it.
+        std::fs::rename(repo.join("App"), repo.join("app-moving")).unwrap();
+        std::fs::rename(repo.join("app-moving"), repo.join("app")).unwrap();
+        assert_eq!(tracks_files_in(&repo.join("app/target")), Some(true));
+        assert_eq!(tracks_files_in(&repo.join("app/build")), Some(false));
         assert!(!crate::clean::build_output(&repo.join("dist")));
         assert!(crate::clean::build_output(&repo.join("build")));
+    }
+
+    /// The setup's git, isolated from the user's configuration (hooks,
+    /// signing); what's tested isn't, as in real use.
+    fn setup_git(git: &Git, dir: &Path, args: &[&str]) {
+        let st = Command::new(&git.bin)
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            // No maintenance after a commit or a merge: run in the
+            // background, it would pack the objects a test counts.
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    /// An npm project's `build` is also where electron-builder keeps what an
+    /// app is built from: build output only when git ignores it.
+    #[test]
+    fn an_npm_projects_build_folder_is_output_only_when_ignored() {
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("electron-app");
+        let build = app.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("icon.icns"), "icon").unwrap();
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        // Outside a repository nothing says which it is.
+        assert!(!crate::clean::build_output(&build));
+        // In one, not ignored: an icon not committed yet.
+        setup_git(&git, &app, &["init", "-q", "-b", "main"]);
+        assert!(!crate::clean::build_output(&build));
+        std::fs::write(app.join(".gitignore"), "/build\n").unwrap();
+        assert!(crate::clean::build_output(&build));
+        // Beside a Gradle file it's what Gradle builds, ignored or not.
+        std::fs::write(app.join(".gitignore"), "").unwrap();
+        std::fs::write(app.join("build.gradle"), "").unwrap();
+        assert!(crate::clean::build_output(&build));
+    }
+
+    /// Removing a worktree takes every worktree inside it, and their work:
+    /// one that holds another isn't finished, however merged.
+    #[test]
+    fn a_worktree_holding_another_is_not_finished() {
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("app");
+        std::fs::create_dir(&repo).unwrap();
+        setup_git(&git, &repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), ".claude/worktrees/\n").unwrap();
+        setup_git(&git, &repo, &["add", "."]);
+        setup_git(&git, &repo, &["commit", "-qm", "start"]);
+        let outer = repo.join(".claude/worktrees/outer");
+        let add = |at: &Path, branch: &str, path: &Path| {
+            setup_git(
+                &git,
+                at,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    branch,
+                    path.to_str().unwrap(),
+                ],
+            );
+        };
+        add(&repo, "outer", &outer);
+        let later = crate::watch::unix_now() + QUIET + 60;
+        let finished = || {
+            git.finished_in(&repo, later)
+                .into_iter()
+                .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // On its own it's finished: main's commit, nothing else in it.
+        assert_eq!(finished(), ["outer"]);
+        // A session in it starts another inside it, with work of its own.
+        let inner = outer.join(".claude/worktrees/inner");
+        add(&outer, "inner", &inner);
+        std::fs::write(inner.join("notes.md"), "not committed\n").unwrap();
+        assert_eq!(finished(), Vec::<String>::new());
     }
 
     /// A repository with a worktree in each state, built by the real git.
@@ -868,6 +1231,8 @@ mod tests {
             ("ignored", "ignored"),
             ("generated", "generated"),
             ("env", "env"),
+            ("same-size", "same-size"),
+            ("own-files", "own-files"),
             ("shelved", "shelved"),
             ("outer", "outer"),
             ("locked", "locked"),
@@ -922,6 +1287,12 @@ mod tests {
         put(wt("generated").join(".env"), "KEY=1\n");
         // Settings of its own: ignored, but not to be thrown away.
         put(wt("env").join(".env"), "KEY=other\n");
+        // The same size as main's, but not the same settings.
+        put(wt("same-size").join(".env"), "KEY=2\n");
+        // A folder main has too, with a file only the worktree has.
+        std::fs::create_dir(wt("own-files").join("gen")).unwrap();
+        put(wt("own-files").join("gen/code.rs"), "fn x() {}\n");
+        put(wt("own-files").join("gen/notes.md"), "mine\n");
         // An ignored folder main has too, holding what main hasn't: the
         // IDE's shelved changes.
         std::fs::create_dir_all(wt("shelved").join(".idea/shelf")).unwrap();
@@ -946,7 +1317,9 @@ mod tests {
         // A change git was told not to look at: status doesn't show it.
         run(&wt("hidden"), &["update-index", "--skip-worktree", "a.txt"]);
         put(wt("hidden").join("a.txt"), "edited, hidden\n");
-        // A session still open in it, quiet for hours.
+        // A session still open in it, quiet for hours. Windows can't tell
+        // one ([`crate::os::proc::working_in`]).
+        #[cfg(target_os = "macos")]
         let mut session = Command::new("/bin/sleep")
             .arg("600")
             .current_dir(wt("busy"))
@@ -985,20 +1358,26 @@ mod tests {
         };
         // Everything was just touched: nothing is finished yet.
         assert_eq!(found(now), []);
-        let agents = [
+        let mut agents = vec![
             ("ff", true),
             ("generated", true),
             ("ignored", true),
             ("squash", true),
         ];
+        if !cfg!(target_os = "macos") {
+            agents.insert(0, ("busy", true));
+        }
         assert_eq!(found(now + QUIET + 60), named(&agents));
         // The one made by hand waits longer.
         let mut all = agents.to_vec();
         all.insert(0, ("app-editor", false));
         assert_eq!(found(now + IDLE + 60), named(&all));
 
-        session.kill().unwrap();
-        session.wait().unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            session.kill().unwrap();
+            session.wait().unwrap();
+        }
         // Its session ended: the busy one is finished.
         assert!(found(now + QUIET + 60).contains(&("busy".to_string(), "main".to_string(), true)));
 
@@ -1026,5 +1405,207 @@ mod tests {
         let err = remove(&dirty).unwrap_err();
         assert!(err.contains("modified or untracked"), "{err}");
         assert!(wt("dirty").join("a.txt").exists());
+
+        // A command of the repository's own, which checking would run: the
+        // repository is left alone, and it never runs. Wherever git finds it:
+        // after a byte-order mark, after another section on its line, with
+        // only carriage returns between lines, in a file it includes, in a
+        // worktree's own settings. (Quoted: in git's files `;` starts a
+        // comment, and the probe would be cut short and never run.)
+        let ran = dir.path().join("ran");
+        let slashed = |p: &Path| p.display().to_string().replace('\\', "/");
+        // The path quoted for sh (a temporary folder may have a space).
+        let filter = format!(
+            "[filter \"probe\"]\n\tclean = \"sh -c 'touch \\\"{}\\\"; cat'\"\n",
+            slashed(&ran)
+        );
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        put(repo.join(".git/info/attributes"), "* filter=probe\n");
+        let config = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+        let included = dir.path().join("included.cfg");
+        put(included.clone(), &filter);
+        let worktree_config = repo.join(".git/worktrees/ff/config.worktree");
+        let layouts = [
+            ("after the rest", format!("{config}{filter}"), None),
+            (
+                "after a byte-order mark",
+                format!("\u{feff}{filter}{config}"),
+                None,
+            ),
+            (
+                "on another section's line",
+                format!("{config}[user] {filter}"),
+                None,
+            ),
+            (
+                "between carriage returns",
+                format!("{config}{}", filter.replace('\n', "\r")),
+                None,
+            ),
+            (
+                "in a file it includes",
+                format!("{config}[include]\n\tpath = \"{}\"\n", slashed(&included)),
+                None,
+            ),
+            (
+                "in a worktree's own settings",
+                format!(
+                    "{}[extensions]\n\tworktreeConfig = true\n",
+                    config.replace("repositoryformatversion = 0", "repositoryformatversion = 1")
+                ),
+                Some(filter.as_str()),
+            ),
+        ];
+        let probe = || {
+            // A file read again, so status compares it (with the filter).
+            put(wt("ff").join("a.txt"), "one\n");
+            let _ = std::fs::remove_file(&ran);
+        };
+        for (how, text, in_worktree) in &layouts {
+            put(repo.join(".git/config"), text);
+            if let Some(f) = in_worktree {
+                put(worktree_config.clone(), f);
+            }
+            // The probe works: git's own status runs it.
+            probe();
+            assert!(
+                git.out(&wt("ff"), &["status", "--porcelain"]).is_some(),
+                "{how}"
+            );
+            assert!(ran.exists(), "the probe didn't run {how}");
+            probe();
+            assert!(!found(now + IDLE + 60).iter().any(|f| f.0 == "ff"), "{how}");
+            assert!(!ran.exists(), "checking ran it {how}");
+            let _ = std::fs::remove_file(&worktree_config);
+        }
+        // Without it, the same worktree is finished.
+        put(repo.join(".git/config"), &config);
+        probe();
+        assert!(found(now + IDLE + 60).iter().any(|f| f.0 == "ff"));
+    }
+
+    #[test]
+    fn a_repositorys_own_commands_are_told_from_the_users() {
+        for name in [
+            "filter.lfs.clean",
+            "filter.x.process",
+            "merge.ours.driver",
+            "Merge.Ours.Driver",
+            "merge.default",
+            "include.path",
+            "includeif.gitdir:~/w/.path",
+            "extensions.partialclone",
+            "remote.origin.promisor",
+            "remote.my.fork.partialclonefilter",
+        ] {
+            assert!(names_command(name), "{name}");
+        }
+        for name in [
+            "core.bare",
+            "merge.conflictstyle",
+            "remote.origin.url",
+            "remote.promisor.url",
+            "user.name",
+            "extensions.worktreeconfig",
+        ] {
+            assert!(!names_command(name), "{name}");
+        }
+        // Only what the repository sets: the user's own filter (git-lfs's,
+        // set globally) runs as it would for them.
+        let listed = |pairs: &[(&str, &str)]| -> Vec<u8> {
+            pairs
+                .iter()
+                .flat_map(|(scope, name)| format!("{scope}\0{name}\0").into_bytes())
+                .collect()
+        };
+        assert!(!own_commands(&listed(&[
+            ("global", "filter.lfs.clean"),
+            ("system", "filter.lfs.process"),
+            ("command", "core.fsmonitor"),
+            ("local", "core.bare"),
+        ])));
+        assert!(own_commands(&listed(&[
+            ("local", "core.bare"),
+            ("local", "filter.x.clean"),
+        ])));
+        assert!(own_commands(&listed(&[("worktree", "merge.x.driver")])));
+        assert!(!own_commands(b""));
+
+        // A submodule's repository has its own settings; a submodule is
+        // told by the index.
+        let Some(git) = Git::find() else {
+            eprintln!("no git: skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("app");
+        let run = |args: &[&str]| {
+            let st = Command::new(&git.bin)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        run(&["init", "-q", repo.to_str().unwrap()]);
+        let sub = repo.join(".git/modules/libs/one");
+        run(&["init", "-q", "--bare", sub.to_str().unwrap()]);
+        assert!(!git.repo_runs_its_own_commands(&repo));
+        let config = std::fs::read_to_string(sub.join("config")).unwrap();
+        std::fs::write(
+            sub.join("config"),
+            format!("{config}[filter \"x\"]\n\tsmudge = x\n"),
+        )
+        .unwrap();
+        assert!(git.repo_runs_its_own_commands(&repo));
+        // Settings git can't read: it can't say what they'd run.
+        std::fs::write(sub.join("config"), "[broken\n").unwrap();
+        assert!(git.repo_runs_its_own_commands(&repo));
+        std::fs::write(sub.join("config"), config).unwrap();
+
+        // An include is refused without being opened: it may be in a folder
+        // that asks for permission first. One git can't open says so.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let kept = dir.path().join("kept.gitconfig");
+            std::fs::write(&kept, "[filter \"x\"]\n\tclean = x\n").unwrap();
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let config = repo.join(".git/config");
+            let before = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(
+                &config,
+                format!("{before}[include]\n\tpath = \"{}\"\n", kept.display()),
+            )
+            .unwrap();
+            assert!(git.runs_its_own_commands(&repo));
+            let o = git
+                .cmd(&repo)
+                .args(["config", "--list", "--no-includes", "--name-only"])
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&o.stderr);
+            assert!(o.status.success() && said.is_empty(), "{said}");
+            assert!(String::from_utf8_lossy(&o.stdout).contains("include.path"));
+            std::fs::write(&config, before).unwrap();
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(!git.repo_runs_its_own_commands(&repo));
+
+        assert!(!git.has_submodules(&repo));
+        let at = repo.to_str().unwrap();
+        run(&[
+            "-C",
+            at,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1234567890123456789012345678901234567890,libs/one",
+        ]);
+        assert!(git.has_submodules(&repo));
     }
 }

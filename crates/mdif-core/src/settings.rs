@@ -1,8 +1,9 @@
 //! Settings a tweak may change, and how to put each one back.
 //!
-//! A [`Setting`] is one value somewhere on the Mac: a user default, a key of
-//! a JSON settings file, a line of an env file, a whole file, or one of our
-//! configuration profiles. Each reads as `None` when absent, and writing
+//! A [`Setting`] is one value somewhere on the computer: a user default, a
+//! key of a JSON settings file, a line of an env file, a whole file, one of
+//! our configuration profiles, or (on Windows) a number in the user's part of
+//! the registry. Each reads as `None` when absent, and writing
 //! `None` removes it, so the value read before a change is all it takes to
 //! undo the change exactly.
 //!
@@ -12,7 +13,6 @@
 
 use std::fmt;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,6 +38,13 @@ pub enum Setting {
     /// One of our configuration profiles, saved in `dir` when downloaded.
     /// Reads as `true` once installed and in effect.
     Profile { profile: Profile, dir: PathBuf },
+    /// A number (`REG_DWORD`) under `HKEY_CURRENT_USER\key` on Windows, as
+    /// Settings writes it; `name` says what it is, for people.
+    Registry {
+        key: String,
+        value: String,
+        name: String,
+    },
 }
 
 impl Setting {
@@ -49,6 +56,9 @@ impl Setting {
             Setting::File { path } => Ok(read_text(path)?.map(Value::String)),
             Setting::Profile { profile, .. } => {
                 Ok(profile.in_effect().then_some(Value::Bool(true)))
+            }
+            Setting::Registry { key, value, .. } => {
+                Ok(registry::read(key, value)?.map(Value::from))
             }
         }
     }
@@ -101,7 +111,49 @@ impl Setting {
                     profile.identifier
                 ),
             },
+            Setting::Registry { key, value, .. } => {
+                let n = match to {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .with_context(|| {
+                                format!("{value}: the registry holds a number here, not {v}")
+                            })?,
+                    ),
+                };
+                registry::write(key, value, n)
+            }
         }
+    }
+}
+
+/// `HKEY_CURRENT_USER`'s numbers, which only Windows has.
+mod registry {
+    use anyhow::Result;
+
+    #[cfg(windows)]
+    pub fn read(key: &str, value: &str) -> Result<Option<u32>> {
+        use anyhow::Context;
+        crate::os::sys::user_number(key, value)
+            .with_context(|| format!("reading HKEY_CURRENT_USER\\{key}\\{value}"))
+    }
+
+    #[cfg(windows)]
+    pub fn write(key: &str, value: &str, to: Option<u32>) -> Result<()> {
+        use anyhow::Context;
+        crate::os::sys::set_user_number(key, value, to)
+            .with_context(|| format!("changing HKEY_CURRENT_USER\\{key}\\{value}"))
+    }
+
+    #[cfg(not(windows))]
+    pub fn read(_: &str, _: &str) -> Result<Option<u32>> {
+        anyhow::bail!("the registry is Windows'")
+    }
+
+    #[cfg(not(windows))]
+    pub fn write(_: &str, _: &str, _: Option<u32>) -> Result<()> {
+        anyhow::bail!("the registry is Windows'")
     }
 }
 
@@ -114,6 +166,12 @@ impl fmt::Display for Setting {
             }
             Setting::File { path } => write!(f, "{}", path.display()),
             Setting::Profile { profile, .. } => write!(f, "profile \"{}\"", profile.name),
+            // Where it is, short enough to read and enough to find it in
+            // Registry Editor: "Storage Sense (HKCU\…\StoragePolicy\01)".
+            Setting::Registry { key, value, name } => {
+                let last = key.rsplit('\\').next().unwrap_or(key);
+                write!(f, "{name} (HKCU\\…\\{last}\\{value})")
+            }
         }
     }
 }
@@ -316,16 +374,14 @@ fn replace_file(path: &Path, text: &str) -> Result<()> {
     let tmp = dir.join(format!(".{name}.mdif-{}", std::process::id()));
     // Created with the old file's mode, so a private file is never readable
     // by others, even for a moment.
-    let mode = std::fs::metadata(&path).map_or(0o644, |m| m.permissions().mode() & 0o7777);
+    let mode = std::fs::metadata(&path).map_or(0o644, |m| crate::portable::mode_of(&m));
     let written = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        let mut f =
+            crate::portable::with_mode(options.write(true).create_new(true), mode).open(&tmp)?;
         f.write_all(text.as_bytes())?;
         // The umask may have narrowed it.
-        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        crate::portable::set_mode(&f, mode)?;
         std::fs::rename(&tmp, &path)
     })();
     if written.is_err() {
@@ -359,6 +415,8 @@ fn remove_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     /// Write `to`, check it reads back, then put `before` back and check
     /// the setting is exactly as it was.
@@ -421,6 +479,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn json_is_written_through_a_symlink_with_its_permissions() {
         let dir = tempfile::tempdir().unwrap();
@@ -525,8 +584,10 @@ mod tests {
     }
 
     /// A scratch defaults domain, removed with its plist even if the test fails.
+    #[cfg(target_os = "macos")]
     struct Scratch(String);
 
+    #[cfg(target_os = "macos")]
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = Command::new("/usr/bin/defaults")
@@ -539,6 +600,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn user_defaults_round_trip_through_cfprefsd() {
         let scratch = Scratch(format!(

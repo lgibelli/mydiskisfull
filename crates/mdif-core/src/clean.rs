@@ -199,7 +199,18 @@ pub fn plan(
     finished: &[Finished],
     churning: &[String],
 ) -> Result<Step, String> {
+    // As its parts name it: with a trailing `/` every "not a link" check below
+    // would follow a link at the end, and what it points to would be emptied.
+    let path: &Path = &path.components().collect::<PathBuf>();
     let shown = display(path, home);
+    // What has a Windows half so far: build output, a project's packages, a
+    // Rust build's incremental caches, finished worktrees, emptying the
+    // Recycle Bin and moving a big file of yours nobody uses to it. The rest
+    // (caches, apps' helpers, Docker, Android, Xcode) is macOS's.
+    let mac = cfg!(target_os = "macos");
+    if !mac && path == Path::new(crate::docker::OLD) {
+        return Err(NOT_ON_WINDOWS.into());
+    }
     if path == Path::new(crate::docker::OLD) {
         // What it removes is in Docker's folder: not if you keep that.
         if let Some(entry) = keep.covering(&home.join(crate::docker::FOLDER)) {
@@ -212,7 +223,7 @@ pub fn plan(
             .map(|_| Step::DockerOld)
             .ok_or_else(|| "Docker isn't installed.".into());
     }
-    if path.extension().is_some_and(|e| e == "app") {
+    if mac && path.extension().is_some_and(|e| e == "app") {
         // The helper that writes the most is this app's: another app's
         // helper of the same name isn't the one suggested.
         return churning
@@ -228,19 +239,31 @@ pub fn plan(
             })
             .ok_or_else(|| format!("{shown}: none of its helpers keeps rewriting the disk now."));
     }
+    // The checks below, what you keep included, know folders by their full
+    // names: nothing in the home folder is cleaned through a short one.
+    if !mac && let Some(short) = short_name_below(path, home) {
+        return Err(format!(
+            "{shown}: `{short}` may be Windows' short name for a folder: give the path with its \
+             full names."
+        ));
+    }
+    // Nor emptied: something you keep in the Trash stays there.
     if let Some(entry) = keep.covering(path).or_else(|| keep.inside(path)) {
         return Err(format!(
             "{shown}: you keep {}, so it isn't touched.",
             crate::text::printable(entry)
         ));
     }
-    if path == home.join(".Trash") {
+    if mac && path == home.join(".Trash") {
         return deletable(path, home).map(|()| Step::EmptyTrash(path.to_path_buf()));
     }
-    if relocated(path, Path::new(SHARED)) {
+    if !mac && recycle_bin_root(path).is_some() {
+        return Ok(Step::EmptyTrash(path.to_path_buf()));
+    }
+    if mac && relocated(path, Path::new(SHARED)) {
         return Ok(Step::FinderTrash(path.to_path_buf()));
     }
-    if trashable_folder(path, home) {
+    if mac && trashable_folder(path, home) {
         return deletable(path, home).map(|()| Step::Trash {
             path: path.to_path_buf(),
             quit: None,
@@ -249,7 +272,7 @@ pub fn plan(
     if let Some(f) = finished.iter().find(|f| f.path == path) {
         return Ok(Step::RemoveWorktree(f.clone()));
     }
-    if path == home.join(CHROME_MODEL) {
+    if mac && path == home.join(CHROME_MODEL) {
         let applied = tweaks::find("chrome-ai-model")
             .is_some_and(|t| matches!(t.status(home), Ok(Status::Applied)));
         if !applied {
@@ -263,10 +286,10 @@ pub fn plan(
             quit: Some("Google Chrome"),
         });
     }
-    if let Some(step) = crate::xcode::plan(path, home) {
+    if let Some(step) = crate::xcode::plan(path, home).filter(|_| mac) {
         return step;
     }
-    if let Some(step) = crate::android::plan(path, home) {
+    if let Some(step) = crate::android::plan(path, home).filter(|_| mac) {
         return step;
     }
     if path.join(".git").is_file() {
@@ -275,7 +298,8 @@ pub fn plan(
              lately."
         ));
     }
-    if build_output(path) || incremental_caches(path) || dependencies(path) {
+    let built = !built_in_home(path, home) && (build_output(path) || incremental_caches(path));
+    if built || dependencies(path) {
         deletable(path, home)?;
         if !in_a_project(path, home) {
             return Err(format!(
@@ -284,6 +308,18 @@ pub fn plan(
             ));
         }
         return Ok(Step::Delete(path.to_path_buf()));
+    }
+    if !mac {
+        // A big file of yours nobody uses, as on a Mac. (A link isn't followed.)
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
+            return unused_file(path, home, BIG_FILE, crate::watch::unix_now()).map(|()| {
+                Step::Trash {
+                    path: path.to_path_buf(),
+                    quit: None,
+                }
+            });
+        }
+        return Err(format!("{shown}: {NOT_ON_WINDOWS}"));
     }
     if let Some(owner) = emptied_for(path, home) {
         return deletable(path, home).map(|()| Step::Empty {
@@ -301,6 +337,70 @@ pub fn plan(
     Err(format!(
         "{shown}: MyDiskIsFull only cleans what it suggests (`mdif suggest`)."
     ))
+}
+
+/// Whether `name` may be Windows' short name for another (`PROGRA~1`,
+/// `ONEDRI~1.ZIP`, 8.3 names): its part before the dot ends in a tilde and
+/// digits. A path through one names a folder its names don't tell.
+pub(crate) fn short_name(name: &str) -> bool {
+    let base = name.split_once('.').map_or(name, |(base, _)| base);
+    name.len() <= 12
+        && base.rsplit_once('~').is_some_and(|(before, n)| {
+            !before.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// The first name below `home` in `path` that may be a short name
+/// ([`short_name`]). Only those: a home folder reached by its short name
+/// (`C:\Users\RUNNER~1`, as some set `TEMP`) is the home folder still.
+fn short_name_below<'a>(path: &'a Path, home: &Path) -> Option<std::borrow::Cow<'a, str>> {
+    path.strip_prefix(home)
+        .ok()?
+        .components()
+        .find_map(|c| match c {
+            Component::Normal(n) if short_name(&n.to_string_lossy()) => Some(n.to_string_lossy()),
+            _ => None,
+        })
+}
+
+/// Why the rest is refused on Windows, for now.
+const NOT_ON_WINDOWS: &str = "on Windows, MyDiskIsFull cleans a project's build output, its \
+                              packages (node_modules) and finished worktrees, moves big files \
+                              of yours nobody used in months to the Recycle Bin, and empties \
+                              it, so far.";
+
+/// Where what's moved to the bin goes, as said: "the Trash", "the Recycle Bin".
+fn trash_name() -> &'static str {
+    if cfg!(windows) {
+        "the Recycle Bin"
+    } else {
+        "the Trash"
+    }
+}
+
+/// The drive root (`C:\`, as the shell takes it) of a drive's Recycle Bin
+/// named as itself, `C:\$Recycle.Bin` or `\\?\C:\$Recycle.Bin` (whatever
+/// the case): what `mdif clean` empties there. Nothing inside it, and no
+/// folder of that name anywhere else.
+fn recycle_bin_root(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let letter = match parts.next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => l,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if parts.next()? != Component::RootDir {
+        return None;
+    }
+    match (parts.next()?, parts.next()) {
+        (Component::Normal(name), None) if name.eq_ignore_ascii_case("$Recycle.Bin") => Some(
+            PathBuf::from(format!("{}:\\", letter.to_ascii_uppercase() as char)),
+        ),
+        _ => None,
+    }
 }
 
 /// Does it.
@@ -323,7 +423,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 Some(_) => {}
                 None => still_trashable(path, home)?,
             }
-            mdif_macos::fs::trash(path)
+            crate::os::fs::trash(path)
                 .map(|to| Done {
                     path: path.clone(),
                     how: "trashed",
@@ -333,7 +433,7 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                 .map_err(|e| format!("{}: {e}", display(path, home)))
         }
         Step::Restart { app, helper, pids } => {
-            use mdif_macos::proc::{alive, force_quit, terminate};
+            use crate::os::proc::{alive, force_quit, terminate};
             // Only what is still that app's helper: a pid can be reused.
             let now = helpers_of(helper, app);
             let pids: Vec<i32> = pids.iter().copied().filter(|p| now.contains(p)).collect();
@@ -397,6 +497,16 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     display(path, home)
                 ));
             }
+            // A clone in it goes with it: one a build tool made can be
+            // fetched again, one with work of its own can't.
+            if let Some(repo) = repo_with_work_in(path) {
+                return Err(format!(
+                    "{} has a git repository in it with work that is only there ({}): \
+                     delete it yourself if you mean to.",
+                    display(path, home),
+                    display(&repo, home)
+                ));
+            }
             std::fs::remove_dir_all(path)
                 .map(|()| Done {
                     path: path.clone(),
@@ -405,6 +515,18 @@ pub fn run(step: &Step, home: &Path) -> Result<Done, String> {
                     ..Default::default()
                 })
                 .map_err(|e| format!("{}: {e}", display(path, home)))
+        }
+        Step::EmptyTrash(path) if cfg!(windows) => {
+            let root = recycle_bin_root(path)
+                .ok_or_else(|| format!("{} isn't a drive's Recycle Bin.", path.display()))?;
+            crate::os::fs::empty_recycle_bin(&root)
+                .map(|()| Done {
+                    path: path.clone(),
+                    how: "erased",
+                    to: None,
+                    ..Default::default()
+                })
+                .map_err(|e| format!("The Recycle Bin: {e}"))
         }
         Step::EmptyTrash(path) => {
             deletable(path, home)?;
@@ -717,6 +839,11 @@ pub fn yours(path: &Path, home: &Path) -> bool {
     let Some((file, folders)) = names.split_last() else {
         return false;
     };
+    // Windows: in the profile only, and not in a folder that is anything
+    // but your files (AppData, cloud folders, virtual machines...).
+    if cfg!(windows) && !(in_home && crate::space::own_file_on_windows(&names)) {
+        return false;
+    }
     let first = folders.first().map(String::as_str);
     let tool = |n: &str| {
         crate::space::DEV_HOME
@@ -756,16 +883,22 @@ pub fn yours(path: &Path, home: &Path) -> bool {
 }
 
 /// Whether moving `file` to the Trash takes only a file of yours that
-/// nothing uses: a regular file (not a link) with one name, of at least
-/// `min` allocated bytes, among your own files ([`yours`]) in the home
+/// nothing uses: a regular file (not a link) with one name, that no sync
+/// service manages ([`portable::managed`](crate::portable::managed)), of at
+/// least `min` allocated bytes, among your own files ([`yours`]) in the home
 /// folder and on its volume, neither opened nor changed ([`last_used`]) in
 /// the [`UNUSED_FOR`] before `now`. Why not, when it isn't.
 pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
+    use crate::portable;
     let shown = display(file, home);
-    if file
-        .components()
-        .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    let bin = trash_name();
+    // A drive, `C:`, begins a full path on Windows.
+    if !file.is_absolute()
+        || file.components().any(|c| match c {
+            Component::RootDir | Component::Normal(_) => false,
+            Component::Prefix(_) => !cfg!(windows),
+            _ => true,
+        })
     {
         return Err(format!("{shown}: give the file's full path."));
     }
@@ -781,31 +914,58 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
             display(link, home)
         ));
     }
+    // Whatever folder it's in: a sync service's own folder can have any name.
+    if portable::managed(&meta) {
+        return Err(if cfg!(windows) {
+            format!(
+                "{shown} is kept in sync by a cloud service, or another program manages it: \
+                 moving it to {bin} could delete it online too."
+            )
+        } else {
+            format!(
+                "{shown} is in the cloud: its contents aren't on this Mac, and moving it to \
+                 {bin} would delete it there too."
+            )
+        });
+    }
     if !file.starts_with(home) || !yours(file, home) {
+        return Err(if cfg!(windows) {
+            format!(
+                "{shown}: MyDiskIsFull only moves your own files to {bin}, in your profile \
+                 folder: not apps' data (AppData), what's in a cloud folder (deleting it there \
+                 deletes it online), virtual machines, mail, programs or build output."
+            )
+        } else {
+            format!(
+                "{shown}: MyDiskIsFull only moves your own files to {bin}, in your home \
+                 folder: not apps' data or installed software, nor what's in a package, a \
+                 hidden folder or build output."
+            )
+        });
+    }
+    if portable::hidden(&meta) {
         return Err(format!(
-            "{shown}: MyDiskIsFull only moves your own files to the Trash, in your home \
-             folder: not apps' data or installed software, nor what's in a package, a hidden \
-             folder or build output."
+            "{shown} is hidden or a system file: Windows keeps it out of sight for a reason."
         ));
     }
-    if meta.nlink() > 1 {
+    if portable::links(file, &meta) > 1 {
         return Err(format!(
-            "{shown} has other names (hard links): moving one to the Trash frees nothing."
+            "{shown} has other names (hard links): moving one to {bin} frees nothing."
         ));
     }
-    if meta.blocks() * 512 < min {
+    if portable::allocated(file, &meta) < min {
         return Err(format!(
             "{shown} is smaller than {}.",
             crate::units::bytes(min)
         ));
     }
-    if now - last_used(meta.atime(), meta.mtime()) < UNUSED_FOR {
+    if now - last_used(portable::atime(&meta), portable::mtime(&meta)) < UNUSED_FOR {
         return Err(format!(
             "{shown} was opened or changed in the last {} days.",
             UNUSED_FOR / 86_400
         ));
     }
-    let same_volume = mdif_macos::fs::dev_of(file).ok() == mdif_macos::fs::dev_of(home).ok();
+    let same_volume = crate::os::fs::dev_of(file).ok() == crate::os::fs::dev_of(home).ok();
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
@@ -817,7 +977,7 @@ pub fn unused_file(file: &Path, home: &Path, min: u64, now: i64) -> Result<(), S
 /// system owns. Each update moves aside the files it didn't recognise (old
 /// copies of system settings), and they stay there.
 pub fn relocated(dir: &Path, shared: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
+    use crate::portable;
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -832,13 +992,13 @@ pub fn relocated(dir: &Path, shared: &Path) -> bool {
             .is_some_and(numbered);
     // The system's own; in tests, the temp folder's owner's.
     let owner = if cfg!(test) {
-        unsafe { libc::getuid() }
+        portable::current_uid()
     } else {
-        0
+        Some(0)
     };
     named
         && dir.parent() == Some(shared)
-        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == owner)
+        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && portable::uid(&m) == owner)
 }
 
 /// Those folders in `shared`, oldest first.
@@ -1089,9 +1249,9 @@ fn app_in_list(text: &str, prefix: &str) -> Option<String> {
 /// A process of yours whose program is in `dir` (a tool's runtime kept in
 /// its cache).
 fn running_from(dir: &Path) -> Option<String> {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .into_iter()
-        .find(|p| mdif_macos::proc::path(p.pid).is_some_and(|x| x.starts_with(dir)))
+        .find(|p| crate::os::proc::path(p.pid).is_some_and(|x| x.starts_with(dir)))
         .map(|p| p.name)
 }
 
@@ -1121,13 +1281,14 @@ fn empty_leaving(dir: &Path, leave: &[Vec<&str>]) -> std::io::Result<()> {
             .filter(|l| l.len() > 1 && named(l[0]))
             .map(|l| l[1..].to_vec())
             .collect();
-        let is_dir = entry.file_type()?.is_dir();
+        let kind = entry.file_type()?;
+        let is_dir = kind.is_dir();
         let gone = if is_dir && !below.is_empty() {
             empty_leaving(&path, &below)
         } else if is_dir {
             std::fs::remove_dir_all(&path)
         } else {
-            std::fs::remove_file(&path)
+            remove_link_or_file(&path, kind)
         };
         match gone {
             Ok(()) => any = true,
@@ -1139,6 +1300,15 @@ fn empty_leaving(dir: &Path, leave: &[Vec<&str>]) -> std::io::Result<()> {
     match first_error {
         Some(e) if !any => Err(e),
         _ => Ok(()),
+    }
+}
+
+/// Removes a file or a link, never what a link points to. On Windows a link
+/// to a folder (or a junction) is removed as a folder.
+fn remove_link_or_file(path: &Path, kind: std::fs::FileType) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(_) if cfg!(windows) && kind.is_symlink() => std::fs::remove_dir(path),
+        gone => gone,
     }
 }
 
@@ -1219,10 +1389,33 @@ pub fn in_a_project(dir: &Path, home: &Path) -> bool {
     let Ok(rel) = dir.strip_prefix(home) else {
         return false;
     };
-    let parts: Vec<Component> = rel.components().collect();
-    parts.len() >= 3
-        && matches!(parts[0], Component::Normal(root)
-            if root.to_str().is_some_and(crate::owners::is_code_root))
+    let parts: Vec<&std::ffi::OsStr> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    let is = |i: usize, name: &str| {
+        parts
+            .get(i)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    };
+    // On Windows, Visual Studio's `source\repos` too: a code folder two
+    // names deep.
+    let root = if cfg!(windows) && is(0, "source") && is(1, "repos") {
+        2
+    } else if parts
+        .first()
+        .and_then(|n| n.to_str())
+        .is_some_and(crate::owners::is_code_root)
+    {
+        1
+    } else {
+        return false;
+    };
+    parts.len() >= root + 2
 }
 
 /// Whether `dir` is a project's build output, which its next build makes
@@ -1242,6 +1435,11 @@ pub fn build_output(dir: &Path) -> bool {
     else {
         return false;
     };
+    // A file in the home folder that names a toolchain (a `package.json` that
+    // `npm install` left there) doesn't make the home folder a project.
+    if is_a_home_folder(project) {
+        return false;
+    }
     let markers: &[&str] = match name {
         "target" => &["Cargo.toml"],
         ".dart_tool" => &["pubspec.yaml"],
@@ -1256,24 +1454,108 @@ pub fn build_output(dir: &Path) -> bool {
         ".next" | ".turbo" => &["package.json"],
         ".build" => &["Package.swift"],
         "dist" => &[],
+        // .NET's (on Windows), beside a project file whatever its name
+        // (`dotnet_project`).
+        _ if crate::owners::dotnet_output(name) => &[],
         _ => return false,
     };
-    debug_assert!(crate::owners::ARTIFACTS.contains(&name));
-    if !(crate::privacy::may_open(project) && dir.is_dir()) {
+    let dotnet = crate::owners::dotnet_output(name);
+    debug_assert!(dotnet || crate::owners::ARTIFACTS.contains(&name));
+    if !crate::privacy::may_open(project) {
         return false;
     }
-    if markers.iter().any(|m| project.join(m).is_file()) {
-        return worktrees::tracks_files_in(dir) != Some(true);
+    let found = if dotnet {
+        dotnet_project(project).then_some(&"")
+    } else {
+        markers.iter().find(|m| project.join(m).is_file())
+    };
+    // A `build` or a `dist` beside `package.json` may be the project's own
+    // (below).
+    let found = found.or_else(|| {
+        (matches!(name, "build" | "dist") && project.join("package.json").is_file())
+            .then_some(&"package.json")
+    });
+    let Some(marker) = found else {
+        return false;
+    };
+    // An npm project's `build` is also where electron-builder keeps what it
+    // builds from (the app's icon, its entitlements), and a package
+    // downloaded as published has its `dist` and no sources to make it from:
+    // build output only when the project's git ignores it and tracks nothing
+    // in it, not when there's no repository to ask.
+    let only_npm = matches!(name, "build" | "dist")
+        && *marker == "package.json"
+        && !markers
+            .iter()
+            .any(|m| *m != "package.json" && project.join(m).is_file());
+    if only_npm
+        && (crate::worktrees::ignores(dir) != Some(true)
+            || worktrees::tracks_files_in(dir) != Some(false))
+    {
+        return false;
     }
-    // A `dist` or a `build` beside `package.json` may be the project's own:
-    // electron-builder keeps its icons and entitlements in `build`, and a
-    // package downloaded as published has its `dist` and no sources to make
-    // it from. Build output only when git ignores it, not when there's no
-    // repository to ask.
-    matches!(name, "build" | "dist")
-        && project.join("package.json").is_file()
-        && worktrees::ignores(dir) == Some(true)
-        && worktrees::tracks_files_in(dir) == Some(false)
+    dir.is_dir()
+        // A repository of its own (a deploy clone in `dist`, a worktree), with
+        // commits that may be nowhere else: not something a build makes.
+        && std::fs::symlink_metadata(dir.join(".git")).is_err()
+        && worktrees::tracks_files_in(dir) != Some(true)
+}
+
+/// Whether `dir` holds a .NET project file (`App.csproj`, `.fsproj`,
+/// `.vbproj`): what makes the `bin` and `obj` beside it build output. Names
+/// only, from the folder's listing; never a folder that may prompt.
+pub(crate) fn dotnet_project(dir: &Path) -> bool {
+    const PROJECTS: &[&str] = &["csproj", "fsproj", "vbproj"];
+    crate::privacy::may_open(dir)
+        && std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                Path::new(&e.file_name())
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| PROJECTS.iter().any(|p| p.eq_ignore_ascii_case(x)))
+                    && e.file_type().is_ok_and(|t| t.is_file())
+            })
+        })
+}
+
+/// Whether `dir` is this account's home folder: `$HOME`, or (in the App
+/// Sandbox, where that is the app's container) the account's own.
+fn is_a_home_folder(dir: &Path) -> bool {
+    static HOMES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    HOMES
+        .get_or_init(|| {
+            crate::portable::home_dir()
+                .into_iter()
+                .chain(crate::os::sys::account_home())
+                .collect()
+        })
+        .iter()
+        .any(|h| same_folder(h, dir))
+}
+
+/// The same folder, however its name is cased or ended.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let name = |p: &Path| {
+        p.to_string_lossy()
+            .trim_end_matches(std::path::is_separator)
+            .to_string()
+    };
+    name(a).eq_ignore_ascii_case(&name(b))
+}
+
+/// Whether the build output `path` is in (or is) belongs to the home folder
+/// itself: a folder named like build output right in it (`~/build`,
+/// `~/.gradle`) is yours, whatever toolchain file lies beside it.
+pub(crate) fn built_in_home(path: &Path, home: &Path) -> bool {
+    use crate::owners::{ARTIFACTS, dotnet_output};
+    path.ancestors()
+        .find(|a| {
+            a.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| ARTIFACTS.contains(&n) || dotnet_output(n))
+        })
+        .and_then(Path::parent)
+        .is_some_and(|p| same_folder(p, home) || is_a_home_folder(p))
 }
 
 const INCREMENTAL: &str = "incremental";
@@ -1309,14 +1591,16 @@ pub fn incremental_caches(dir: &Path) -> bool {
 pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
     let shown = display(dir, home);
     // `..` would make "in the home folder" and what you keep mean nothing,
-    // and a trailing `/` or `/.` would make a link to a folder count as the
-    // folder: only a path as its parts spell it.
-    if dir.components().any(|c| {
-        !matches!(
-            c,
-            std::path::Component::RootDir | std::path::Component::Normal(_)
-        )
-    }) || dir.components().collect::<PathBuf>().as_os_str() != dir.as_os_str()
+    // and on a Mac a trailing `/` or `/.` would make a link to a folder
+    // count as the folder: only a path as its parts spell it.
+    if !dir.is_absolute()
+        || dir.components().any(|c| match c {
+            Component::RootDir | Component::Normal(_) => false,
+            // A drive, `C:`, begins a full path on Windows.
+            Component::Prefix(_) => !cfg!(windows),
+            _ => true,
+        })
+        || (!cfg!(windows) && dir.components().collect::<PathBuf>().as_os_str() != dir.as_os_str())
     {
         return Err(format!("{shown}: give the folder's full path."));
     }
@@ -1339,13 +1623,13 @@ pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
             display(link, home)
         ));
     }
-    let same_volume = mdif_macos::fs::dev_of(dir).ok() == mdif_macos::fs::dev_of(home).ok();
+    let same_volume = crate::os::fs::dev_of(dir).ok() == crate::os::fs::dev_of(home).ok();
     if !same_volume {
         return Err(format!("{shown} is on another volume."));
     }
     // Nor with another volume mounted in it (a share, a disk image), which
     // deleting it would empty too.
-    let mounts: Vec<PathBuf> = mdif_macos::fs::mounts()
+    let mounts: Vec<PathBuf> = crate::os::fs::mounts()
         .map_err(|e| format!("{shown}: the volumes mounted can't be listed ({e})."))?
         .into_iter()
         .map(|(_, on)| PathBuf::from(on))
@@ -1357,6 +1641,32 @@ pub(crate) fn deletable(dir: &Path, home: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The first git repository in `dir` (a folder with a `.git`, links not
+/// followed) that holds something none of its remotes has
+/// ([`crate::worktrees::clone_has_nothing_to_lose`]).
+fn repo_with_work_in(dir: &Path) -> Option<PathBuf> {
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(d) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut below = Vec::new();
+        let mut repo = false;
+        for e in entries.flatten() {
+            if e.file_name() == ".git" {
+                repo = true;
+            } else if e.file_type().is_ok_and(|t| t.is_dir()) {
+                below.push(e.path());
+            }
+        }
+        if repo && !crate::worktrees::clone_has_nothing_to_lose(&d) {
+            return Some(d);
+        }
+        folders.extend(below);
+    }
+    None
 }
 
 /// The first of `mounts` (where volumes are mounted) inside `dir`, by its
@@ -1394,12 +1704,12 @@ fn link_on_the_way<'p>(path: &'p Path, home: &Path) -> Option<&'p Path> {
 /// (Safari's and Mail's `com.apple.WebKit.Networking`), or one isn't a
 /// helper, the name can't say which is meant: none, rather than the
 /// wrong app restarted ([`one_app`]).
-pub fn helper(name: &str) -> Option<mdif_macos::proc::App> {
-    let apps: Vec<Option<mdif_macos::proc::App>> = mdif_macos::proc::own_processes()
+pub fn helper(name: &str) -> Option<crate::os::proc::App> {
+    let apps: Vec<Option<crate::os::proc::App>> = crate::os::proc::own_processes()
         .into_iter()
         .filter(|p| p.name == name)
         .map(|p| {
-            mdif_macos::proc::responsible_app(p.pid).filter(|a| a.pid != p.pid && a.name != name)
+            crate::os::proc::responsible_app(p.pid).filter(|a| a.pid != p.pid && a.name != name)
         })
         .collect();
     one_app(apps)
@@ -1407,8 +1717,8 @@ pub fn helper(name: &str) -> Option<mdif_macos::proc::App> {
 
 /// The app all of `apps` are (each a process's, `None` when it isn't a
 /// helper), when they are one.
-fn one_app(apps: Vec<Option<mdif_macos::proc::App>>) -> Option<mdif_macos::proc::App> {
-    let apps: Vec<mdif_macos::proc::App> = apps.into_iter().collect::<Option<_>>()?;
+fn one_app(apps: Vec<Option<crate::os::proc::App>>) -> Option<crate::os::proc::App> {
+    let apps: Vec<crate::os::proc::App> = apps.into_iter().collect::<Option<_>>()?;
     let first = apps.first()?;
     apps.iter()
         .all(|a| a.bundle == first.bundle)
@@ -1419,7 +1729,7 @@ fn one_app(apps: Vec<Option<mdif_macos::proc::App>>) -> Option<mdif_macos::proc:
 fn ended(pids: &[i32], wait: std::time::Duration) -> bool {
     let until = std::time::Instant::now() + wait;
     loop {
-        if !pids.iter().any(|&p| mdif_macos::proc::alive(p)) {
+        if !pids.iter().any(|&p| crate::os::proc::alive(p)) {
             return true;
         }
         if std::time::Instant::now() >= until {
@@ -1432,7 +1742,7 @@ fn ended(pids: &[i32], wait: std::time::Duration) -> bool {
 /// The processes named `name` that work for the app at `app`.
 /// What each of `pids` has written so far.
 fn writes(pids: &[i32]) -> Vec<(i32, u64)> {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .into_iter()
         .filter(|p| pids.contains(&p.pid))
         .map(|p| (p.pid, p.bytes_written))
@@ -1452,11 +1762,11 @@ fn busiest(before: &[(i32, u64)], after: &[(i32, u64)]) -> Option<i32> {
 }
 
 fn helpers_of(name: &str, app: &Path) -> Vec<i32> {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .into_iter()
         .filter(|p| p.name == name)
         .filter(|p| {
-            mdif_macos::proc::responsible_app(p.pid)
+            crate::os::proc::responsible_app(p.pid)
                 .is_some_and(|a| a.pid != p.pid && a.bundle == app)
         })
         .map(|p| p.pid)
@@ -1465,7 +1775,7 @@ fn helpers_of(name: &str, app: &Path) -> Vec<i32> {
 
 /// The button for a helper that keeps rewriting the disk: "Restart
 /// Safari's Networking" (the last part of a dotted name).
-pub fn restart_action(helper: &str, app: &mdif_macos::proc::App) -> Action {
+pub fn restart_action(helper: &str, app: &crate::os::proc::App) -> Action {
     let part = helper.rsplit('.').next().unwrap_or(helper);
     Action {
         kind: "restart",
@@ -1483,12 +1793,330 @@ pub fn restart_action(helper: &str, app: &mdif_macos::proc::App) -> Action {
 }
 
 fn running(name: &str) -> bool {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .iter()
         .any(|p| p.name == name)
 }
 
+/// A clone in build output goes with it only when nothing in it is only
+/// there; on both systems.
 #[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn a_clone_with_work_of_its_own_keeps_the_build_output_it_is_in() {
+        let t = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(t.path()).unwrap();
+        // `canonicalize` gives `\\?\C:\...` on Windows: the path as a person writes it.
+        let home = PathBuf::from(home.to_string_lossy().trim_start_matches(r"\\?\"));
+        let upstream = home.join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        git(&upstream, &["init", "-q"]);
+        std::fs::write(upstream.join("lib.rs"), "fn f() {}\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-qm", "one"]);
+
+        let app = home.join("devel").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "[package]").unwrap();
+        let target = app.join("target");
+        let dep = target.join("checkouts").join("dep");
+        let clone = || {
+            std::fs::create_dir_all(target.join("checkouts")).unwrap();
+            let (from, to) = (upstream.to_str().unwrap(), dep.to_str().unwrap());
+            git(&home, &["clone", "-q", from, to]);
+        };
+        let delete = || {
+            let step = plan(&target, &home, &Keep::default(), &[], &[]).unwrap();
+            run(&step, &home)
+        };
+
+        // What a build tool cloned, as it was: fetched again, so it goes.
+        clone();
+        assert_eq!(repo_with_work_in(&target), None);
+        assert!(delete().is_ok());
+        assert!(!target.exists());
+
+        // A commit of its own stays, and the build output with it.
+        clone();
+        std::fs::write(dep.join("lib.rs"), "fn g() {}\n").unwrap();
+        git(&dep, &["commit", "-qam", "mine"]);
+        let why = delete().unwrap_err();
+        assert!(why.contains("work that is only there"), "{why}");
+        assert!(dep.join("lib.rs").exists());
+        // Put back as its remote has it: nothing of its own again.
+        git(&dep, &["reset", "-q", "--hard", "origin/main"]);
+        assert_eq!(repo_with_work_in(&target), None);
+        // A change, an untracked file, a stash: each is only there.
+        std::fs::write(dep.join("lib.rs"), "fn h() {}\n").unwrap();
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        git(&dep, &["stash", "-q"]);
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        git(&dep, &["stash", "drop", "-q"]);
+        std::fs::write(dep.join("notes.txt"), "mine\n").unwrap();
+        assert_eq!(repo_with_work_in(&target), Some(dep.clone()));
+        std::fs::remove_file(dep.join("notes.txt")).unwrap();
+        // A repository with no remote: all of it is only there.
+        let local = target.join("local");
+        std::fs::create_dir(&local).unwrap();
+        git(&local, &["init", "-q"]);
+        std::fs::write(local.join("a"), "a").unwrap();
+        git(&local, &["add", "."]);
+        git(&local, &["commit", "-qm", "a"]);
+        assert_eq!(repo_with_work_in(&target), Some(local.clone()));
+        std::fs::remove_dir_all(&local).unwrap();
+        assert!(delete().is_ok());
+    }
+}
+
+// Clean-ups wait for Windows' own list (and drive-prefixed paths).
+/// What `mdif clean` does on Windows so far: build output and a project's
+/// packages go, the rest is refused by name.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn project(home: &Path) -> PathBuf {
+        let app = home.join(r"devel\app");
+        for dir in [r"target\debug", "src", r"node_modules\left-pad"] {
+            std::fs::create_dir_all(app.join(dir)).unwrap();
+        }
+        std::fs::write(app.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        std::fs::write(app.join(r"target\debug\app.exe"), vec![1u8; 4096]).unwrap();
+        std::fs::write(app.join(r"node_modules\left-pad\index.js"), "x").unwrap();
+        app
+    }
+
+    #[test]
+    fn a_drives_recycle_bin_is_emptied_and_nothing_near_it() {
+        let home = PathBuf::from(r"C:\Users\Ann");
+        let plan = |p: &str| plan(Path::new(p), &home, &Keep::default(), &[], &[]);
+        for bin in [
+            r"C:\$Recycle.Bin",
+            r"d:\$RECYCLE.BIN",
+            r"\\?\C:\$Recycle.Bin",
+        ] {
+            assert!(
+                matches!(plan(bin), Ok(Step::EmptyTrash(_))),
+                "{bin}: {:?}",
+                plan(bin)
+            );
+        }
+        // Not while you keep something in it.
+        let kept = Keep::parse(
+            "C:\\$Recycle.Bin\\S-1-5-21-1-2-3-1001\\$RABC123.mkv\n",
+            &home,
+        );
+        let err = super::plan(Path::new(r"C:\$Recycle.Bin"), &home, &kept, &[], &[]).unwrap_err();
+        assert!(err.contains("you keep"), "{err}");
+        for (bin, root) in [
+            (r"d:\$Recycle.Bin", r"D:\"),
+            (r"\\?\C:\$RECYCLE.BIN", r"C:\"),
+        ] {
+            assert_eq!(recycle_bin_root(Path::new(bin)), Some(PathBuf::from(root)));
+        }
+        // Inside it, a folder of that name elsewhere, a drive-relative path, a share.
+        for refused in [
+            r"C:\$Recycle.Bin\S-1-5-21-1-2-3-1001",
+            r"C:\Users\Ann\$Recycle.Bin",
+            r"C:$Recycle.Bin",
+            r"\\server\share\$Recycle.Bin",
+            r"C:\",
+        ] {
+            assert!(recycle_bin_root(Path::new(refused)).is_none(), "{refused}");
+            assert!(plan(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn build_output_and_packages_go_and_the_rest_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(t.path()).unwrap();
+        // `canonicalize` gives `\\?\C:\...`: the path as a person writes it.
+        let home = PathBuf::from(home.to_string_lossy().trim_start_matches(r"\\?\"));
+        let app = project(&home);
+        let plan = |p: &Path| plan(p, &home, &Keep::default(), &[], &[]);
+
+        assert!(matches!(plan(&app.join("target")), Ok(Step::Delete(_))));
+        // No lockfile: `npm install` wouldn't put the same back.
+        assert!(plan(&app.join("node_modules")).is_err());
+        std::fs::write(app.join("package-lock.json"), "{}").unwrap();
+        assert!(matches!(
+            plan(&app.join("node_modules")),
+            Ok(Step::Delete(_))
+        ));
+        for refused in [
+            app.join("src"),
+            app.clone(),
+            home.clone(),
+            PathBuf::from(crate::docker::OLD),
+        ] {
+            let why = plan(&refused).unwrap_err();
+            assert!(why.contains("on Windows"), "{}: {why}", refused.display());
+        }
+        // Not a full path, and not in the home folder.
+        assert!(plan(Path::new(r"devel\app\target")).is_err());
+        assert!(deletable(Path::new(r"C:\Windows\Temp"), &home).is_err());
+        assert!(deletable(&app.join(r"target\..\src"), &home).is_err());
+
+        let Ok(step) = plan(&app.join("target")) else {
+            unreachable!()
+        };
+        let done = run(&step, &home).unwrap();
+        assert_eq!(done.how, "deleted");
+        assert!(!app.join("target").exists());
+        assert!(app.join(r"src").is_dir() && app.join("Cargo.toml").is_file());
+    }
+
+    /// A big file of yours nobody used in months is offered for the Recycle
+    /// Bin, and nothing like it: the plan only (moving it for real is
+    /// `fs::trash`'s test, which CI runs).
+    #[test]
+    fn a_big_file_of_yours_nobody_uses_is_offered_and_nothing_like_it() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(t.path()).unwrap();
+        let home = PathBuf::from(home.to_string_lossy().trim_start_matches(r"\\?\"));
+        let h = home.as_path();
+        let none = Keep::default();
+        const DAY: i64 = 86_400;
+        let now = crate::watch::unix_now();
+        let age = |p: &Path, read: i64, changed: i64| {
+            let at = |days: i64| UNIX_EPOCH + Duration::from_secs((now - days * DAY) as u64);
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_accessed(at(read))
+                        .set_modified(at(changed)),
+                )
+                .unwrap();
+        };
+        let movie = h.join(r"Videos\old.mkv");
+        std::fs::create_dir_all(movie.parent().unwrap()).unwrap();
+        std::fs::write(&movie, vec![7u8; BIG_FILE as usize]).unwrap();
+        // Opened for writing: Windows flushes only a handle that may write.
+        std::fs::File::options()
+            .write(true)
+            .open(&movie)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        age(&movie, 200, 900);
+        let plan = |p: &Path| plan(p, h, &none, &[], &[]);
+        let accepted =
+            |p: &Path| matches!(plan(p), Ok(Step::Trash { quit: None, ref path }) if path == p);
+        assert!(accepted(&movie), "{:?}", plan(&movie));
+
+        // Changed lately; opened lately, where Windows records it.
+        age(&movie, 400, 30);
+        assert!(plan(&movie).unwrap_err().contains("in the last 90 days"));
+        age(&movie, 10, 900);
+        assert!(plan(&movie).unwrap_err().contains("in the last 90 days"));
+        age(&movie, 91, 91);
+        assert!(accepted(&movie));
+
+        // Not yours: apps' data, a cloud folder (deleting there deletes it
+        // online), a virtual machine's folder, build output, a program.
+        let mut at = movie.clone();
+        for rel in [
+            r"AppData\Local\Player\old.mkv",
+            r"OneDrive\Videos\old.mkv",
+            r"Dropbox (Personal)\old.mkv",
+            r"Pictures\iCloud Photos\old.mkv",
+            r"Documents\Virtual Machines\Win\old.mkv",
+            r"devel\web\node_modules\big\old.mkv",
+            r"Desktop\old.exe",
+        ] {
+            let to = h.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::rename(&at, &to).unwrap();
+            age(&to, 200, 900);
+            at = to;
+            let why = plan(&at).unwrap_err();
+            assert!(why.contains("only moves your own files"), "{rel}: {why}");
+        }
+        std::fs::rename(&at, &movie).unwrap();
+        age(&movie, 200, 900);
+        assert!(accepted(&movie));
+
+        // Hidden by Windows.
+        let attrib = |how: &str| {
+            let ok = std::process::Command::new("attrib")
+                .arg(how)
+                .arg(&movie)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "attrib {how}");
+        };
+        attrib("+h");
+        assert!(plan(&movie).unwrap_err().contains("hidden"));
+        attrib("-h");
+        assert!(accepted(&movie));
+
+        // Pinned, as a sync service pins what it keeps on this PC: managed,
+        // whatever folder it's in. (Where Windows sets it outside a sync
+        // service's folder: it may not.)
+        use std::os::windows::fs::MetadataExt as _;
+        let _ = std::process::Command::new("attrib")
+            .arg("+p")
+            .arg(&movie)
+            .status();
+        let pinned =
+            std::fs::symlink_metadata(&movie).unwrap().file_attributes() & 0x0008_0000 != 0;
+        if pinned {
+            let why = plan(&movie).unwrap_err();
+            assert!(why.contains("kept in sync"), "{why}");
+        } else {
+            println!("Windows didn't pin a file outside a sync service's folder: not checked");
+        }
+        let _ = std::process::Command::new("attrib")
+            .arg("-p")
+            .arg(&movie)
+            .status();
+        assert!(accepted(&movie));
+
+        // Not a full path, the path as Windows spells it inside, a small file.
+        assert!(plan(Path::new(r"Videos\old.mkv")).is_err());
+        let verbatim = PathBuf::from(format!(r"\\?\{}", movie.display()));
+        assert!(plan(&verbatim).is_err());
+        let short = h.join(r"VIDEOS~1\old.mkv");
+        assert!(plan(&short).unwrap_err().contains("short name"));
+        let small = h.join(r"Videos\small.mkv");
+        std::fs::write(&small, b"x").unwrap();
+        age(&small, 200, 900);
+        assert!(plan(&small).unwrap_err().contains("smaller than"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -1610,15 +2238,50 @@ mod tests {
         std::fs::write(trash.join("a.zip"), "x").unwrap();
         let step = plan(&trash, h, &Keep::default(), &[], &[]).unwrap();
         assert!(matches!(step, Step::EmptyTrash(_)));
-        // Kept (Storage offers Keep on its row): left alone.
-        let kept = Keep::parse("~/.Trash\n", h);
-        assert!(
-            plan(&trash, h, &kept, &[], &[])
-                .unwrap_err()
-                .contains("you keep")
-        );
+        // Not while you keep something in it.
+        for kept in ["~/.Trash/a.zip\n", "~/.Trash\n"] {
+            let err = plan(&trash, h, &Keep::parse(kept, h), &[], &[]).unwrap_err();
+            assert!(err.contains("you keep"), "{kept}: {err}");
+        }
         assert_eq!(run(&step, h).unwrap().how, "erased");
         assert!(trash.is_dir() && std::fs::read_dir(&trash).unwrap().count() == 0);
+    }
+
+    #[test]
+    fn a_short_name_is_a_tilde_and_digits_before_the_dot() {
+        for short in [
+            "PROGRA~1",
+            "APPDAT~1",
+            "ONEDRI~1.ZIP",
+            "MICROS~2.TXT",
+            "ABCDE~10",
+            "AB12C~1",
+        ] {
+            assert!(short_name(short), "{short}");
+        }
+        for long in [
+            "Program Files",
+            "notes~draft.txt",
+            "~1",
+            "backup~",
+            "a~1b",
+            "file~1 copy.txt",
+            "my.file~1.txt",
+            "verylongname~1.txt",
+        ] {
+            assert!(!short_name(long), "{long}");
+        }
+        // Below the home folder only: one reached by its short name is still it.
+        let below = |p: &str, home: &str| {
+            short_name_below(Path::new(p), Path::new(home)).map(|n| n.into_owned())
+        };
+        assert_eq!(
+            below("/Users/me/APPDAT~1/x", "/Users/me").as_deref(),
+            Some("APPDAT~1")
+        );
+        assert_eq!(below("/Users/RUNNER~1/tmp/x", "/Users/RUNNER~1"), None);
+        assert_eq!(below("/Volumes/X/GAMES~1/x", "/Users/me"), None);
+        assert_eq!(below("/Users/me/Videos/old.mkv", "/Users/me"), None);
     }
 
     #[test]
@@ -1864,6 +2527,98 @@ mod tests {
     }
 
     #[test]
+    fn emptying_a_cache_leaves_a_sign_in_and_your_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        let names = |d: &Path| {
+            let mut n: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        };
+        let hf = dir.path().join("huggingface");
+        for f in [
+            "token",
+            "stored_tokens",
+            "accelerate/default_config.yaml",
+            "hub/models--x/blobs/a",
+            "xet/b",
+        ] {
+            put(hf.join(f));
+        }
+        empty(&hf, not_cache("huggingface")).unwrap();
+        assert_eq!(names(&hf), ["accelerate", "stored_tokens", "token"]);
+
+        let jb = dir.path().join("JetBrains");
+        for f in [
+            "IntelliJIdea2025.2/LocalHistory/changes.storageData",
+            "IntelliJIdea2025.2/caches/a",
+            "IntelliJIdea2025.2/index/b",
+            "PyCharm2024.1/LocalHistory/c",
+            "log.txt",
+        ] {
+            put(jb.join(f));
+        }
+        empty(&jb, not_cache("JetBrains")).unwrap();
+        assert_eq!(names(&jb), ["IntelliJIdea2025.2", "PyCharm2024.1"]);
+        assert_eq!(names(&jb.join("IntelliJIdea2025.2")), ["LocalHistory"]);
+        assert!(jb.join("PyCharm2024.1/LocalHistory/c").is_file());
+
+        // Any other cache goes whole, whatever its names.
+        let other = dir.path().join("tool");
+        put(other.join("token"));
+        put(other.join("x/LocalHistory/y"));
+        empty(&other, not_cache("tool")).unwrap();
+        assert_eq!(names(&other), Vec::<String>::new());
+
+        // Each cache that doesn't come back by itself says what it costs.
+        for (owner, _) in NOT_REFILLED {
+            assert!(not_refilled(owner).is_some(), "{owner}");
+        }
+        assert_eq!(not_refilled("tool"), None);
+    }
+
+    #[test]
+    fn a_folder_named_like_build_output_in_the_home_folder_is_yours() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let none = Keep::default();
+        for (marker, out) in [
+            ("package.json", "dist"),
+            ("build.gradle", "build"),
+            ("build.gradle", ".gradle"),
+            ("Cargo.toml", "target"),
+        ] {
+            std::fs::write(h.join(marker), "").unwrap();
+            std::fs::create_dir_all(h.join(out).join("mine")).unwrap();
+            let err = plan(&h.join(out), h, &none, &[], &[]).unwrap_err();
+            assert!(err.contains("only cleans what it suggests"), "{out}: {err}");
+        }
+        let incremental = h.join("target/debug/incremental");
+        std::fs::create_dir_all(incremental.join("app-1x2y3z")).unwrap();
+        assert!(plan(&incremental, h, &none, &[], &[]).is_err());
+        // One folder down it's a project's.
+        let app = h.join("devel/app");
+        std::fs::create_dir_all(app.join("target/debug")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "").unwrap();
+        assert!(matches!(
+            plan(&app.join("target"), h, &none, &[], &[]),
+            Ok(Step::Delete(_))
+        ));
+        // The real home folder is a home folder whoever asks.
+        if let Some(real) = crate::portable::home_dir() {
+            assert!(is_a_home_folder(&real));
+            assert!(!is_a_home_folder(&real.join("devel")));
+        }
+    }
+
+    #[test]
     fn an_apps_cache_is_emptied_and_macos_own_left_alone() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
@@ -1925,18 +2680,22 @@ mod tests {
         std::os::unix::fs::symlink(at("Documents"), &linked).unwrap();
         let err = plan(&linked, h, &none, &[], &[]).unwrap_err();
         assert!(err.contains("isn't a folder"), "{err}");
-        // Nor with a `/` or `/.` after it, which would follow it.
+        // Nor with a `/` or `/.` after it, which would follow it: still
+        // the link, or not a path as its parts spell it.
         for end in ["/", "/."] {
             let follows = PathBuf::from(format!("{}{end}", linked.display()));
             let err = plan(&follows, h, &none, &[], &[]).unwrap_err();
-            assert!(err.contains("full path"), "{end}: {err}");
+            assert!(
+                err.contains("isn't a folder") || err.contains("full path"),
+                "{end}: {err}"
+            );
         }
         assert!(outside.exists());
     }
 
     #[test]
     fn a_helper_is_an_apps_only_when_the_name_says_which() {
-        use mdif_macos::proc::App;
+        use crate::os::proc::App;
         let app = |pid, name: &str| App {
             pid,
             name: name.into(),
@@ -2161,12 +2920,18 @@ mod tests {
         assert!(refused(&plain, &none).contains("only cleans what it suggests"));
         let modules = project("devel/web", "package.json", "node_modules");
         assert!(refused(&modules, &none).contains("only cleans what it suggests"));
+        // A clone of its own in it (a site deployed from `dist`).
+        let deploy = project("devel/site", "package.json", "dist");
+        std::fs::create_dir_all(deploy.join(".git/objects")).unwrap();
+        assert!(refused(&deploy, &none).contains("only cleans what it suggests"));
+        assert!(!build_output(&deploy));
         assert!(refused(&h.join("devel/app"), &none).contains("only cleans what it suggests"));
 
         // Named like build output but not in a project in a code folder:
         // the home folder's own, or a code folder's.
+        // (The home folder's is no project's at all.)
         let home_target = project("", "Cargo.toml", "target");
-        assert!(refused(&home_target, &none).contains("isn't in a project"));
+        assert!(refused(&home_target, &none).contains("only cleans what it suggests"));
         let root_target = project("devel", "Cargo.toml", "target");
         assert!(refused(&root_target, &none).contains("isn't in a project"));
         let mine = project("", "package.json", "build");
@@ -2206,6 +2971,57 @@ mod tests {
         assert_eq!(done.how, "deleted");
         assert!(!target.exists() && h.join("devel/app/Cargo.toml").exists());
         assert!(h.join("devel/link/target").symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn a_dotnet_builds_bin_and_obj_go_only_beside_its_project_file() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let none = Keep::default();
+        let app = h.join("devel/Shop/Shop.Web");
+        for dir in ["bin/Debug/net8.0", "obj/Debug", "Pages"] {
+            std::fs::create_dir_all(app.join(dir)).unwrap();
+        }
+        std::fs::write(app.join("bin/Debug/net8.0/Shop.Web.dll"), vec![1u8; 10_000]).unwrap();
+        std::fs::write(app.join("obj/project.assets.json"), "{}").unwrap();
+        // No project file yet: a `bin` is where people keep scripts too.
+        for out in ["bin", "obj"] {
+            assert!(!build_output(&app.join(out)), "{out}");
+            assert!(plan(&app.join(out), h, &none, &[], &[]).is_err(), "{out}");
+        }
+        std::fs::write(app.join("Shop.Web.CSPROJ"), "<Project/>").unwrap();
+        if !cfg!(windows) {
+            // Only on Windows: nothing suggests them elsewhere.
+            for out in ["bin", "obj"] {
+                assert!(!build_output(&app.join(out)), "{out}");
+                assert!(plan(&app.join(out), h, &none, &[], &[]).is_err(), "{out}");
+            }
+            return;
+        }
+        // Whatever their case: `BIN` is the folder a build writes `bin` to there.
+        for out in ["bin", "obj", "BIN", "Obj"] {
+            assert!(build_output(&app.join(out)), "{out}");
+            assert!(
+                matches!(
+                    plan(&app.join(out), h, &none, &[], &[]),
+                    Ok(Step::Delete(_))
+                ),
+                "{out}"
+            );
+        }
+        // Only those two names, and not a folder named like a project file.
+        assert!(!build_output(&app.join("Pages")));
+        let scripts = h.join("devel/tools");
+        std::fs::create_dir_all(scripts.join("bin")).unwrap();
+        std::fs::create_dir_all(scripts.join("old.csproj")).unwrap();
+        assert!(!build_output(&scripts.join("bin")));
+        // A repository of its own in it isn't something a build makes.
+        std::fs::create_dir_all(app.join("bin/.git")).unwrap();
+        assert!(!build_output(&app.join("bin")));
+        // Right in the home folder it's yours, whatever lies beside it.
+        std::fs::create_dir_all(h.join("bin")).unwrap();
+        std::fs::write(h.join("Home.csproj"), "").unwrap();
+        assert!(plan(&h.join("bin"), h, &none, &[], &[]).is_err());
     }
 
     #[test]

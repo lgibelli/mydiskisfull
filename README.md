@@ -303,9 +303,11 @@ folders protected by macOS privacy controls, give your terminal Full Disk Access
 | Crate | What it does |
 |---|---|
 | `crates/mdif-macos` | Thin, safe wrappers over macOS calls: `getattrlistbulk` (private size, clone IDs, hard links, dataless/sparse/purgeable flags), `F_LOG2PHYS_EXT` (physical extents), FSEvents, `proc_pid_rusage`, `statfs`, `setiopolicy_np`, `sysctl` (boot time, swap) |
+| `crates/mdif-windows` | The same for Windows, on `windows-sys` (volumes, locks, file identity, processes, the user's folders); the rest is written as `docs/WINDOWS.md` says. `mdif_core::os` picks one of the two |
 | `crates/mdif-core` | Scanner, APFS volumes and snapshots, the reconciled disk map, the watcher, its history store, the forecast, growth per folder, incidents, suggestions and tweaks (reversible settings and configuration profiles) |
 | `crates/mdif-cli` | The `mdif` command |
 | `app/` | The app (SwiftUI): a main window and a glance in the menu bar. It reads everything from the `mdif` in its bundle (`--json`), and `app/check-contract.sh` checks that it can |
+| `app-windows/` | The Windows app (Tauri): the Mac's pages but Time Machine's, a per-user installer, and the watcher started at sign-in. Like the Mac app it measures nothing itself: it runs the `mdif.exe` it installs |
 
 ## The Mac App Store
 
@@ -328,6 +330,31 @@ sandbox changes three more things:
 
 `app/app-store.sh` signs it for the store, packages it and has App Store Connect validate it;
 with `--upload` it sends it there (see [docs/RELEASING.md](docs/RELEASING.md)).
+
+## Windows
+
+`app-windows/` is the Windows edition: the same watcher, forecast and explanations on NTFS, with
+Overview, Storage, Old Files, History, Prevention, Clean Up and Ask AI, in a window installed per
+user (nothing needs an administrator), for x64 and ARM64. CI builds both installers, and installs,
+updates and uninstalls each on a GitHub runner (Windows Server for x64, Windows 11 for ARM64); the
+workspace's tests also pass on a Windows 11 PC. It updates itself as the Mac app does: once a day
+it reads the latest release's `latest.json` from GitHub (nothing else is sent), and Settings →
+Updates offers Install and Restart; each update is signed, and one that isn't is refused.
+
+Each release since 0.1.6 has both installers. They aren't signed for Windows yet, so SmartScreen
+stops the installer with "Windows protected your PC": click **More info**, then **Run anyway**. Before that, the download can be
+checked against `SHA256SUMS-windows.txt` on the release, and against this repository's build
+with `gh attestation verify MyDiskIsFull_<version>_x64-setup.exe --repo lgibelli/mydiskisfull`.
+
+```sh
+app-windows/build.sh                           # x64, on Windows or cross-built from a Mac
+app-windows/build.sh aarch64-pc-windows-msvc   # ARM64
+```
+
+What each needs is in [docs/RELEASING.md](docs/RELEASING.md). Not on Windows yet: a Backups page
+(Time Machine's is a Mac's; one for Windows' backups may come later), Docker's clean-ups, and what each program writes (the write-churn
+alert, History's Writes: Windows counts a pipe's traffic as a process's writes).
+[docs/WINDOWS.md](docs/WINDOWS.md) maps each part to Windows and says what's still open.
 
 ## Contributing
 

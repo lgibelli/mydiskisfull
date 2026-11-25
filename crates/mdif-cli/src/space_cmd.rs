@@ -20,13 +20,25 @@ pub fn file(db: &Path) -> PathBuf {
     db.with_file_name("space.json")
 }
 
-pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> Result<()> {
+pub fn space(
+    db: &Path,
+    json_out: bool,
+    max_age: Option<u64>,
+    refresh: bool,
+    cached: bool,
+) -> Result<()> {
     let keep = crate::keep_cmd::load(db)?;
     let kept = file(db);
     let now = unix_now();
-    let fresh = match max_age {
-        Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
-        _ => None,
+    // `cached`: what's kept, never a scan (the app's first look, which
+    // mustn't start one beside the disk map's).
+    let fresh = if cached {
+        Some(load(&kept).context("Nothing is measured yet: `mdif space` measures the disk.")?)
+    } else {
+        match max_age {
+            Some(age) if !refresh => load(&kept).filter(|m| now - m.measured <= age as i64),
+            _ => None,
+        }
     };
     let measured_now = fresh.is_none();
     let mut m = match fresh {
@@ -55,18 +67,23 @@ pub fn space(db: &Path, json_out: bool, max_age: Option<u64>, refresh: bool) -> 
     };
     // Which simulators can be erased goes by how they are now: a fraction
     // of a second, and only with Xcode's simulators on the disk.
-    if m.home.join(mdif_core::xcode::DEVICES).is_dir() {
+    if cfg!(target_os = "macos") && m.home.join(mdif_core::xcode::DEVICES).is_dir() {
         m.simulators = mdif_core::xcode::simulators();
     }
     // Which system images Android's emulators use, the same way: their
     // settings, a few small files.
     m.avds = mdif_core::android::avds(&m.home).ok();
     // The snapshots as they are now, not as they were at the scan: Time
-    // Machine takes and deletes them by the hour.
-    let snapshots =
-        mdif_core::apfs::local_snapshots(Path::new(mdif_core::map::DATA_ROOT)).unwrap_or_default();
-    let r =
-        space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref());
+    // Machine takes and deletes them by the hour. A Mac's alone, as is a
+    // waiting update.
+    #[cfg(target_os = "macos")]
+    let r = {
+        let snapshots =
+            mdif_core::apfs::local_snapshots(&mdif_core::map::boot_volume()).unwrap_or_default();
+        space::report(&m, &keep, &snapshots).with_update(mdif_core::os_update::staged().as_ref())
+    };
+    #[cfg(not(target_os = "macos"))]
+    let r = space::report(&m, &keep, &[]);
     // Into the history when measured now. One kept from before is there
     // already, at its time, and each clean-up patched into it since at
     // the clean-up's: at its time again, it would say the disk was made
@@ -133,7 +150,7 @@ fn locked<T>(db: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
         .create(true)
         .truncate(false)
         .open(db.with_file_name("space.lock"))?;
-    mdif_macos::fs::lock(&lock)?;
+    mdif_core::os::fs::lock(&lock)?;
     f()
 }
 
@@ -218,6 +235,7 @@ fn print(r: &Report, now: i64) {
             .iter()
             .map(|c| {
                 let what = match c.what {
+                    "trash" if cfg!(windows) => "in the Recycle Bin",
                     "trash" => "in the Trash",
                     "update" => "macOS update",
                     w => w,

@@ -111,6 +111,28 @@ pub struct FsStats {
     pub mount_point: String,
 }
 
+impl FsStats {
+    /// What the volume's history is kept under: its mount point.
+    pub fn history_key(&self) -> String {
+        self.mount_point.clone()
+    }
+}
+
+/// Whether the volume holding `path` records when a file was last read: a
+/// Mac's do (not on every read: see `mdif_core::clean::last_used`), unless
+/// it's mounted `noatime`.
+pub fn records_last_access(path: &Path) -> io::Result<bool> {
+    let c = CString::new(path.as_os_str().as_bytes())?;
+    let mut st = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c` is NUL-ended; `st` is written by a successful call.
+    if unsafe { libc::statfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded.
+    let st = unsafe { st.assume_init() };
+    Ok(st.f_flags & libc::MNT_NOATIME as u32 == 0)
+}
+
 pub fn statfs(path: &Path) -> io::Result<FsStats> {
     let c = CString::new(path.as_os_str().as_bytes())?;
     let mut st = MaybeUninit::<libc::statfs>::uninit();
@@ -235,6 +257,12 @@ pub fn path_of(fsid: FsId, inode: u64) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(&buf[..end])))
 }
 
+/// Device id of the volume holding `path`. The same as [`dev_of`] here: a
+/// mount point is reported as the volume mounted on it.
+pub fn dev_of_volume(path: &Path) -> io::Result<i32> {
+    dev_of(path)
+}
+
 pub fn dev_of(path: &Path) -> io::Result<i32> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::symlink_metadata(path)?.dev() as i32)
@@ -258,6 +286,24 @@ pub fn trash(path: &Path) -> io::Result<std::path::PathBuf> {
         .and_then(|u| u.path())
         .map(|p| std::path::PathBuf::from(p.to_string()))
         .ok_or_else(|| io::Error::other("the Trash didn't say where it went"))
+}
+
+/// A drive's Recycle Bin is Windows'. A Mac's Trash is a folder, measured
+/// as one.
+pub fn recycle_bin_items(_root: &Path) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the Recycle Bin is Windows'; a Mac's Trash is measured as a folder",
+    ))
+}
+
+/// A drive's Recycle Bin is Windows'. A Mac's Trash is a folder, emptied as
+/// one (`clean::empty`).
+pub fn empty_recycle_bin(_root: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the Recycle Bin is Windows'; a Mac's Trash is emptied as a folder",
+    ))
 }
 
 /// What Finder calls available on the volume holding `path`: the free space
@@ -547,6 +593,13 @@ mod tests {
             "{important} vs {st:?}"
         );
         assert!(available_for_important_usage(Path::new("/no/such/place")).is_err());
+    }
+
+    #[test]
+    fn the_startup_volume_records_last_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(records_last_access(tmp.path()).unwrap());
+        assert!(records_last_access(&tmp.path().join("not-there")).is_err());
     }
 
     /// On a disk image of its own, so the real Trash stays as it was: an

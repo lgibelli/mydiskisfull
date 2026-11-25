@@ -10,6 +10,9 @@ use libc::{c_int, c_void};
 // <sys/proc_info.h>
 const PROC_PIDT_SHORTBSDINFO: c_int = 13;
 
+/// Whether [`ProcIo::bytes_written`] is bytes written to the disk: it is (`ri_diskio_byteswritten`).
+pub const WRITES_ARE_DISK_WRITES: bool = true;
+
 #[derive(Debug, Clone)]
 pub struct ProcIo {
     pub pid: i32,

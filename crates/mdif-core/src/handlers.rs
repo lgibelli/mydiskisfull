@@ -262,6 +262,119 @@ pub const HANDLERS: &[Handler] = &[
     },
 ];
 
+/// What apps keep on Windows, from the home folder too. Looked up only there:
+/// on a Mac, a Dropbox folder in the home is another app's, and the ways to
+/// keep less differ. Nothing in them is emptied, moved to the Recycle Bin or
+/// opened from the app yet: the way is said.
+pub const WINDOWS: &[Handler] = &[
+    Handler {
+        path: "OneDrive*",
+        title: "OneDrive's downloads",
+        what: "Files from OneDrive kept on this PC as well as in the cloud.",
+        how: "In File Explorer, Free up space (right-click a file or folder) keeps it in OneDrive \
+              only, and Always keep on this device does the opposite. A file you open downloads \
+              again.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "iCloudDrive",
+        title: "iCloud Drive's downloads",
+        what: "Files from iCloud Drive kept on this PC as well as in iCloud.",
+        how: "In File Explorer, Free up space (right-click a file or folder) keeps it in iCloud \
+              only, and Always keep on this device does the opposite. A file you open downloads \
+              again.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "Dropbox*",
+        title: "Dropbox's downloads",
+        what: "Files from Dropbox kept on this PC as well as in the cloud.",
+        how: "In File Explorer, Make online-only (right-click a file or folder) keeps it in \
+              Dropbox only. Dropbox's preferences can make new files online-only too.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    // iTunes from Apple's site keeps them in the roaming profile; the Apple
+    // Devices app and iTunes from the Microsoft Store, in the home folder.
+    Handler {
+        path: "AppData/Roaming/Apple Computer/MobileSync/Backup",
+        title: "iPhone and iPad backups",
+        what: "Backups made by connecting a device to this PC.",
+        how: IPHONE_BACKUPS,
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "Apple/MobileSync/Backup",
+        title: "iPhone and iPad backups",
+        what: "Backups made by connecting a device to this PC.",
+        how: IPHONE_BACKUPS,
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    // The app from Spotify's site, then the one from the Microsoft Store.
+    Handler {
+        path: "AppData/Local/Spotify/Storage",
+        title: "Spotify's cache",
+        what: "Music Spotify keeps to play it again without downloading it.",
+        how: "Spotify → Settings → Storage → Clear cache. Songs you downloaded stay.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "AppData/Local/Packages/SpotifyAB.SpotifyMusic_*",
+        title: "Spotify's cache",
+        what: "Music Spotify keeps to play it again without downloading it.",
+        how: "Spotify → Settings → Storage → Clear cache. Songs you downloaded stay.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "AppData/Roaming/Slack",
+        title: "Slack's data",
+        what: "Slack's caches and what it keeps of your workspaces.",
+        how: "Slack's menu (☰) → Help → Troubleshooting → Clear Cache and Restart.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "AppData/Roaming/Telegram Desktop",
+        title: "Telegram's media",
+        what: "Photos, videos and files Telegram downloaded: they stay in Telegram's cloud.",
+        how: "Telegram → Settings → Advanced → Manage local storage clears them, and can limit \
+              how much is kept.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+    Handler {
+        path: "AppData/Local/Packages/MSTeams_8wekyb3d8bbwe",
+        title: "Teams' data",
+        what: "What Teams keeps of chats and meetings: its caches, which only grow.",
+        how: "Microsoft's way to clear it: quit Teams, then in Settings → Apps → Installed apps, \
+              Microsoft Teams → Advanced options → Reset, which signs you out. Your chats stay \
+              in the cloud.",
+        empty: &[],
+        trash: false,
+        open: None,
+    },
+];
+
+const IPHONE_BACKUPS: &str = "In the Apple Devices app, a device's General → Manage Backups \
+                              lists them, with their dates, to delete the ones you don't need \
+                              (in iTunes, Edit → Preferences → Devices). Backups in iCloud \
+                              aren't touched.";
+
 /// Whose cache `rel` (from the home folder) is, when it's one of a
 /// handler's folders to empty: its app's bundle id.
 pub fn cache_owner(rel: &Path) -> Option<&'static str> {
@@ -282,7 +395,11 @@ pub fn trashable(rel: &Path) -> bool {
 
 /// The handler for `rel` (from the home folder), if one knows it.
 pub fn find(rel: &Path) -> Option<&'static Handler> {
-    HANDLERS.iter().find(|h| matches(h.path, rel))
+    let windows: &[Handler] = if cfg!(windows) { WINDOWS } else { &[] };
+    HANDLERS
+        .iter()
+        .chain(windows)
+        .find(|h| matches(h.path, rel))
 }
 
 pub(crate) fn matches(pattern: &str, rel: &Path) -> bool {
@@ -291,7 +408,13 @@ pub(crate) fn matches(pattern: &str, rel: &Path) -> bool {
         let Some(name) = names.next().and_then(|n| n.to_str()) else {
             return false;
         };
-        if !glob(p, name) {
+        // Windows tells names apart whatever their case.
+        let fits = if cfg!(windows) {
+            glob(&p.to_ascii_lowercase(), &name.to_ascii_lowercase())
+        } else {
+            glob(p, name)
+        };
+        if !fits {
             return false;
         }
     }
@@ -376,7 +499,7 @@ mod tests {
         assert!(find(&signal.join("ab")).is_none());
         assert!(find(Path::new("Library/Application Support/Signal")).is_none());
         assert!(find(Path::new("Pictures/Photos Library")).is_none());
-        for h in HANDLERS {
+        for h in HANDLERS.iter().chain(WINDOWS) {
             assert!(
                 !h.path.starts_with('/') && !h.path.ends_with('/'),
                 "{}",
@@ -386,6 +509,62 @@ mod tests {
             if let Some(o) = h.open {
                 assert!(o.app.is_some() != o.url.is_some(), "{}", h.path);
             }
+        }
+    }
+
+    #[test]
+    fn windows_apps_are_known_by_their_place_there_only() {
+        let known = |rel: &str| {
+            WINDOWS
+                .iter()
+                .find(|h| matches(h.path, Path::new(rel)))
+                .map(|h| h.title)
+        };
+        for (rel, title) in [
+            ("OneDrive", "OneDrive's downloads"),
+            ("OneDrive - Contoso", "OneDrive's downloads"),
+            ("iCloudDrive", "iCloud Drive's downloads"),
+            ("Dropbox (Personal)", "Dropbox's downloads"),
+            (
+                "AppData/Roaming/Apple Computer/MobileSync/Backup",
+                "iPhone and iPad backups",
+            ),
+            ("Apple/MobileSync/Backup", "iPhone and iPad backups"),
+            ("AppData/Local/Spotify/Storage", "Spotify's cache"),
+            (
+                "AppData/Local/Packages/SpotifyAB.SpotifyMusic_zpdnekdrzrea0",
+                "Spotify's cache",
+            ),
+            ("AppData/Roaming/Slack", "Slack's data"),
+            ("AppData/Roaming/Telegram Desktop", "Telegram's media"),
+            (
+                "AppData/Local/Packages/MSTeams_8wekyb3d8bbwe",
+                "Teams' data",
+            ),
+        ] {
+            assert_eq!(known(rel), Some(title), "{rel}");
+        }
+        // Not what's in them, nor what's around them.
+        assert_eq!(known("AppData/Roaming/Slack/Cache"), None);
+        assert_eq!(known("AppData/Roaming"), None);
+        assert_eq!(known("Documents/OneDrive"), None);
+        // Looked up on Windows only, where names match whatever their case.
+        let found = |rel: &str| find(Path::new(rel)).map(|h| h.title);
+        assert_eq!(
+            found("Dropbox"),
+            cfg!(windows).then_some("Dropbox's downloads")
+        );
+        assert_eq!(
+            found("appdata/roaming/SLACK"),
+            cfg!(windows).then_some("Slack's data")
+        );
+        // Nothing is emptied, moved or opened from the app on Windows yet.
+        for h in WINDOWS {
+            assert!(
+                h.empty.is_empty() && !h.trash && h.open.is_none(),
+                "{}",
+                h.path
+            );
         }
     }
 }

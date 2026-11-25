@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::os::fs::{self, FsStats};
 use anyhow::{Context, Result, bail, ensure};
-use mdif_macos::fs::{self, FsStats};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,7 +149,8 @@ fn parse_snapshots(text: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -212,7 +213,7 @@ com.apple.os.update-MSUPrepareUpdate
 
     #[test]
     fn finds_the_boot_data_volume() {
-        let st = mdif_macos::fs::statfs(Path::new("/System/Volumes/Data")).unwrap();
+        let st = crate::os::fs::statfs(Path::new("/System/Volumes/Data")).unwrap();
         let (c, v) = find_volume(containers().unwrap(), &st.device).unwrap();
         assert_eq!(v.label(), "Data");
         assert!(c.capacity_ceiling > v.capacity_in_use);

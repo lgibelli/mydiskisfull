@@ -10,7 +10,8 @@
 # Machine, a backup started, a sign-out) comes from app/Tests/*.json; Rust
 # tests beside each command (status_cmd.rs, tweaks_cmd.rs, tidy_cmd.rs,
 # alerts_cmd.rs, clean_cmd.rs, timemachine_cmd.rs, knowledge_cmd.rs) hold
-# those fixtures to the real serialization.
+# those fixtures to the real serialization. map.json is a made-up Windows
+# drive (the Windows app's window shows it when opened in a browser).
 #
 #   app/build.sh && app/check-contract.sh
 #
@@ -88,6 +89,7 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
     alerts=app/Tests/alerts.json \
     timemachine=app/Tests/timemachine.json \
     docker=app/Tests/docker.json \
+    map=app/Tests/map.json \
     clean=app/Tests/clean.json \
     exclusion=app/Tests/exclude.json \
     started=app/Tests/back-up.json \

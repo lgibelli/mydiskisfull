@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::os::changes;
+use crate::os::{fs, proc};
 use anyhow::{Context, Result};
-use mdif_macos::fsevents::{self, Stream, flag};
-use mdif_macos::{fs, proc};
 
 use crate::alerts;
 use crate::forecast::{DAY, HOUR};
@@ -57,6 +57,11 @@ pub struct Watcher {
     access_probes: Vec<PathBuf>,
     /// Free space at the last sample.
     last_avail: Option<u64>,
+    /// When a folder period was measured but couldn't be written (the history
+    /// couldn't commit: a full disk): what it found goes with the next sample
+    /// ([`Unsaved`]), but not its record of what it looked at, so the next
+    /// sample written says there was a gap then.
+    unrecorded: Option<i64>,
     /// What a sample couldn't record (the history busy, the disk full):
     /// the processes' writes and the folders' growth since the one before,
     /// added to the next sample's rather than lost.
@@ -280,7 +285,7 @@ impl Watcher {
         fs::forbid_dataless_materialization()?;
         let key = fs::statfs(volume)
             .with_context(|| format!("statfs {}", volume.display()))?
-            .mount_point;
+            .history_key();
         Ok(Watcher {
             store,
             volume: volume.to_path_buf(),
@@ -296,6 +301,7 @@ impl Watcher {
             period_writes: HashMap::new(),
             access_probes: Vec::new(),
             last_avail: None,
+            unrecorded: None,
             unsaved: Unsaved::default(),
         })
     }
@@ -334,34 +340,57 @@ impl Watcher {
                 .meta(&format!("owners.{}.{k}", self.key))?
                 .and_then(|v| v.parse().ok()))
         };
-        // An ID only means something in the history it was saved from, and
-        // never ahead of where it is now (its history purged, the Mac
-        // migrated): else from now, as on a first run.
-        let history = fs::dev_of(&self.volume).ok().and_then(fsevents::history_id);
+        // The boot volume's paths are reported through its firmlinks
+        // (`/Users`, `/private`, ...), so watch from the root. Elsewhere, from
+        // where the volume is mounted (not its history key, which can be its
+        // identity rather than a path).
+        let mount = fs::statfs(&self.volume)
+            .with_context(|| format!("statfs {}", self.volume.display()))?
+            .mount_point;
+        let root = if cfg!(target_os = "macos") && mount == DATA_ROOT {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(mount)
+        };
+        // A position only means something in the history it was saved from,
+        // and never ahead of where it is now (its history purged, the Mac
+        // migrated, the journal made again): else from now, as on a first run.
+        let history = changes::history(&self.volume);
+        let history_key = format!("owners.{}.history", self.key);
         let same = self
             .store
-            .meta(&format!("owners.{}.history", self.key))?
+            .meta(&history_key)?
             .is_none_or(|h| Some(h) == history);
-        let now_id = fsevents::current_event_id();
+        // The journal's position now, taken now, not at the first replay.
+        let now_id = changes::now(&root);
         let (last_id, last_wall) = match (saved("id")?, saved("wall")?) {
-            (Some(id), Some(wall)) if resumable(id as u64, now_id, same) => (id as u64, wall),
+            // 0 is "no journal could be asked" on Windows, not a position (on a
+            // Mac it is the start of all the history there is, and a position).
+            (Some(id), Some(wall))
+                if (id != 0 || cfg!(target_os = "macos")) && resumable(id as u64, now_id, same) =>
+            {
+                (id as u64, wall)
+            }
             _ => (now_id, unix_now()),
         };
         if let Some(h) = &history {
-            self.store
-                .set_meta(&format!("owners.{}.history", self.key), h)?;
+            self.store.set_meta(&history_key, h)?;
         }
-        // The boot volume's paths are reported through its firmlinks
-        // (`/Users`, `/private`, ...), so watch from the root.
-        let root = if self.key == DATA_ROOT {
-            PathBuf::from("/")
-        } else {
-            PathBuf::from(&self.key)
-        };
         self.user = alerts::Settings::load(&self.store)?;
-        let mut tracker = Tracker::new(rules, fs::dev_of(&self.volume).ok(), every.max(1));
+        let mut tracker = Tracker::new(rules, fs::dev_of_volume(&self.volume).ok(), every.max(1));
         if let Ok(id) = fs::fsid(&self.volume) {
             tracker.follow_moves(id);
+        }
+        // What the watcher before this one was following: a file held open
+        // while it grows is silent in the journal, so nothing past the
+        // checkpoint would bring its folder back.
+        if let Some(text) = self.store.meta(&format!("owners.{}.following", self.key))? {
+            tracker.resume(
+                serde_json::from_str::<Vec<String>>(&text)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(PathBuf::from),
+            );
         }
         self.owners = Some(Owners {
             tracker,
@@ -382,7 +411,7 @@ impl Watcher {
         &self.store
     }
 
-    /// The volume's mount point, the key its history is stored under.
+    /// What the volume's history is stored under (`FsStats::history_key`).
     pub fn volume_key(&self) -> &str {
         &self.key
     }
@@ -390,12 +419,32 @@ impl Watcher {
     pub fn sample(&mut self, now: i64) -> Result<Sample> {
         let (cpu0, written0) = proc::own_usage();
         let st = fs::statfs(&self.volume)?;
+        // A disk swapped under the same path (a drive letter) is another history.
+        let now_key = st.history_key();
+        if now_key != self.key {
+            // The folders being followed and the journal's position belong to the
+            // volume that was there: they stop, rather than count another disk's
+            // changes under this one's name.
+            if self.owners.take().is_some() {
+                eprintln!("the volume at {} changed: folder tracking stops", self.key);
+                // No more periods: none are projected into the cost either.
+                self.cost.every = 0;
+            }
+            self.key = now_key;
+        }
         let point = SpacePoint {
             ts: now,
             total: st.total,
             avail: st.avail,
         };
-        let writes = self.write_deltas(proc::own_processes());
+        // A counter that isn't the disk's would make network senders look like
+        // writers, and a false churn incident.
+        let procs = if proc::WRITES_ARE_DISK_WRITES {
+            proc::own_processes()
+        } else {
+            Vec::new()
+        };
+        let writes = self.write_deltas(procs);
         if let Some(o) = self.owners.as_mut() {
             // The first sample starts the first period.
             o.last_period.get_or_insert(now);
@@ -414,7 +463,7 @@ impl Watcher {
         let access = match self.access_probes.as_slice() {
             [] => None,
             probes => {
-                let fda = mdif_macos::sys::full_disk_access(probes);
+                let fda = crate::os::sys::full_disk_access(probes);
                 privacy::avoid_prompts(fda != Some(true));
                 Some(match fda {
                     Some(true) => "1",
@@ -430,6 +479,7 @@ impl Watcher {
                 self.set_steady();
             }
         }
+        let mut missed = false;
         let (growth, period) = match self.owners.as_mut() {
             Some(o) if due => {
                 let heavy: Vec<i32> = self
@@ -440,9 +490,24 @@ impl Watcher {
                     .collect();
                 let first = o.periods == 0;
                 let before = proc::own_usage().0;
-                let (g, p) = o.period(now, &heavy)?;
-                let spent = proc::own_usage().0.saturating_sub(before);
-                (g, Some((p, spent, first)))
+                match o.period(now, &heavy) {
+                    Ok((g, p)) => {
+                        let spent = proc::own_usage().0.saturating_sub(before);
+                        (g, Some((p, spent, first)))
+                    }
+                    // Free space is sampled all the same: a journal that can't be
+                    // read is a gap in the folders, not in the forecast. Tried
+                    // again a period later, not at every sample.
+                    Err(e) => {
+                        eprintln!("the folders weren't measured at {now}: {e:#}");
+                        o.last_period = Some(now);
+                        // Recorded as a gap below, so a report says that the folders
+                        // weren't all checked; but not as a period, which would
+                        // be measured growth that incident detection reads as nil.
+                        missed = true;
+                        (Vec::new(), None)
+                    }
+                }
             }
             _ => (Vec::new(), None),
         };
@@ -452,6 +517,7 @@ impl Watcher {
         if let (Some(o), Some(p), Some((cpu, _))) = (&self.owners, period, spent) {
             let last = LastPeriod {
                 at: now,
+                gaps: p.gaps,
                 listed: p.listed,
                 entries: p.entries,
                 deferred: p.deferred,
@@ -460,10 +526,52 @@ impl Watcher {
                 biggest: o.biggest.clone(),
             };
             meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
+            if p.gaps > 0 {
+                meta.push((GAP_KEY.to_string(), now.to_string()));
+            }
         }
-        if let (Some(o), Some(_)) = (&self.owners, period) {
+        if missed {
+            let last = LastPeriod {
+                at: now,
+                gaps: 1,
+                listed: 0,
+                entries: 0,
+                deferred: 0,
+                skipped: 0,
+                cpu_us: 0,
+                biggest: Vec::new(),
+            };
+            meta.push((PERIOD_KEY.to_string(), serde_json::to_string(&last)?));
+            meta.push((GAP_KEY.to_string(), now.to_string()));
+        } else if period.is_some_and(|p| p.gaps == 0)
+            && let Some(at) = recorded_gap(&self.store)?
+        {
+            // Kept apart before a clean period replaces the one it was found in
+            // (a history from before the gap time had its own key).
+            meta.push((GAP_KEY.to_string(), at.to_string()));
+        }
+        // A period that couldn't be written is a gap as of then, unless this
+        // sample has a newer one of its own (written last, it is what's kept).
+        if !(missed || period.is_some_and(|p| p.gaps > 0))
+            && let Some(at) = self.unrecorded
+        {
+            meta.push((GAP_KEY.to_string(), at.to_string()));
+        }
+        // The checkpoint is kept too when the attempt failed (it is where the next
+        // one starts), so a restart in between doesn't skip what happened since.
+        if let (Some(o), true) = (&self.owners, missed || period.is_some()) {
             meta.push((format!("owners.{}.id", self.key), o.last_id.to_string()));
             meta.push((format!("owners.{}.wall", self.key), o.last_wall.to_string()));
+            let following: Vec<String> = o
+                .tracker
+                .following()
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            meta.push((
+                format!("owners.{}.following", self.key),
+                serde_json::to_string(&following)?,
+            ));
         }
         if let Some(granted) = access {
             meta.push((ACCESS_KEY.to_string(), format!("{now} {granted}")));
@@ -483,9 +591,17 @@ impl Watcher {
         let meta: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let (mut writes, mut growth) = (writes, growth);
         self.unsaved.add_to(&mut writes, &mut growth);
-        if let Err(e) = self.store.record(&self.key, point, &writes, &growth, &meta) {
-            self.unsaved = Unsaved { writes, growth };
-            return Err(e);
+        match self.store.record(&self.key, point, &writes, &growth, &meta) {
+            Ok(()) => self.unrecorded = None,
+            Err(e) => {
+                // The folders' checkpoint has moved on past what this period
+                // looked at.
+                if missed || period.is_some() {
+                    self.unrecorded = Some(now);
+                }
+                self.unsaved = Unsaved { writes, growth };
+                return Err(e);
+            }
         }
         if now - self.last_compact >= HOUR {
             self.store.compact(now)?;
@@ -549,34 +665,36 @@ impl Watcher {
                         .unwrap_or(0);
                     return size.map(|s| (s as i64 + since).max(0) as u64);
                 }
-                // A prefix (`~/Movies`) owns only the files directly in it:
-                // its growth is set against those, not against all below it
-                // (a recording growing next to a 400 GB library).
-                let size = if rules
-                    .as_ref()
-                    .is_some_and(|r| r.owns_only_its_files(Path::new(owner)))
-                {
-                    mdif_macos::bulk::read_dir_with(
-                        Path::new(owner),
-                        mdif_macos::bulk::Detail::Sizes,
-                    )
-                    .ok()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter(|e| e.kind != mdif_macos::bulk::Kind::Dir)
-                            .map(crate::owners::entry_size)
-                            .sum()
-                    })
-                } else {
-                    let opts = scan::Options {
-                        max_depth: 0,
-                        min_node: u64::MAX,
-                        big_files: None,
-                    };
-                    scan::scan(Path::new(owner), &opts)
+                let opts = scan::Options {
+                    max_depth: 0,
+                    min_node: u64::MAX,
+                    big_files: None,
+                };
+                let path = Path::new(owner);
+                let size = if !privacy::may_open(path) {
+                    None
+                } else if rules.as_ref().is_some_and(|r| r.owns_only_its_files(path)) {
+                    // A prefix (`~/Movies`) owns only the files directly in it:
+                    // its growth is set against those, not against all below it
+                    // (a recording growing next to a 400 GB library).
+                    crate::os::bulk::read_dir_with(path, crate::os::bulk::Detail::Sizes)
                         .ok()
-                        .map(|s| s.root.totals.allocated)
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter(|e| e.kind != crate::os::bulk::Kind::Dir)
+                                .map(crate::owners::entry_size)
+                                .sum()
+                        })
+                } else {
+                    match std::fs::symlink_metadata(path) {
+                        // A file directly in a folder above where owners are (the
+                        // home folder, a drive's root) is an owner of its own.
+                        Ok(m) if m.is_file() => Some(crate::portable::allocated(path, &m)),
+                        _ => scan::scan(path, &opts)
+                            .ok()
+                            .map(|s| s.root.totals.allocated),
+                    }
                 };
                 sizes.insert(owner.to_string(), (now, size));
                 size
@@ -652,24 +770,12 @@ impl Owners {
     /// files the `heavy` writers have open, and update the sizes.
     fn period(&mut self, now: i64, heavy: &[i32]) -> Result<(Vec<(String, i64)>, Period)> {
         let wall = unix_now();
-        let mut stream = Stream::start(&[&self.root], self.last_id, Duration::from_millis(50))
-            .context("starting FSEvents")?;
-        let deadline = std::time::Instant::now() + REPLAY_TIMEOUT;
-        let mut events = Vec::new();
-        let mut done = false;
-        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-            match stream.next_timeout(left) {
-                Some(e) if e.flags & flag::HISTORY_DONE != 0 => {
-                    done = true;
-                    break;
-                }
-                Some(e) => events.push(e),
-                None => break,
-            }
-        }
-        drop(stream);
+        let replay = changes::replay(&self.root, self.last_id, REPLAY_TIMEOUT)
+            .context("replaying the file-system journal")?;
+        let (mut events, done) = (replay.events, replay.complete);
         let replayed = events.len();
-        if let Some(id) = events.iter().map(|e| e.id).max() {
+        // Where the journal says to resume, or else after the newest event.
+        if let Some(id) = replay.next.or_else(|| events.iter().map(|e| e.id).max()) {
             self.last_id = id;
         }
         let mut open_dirs: Vec<PathBuf> = heavy
@@ -680,7 +786,7 @@ impl Owners {
         open_dirs.sort();
         open_dirs.dedup();
         let open_files = open_dirs.len();
-        events.extend(open_dirs.into_iter().map(|path| fsevents::Event {
+        events.extend(open_dirs.into_iter().map(|path| changes::Event {
             path,
             flags: 0,
             id: 0,
@@ -725,12 +831,17 @@ fn resumable(saved: u64, now: u64, same: bool) -> bool {
 
 const ACCESS_KEY: &str = "watch.full_disk_access";
 const PERIOD_KEY: &str = "watch.last_period";
+const GAP_KEY: &str = "watch.last_gap";
 
 /// The last owners period, as recorded: what it listed and what it cost.
 /// Listing is nearly all of a period's cost, so this says where it went.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LastPeriod {
     pub at: i64,
+    /// Parts of the journal that weren't seen (a volume without a readable one
+    /// is a gap every period): what was measured is less than what happened.
+    #[serde(default)]
+    pub gaps: usize,
     pub listed: usize,
     pub entries: usize,
     pub deferred: usize,
@@ -738,6 +849,16 @@ pub struct LastPeriod {
     pub cpu_us: u64,
     /// The directories with the most entries, most first.
     pub biggest: Vec<(String, usize)>,
+}
+
+/// When the folders last weren't all checked (a gap in the journal, or a period
+/// that couldn't run), if they ever weren't.
+pub fn recorded_gap(store: &Store) -> Result<Option<i64>> {
+    if let Some(at) = store.meta(GAP_KEY)?.and_then(|v| v.parse().ok()) {
+        return Ok(Some(at));
+    }
+    // A history from before the gap time was kept apart: the last period's own.
+    Ok(recorded_period(store)?.filter(|p| p.gaps > 0).map(|p| p.at))
 }
 
 pub fn recorded_period(store: &Store) -> Result<Option<LastPeriod>> {
@@ -823,8 +944,15 @@ pub fn run(
             Err(e) => on_sample(Err(e)),
         }
         let next = (now / step + 1) * step;
-        let wait = (next - unix_now()).max(1) as u64;
-        std::thread::sleep(Duration::from_secs(wait));
+        let mut wait = (next - unix_now()).max(1) as u64;
+        // Windows has no signal to wake the sleep with, so `stop` is looked at
+        // every second; elsewhere the process is ended from outside.
+        let chunk = if cfg!(windows) { 1 } else { wait };
+        while wait > 0 && !stop() {
+            let nap = wait.min(chunk);
+            std::thread::sleep(Duration::from_secs(nap));
+            wait -= nap;
+        }
     }
 }
 
@@ -856,6 +984,41 @@ mod tests {
     }
 
     #[test]
+    fn the_last_gap_is_kept_apart_and_found_in_an_older_history() {
+        let store = Store::open_in_memory().unwrap();
+        let point = SpacePoint {
+            ts: 1_000,
+            total: 10,
+            avail: 5,
+        };
+        assert_eq!(recorded_gap(&store).unwrap(), None);
+        // A history from before the gap time had its own key: the period's.
+        let old = r#"{"at":900,"gaps":2,"listed":0,"entries":0,"deferred":0,"skipped":0,"cpu_us":0,"biggest":[]}"#;
+        store
+            .record("v", point, &[], &[], &[(PERIOD_KEY, old)])
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(900));
+        // Its own key wins once there is one, and survives a clean period.
+        let clean = r#"{"at":1100,"gaps":0,"listed":1,"entries":1,"deferred":0,"skipped":0,"cpu_us":0,"biggest":[]}"#;
+        store
+            .record(
+                "v",
+                point,
+                &[],
+                &[],
+                &[(GAP_KEY, "950"), (PERIOD_KEY, clean)],
+            )
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(950));
+        store
+            .record("v", point, &[], &[], &[(PERIOD_KEY, clean)])
+            .unwrap();
+        assert_eq!(recorded_gap(&store).unwrap(), Some(950));
+    }
+
+    // Needs the list of processes, which Windows doesn't give yet.
+    #[cfg(target_os = "macos")]
+    #[test]
     fn samples_space_and_measures_its_own_writes() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = Watcher::new(Store::open_in_memory().unwrap(), dir.path()).unwrap();
@@ -868,7 +1031,7 @@ mod tests {
         std::fs::write(&f, vec![1u8; 8 << 20]).unwrap();
         std::fs::File::open(&f).unwrap().sync_all().unwrap();
         let second = w.sample(1_300).unwrap();
-        let me = mdif_macos::proc::own_processes()
+        let me = crate::os::proc::own_processes()
             .into_iter()
             .find(|p| p.pid == std::process::id() as i32)
             .unwrap()
@@ -969,6 +1132,8 @@ mod tests {
         assert_eq!(half.with_user(&s).churn.min_written, 1_000_000_000);
     }
 
+    // Probes are macOS's (TCC); Windows has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_journal_is_resumed_only_where_it_can_be() {
         assert!(resumable(100, 200, true));
@@ -978,12 +1143,16 @@ mod tests {
         // Another history altogether.
         assert!(!resumable(100, 200, false));
         // This Mac's volume has one, and it is read the same twice.
-        let dev = mdif_macos::fs::dev_of(Path::new("/")).unwrap();
-        let id = fsevents::history_id(dev);
-        assert!(id.as_ref().is_some_and(|h| h.len() == 32), "{id:?}");
-        assert_eq!(fsevents::history_id(dev), id);
+        #[cfg(target_os = "macos")]
+        {
+            let id = changes::history(Path::new("/"));
+            assert!(id.as_ref().is_some_and(|h| h.len() == 32), "{id:?}");
+            assert_eq!(changes::history(Path::new("/")), id);
+        }
     }
 
+    // Probes are macOS's (TCC); Windows has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn full_disk_access_is_recorded_at_every_sample() {
         // A sample without access switches prompts off for the process.

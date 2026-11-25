@@ -310,7 +310,8 @@ fn said(out: &Output) -> String {
     format!("simctl: {}", printable(&text))
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

@@ -52,7 +52,7 @@ pub fn show(json_out: bool) -> Result<()> {
     );
     println!(
         "`mdif knowledge update` downloads a newer list when there is one, signed like the \
-         app's updates; nothing about this Mac is sent."
+         app's updates; nothing about {THIS} is sent."
     );
     Ok(())
 }
@@ -207,16 +207,24 @@ pub fn missing(min_mb: u64, json_out: bool) -> Result<()> {
         return Ok(());
     }
     if measured.is_none() {
-        println!(
-            "Not measured yet: `mdif space` measures the disk (about 30 s). From the history alone:"
-        );
+        if cfg!(target_os = "macos") {
+            println!(
+                "Not measured yet: `mdif space` measures the disk (about 30 s). From the history alone:"
+            );
+        } else {
+            println!("Not measured yet. From the history alone:");
+        }
+    }
+    if found.is_empty() && measured.is_none() && !cfg!(target_os = "macos") {
+        println!("No folder has been measured on this PC yet, so nothing can be said about them.");
+        return Ok(());
     }
     if found.is_empty() {
-        println!("Something is said about every folder of {min_mb} MB or more on this Mac.");
+        println!("Something is said about every folder of {min_mb} MB or more on {THIS}.");
         return Ok(());
     }
     println!(
-        "Nothing in particular is known about {} folder{} on this Mac ({} or more, or grown as \
+        "Nothing in particular is known about {} folder{} on {THIS} ({} or more, or grown as \
          much in a week):",
         found.len(),
         if found.len() == 1 { "" } else { "s" },
@@ -242,6 +250,9 @@ pub fn missing(min_mb: u64, json_out: bool) -> Result<()> {
     Ok(())
 }
 
+/// This computer, as said.
+const THIS: &str = if cfg!(windows) { "this PC" } else { "this Mac" };
+
 pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> Result<()> {
     let p = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
     let q = mdif_core::ask::question(&p, &home(), size).map_err(|e| {
@@ -254,8 +265,9 @@ pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> R
     let me = chatgpt::account(&dir);
     if dry_run {
         if json_out {
-            let s =
-                json!({"name": q.name, "bytes": q.bytes, "macos": q.macos, "account": me.email});
+            // `macos`, or `windows`: the system's version under its name.
+            let mut s = json!({"name": q.name, "bytes": q.bytes, "account": me.email});
+            s[mdif_core::ask::SYSTEM.to_lowercase()] = json!(q.system);
             println!("{}", serde_json::to_string_pretty(&s)?);
         } else {
             match &me.email {
@@ -269,7 +281,7 @@ pub fn ask(folder: &Path, size: Option<u64>, dry_run: bool, json_out: bool) -> R
             if let Some(b) = q.bytes {
                 println!("  {}", bytes(b));
             }
-            println!("  macOS {}", q.macos);
+            println!("  {} {}", mdif_core::ask::SYSTEM, q.system);
             println!("Nothing else: nothing inside the folder, nothing about you.");
         }
         return Ok(());
@@ -310,9 +322,7 @@ pub fn sign_in(json_out: bool) -> Result<()> {
                 chatgpt::printable_url(url)
             );
         }
-        let opened = std::process::Command::new("/usr/bin/open")
-            .arg(url)
-            .status();
+        let opened = mdif_core::tools::opener().arg(url).status();
         if !opened.is_ok_and(|s| s.success()) {
             eprintln!("(The browser didn't open.)");
         }

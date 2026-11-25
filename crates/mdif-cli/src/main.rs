@@ -1,6 +1,13 @@
-//! `mdif`: the MyDiskIsFull command line.
+// `mdif`: the MyDiskIsFull command line. (A plain comment: `watch_main.rs` includes this file.)
 
+#[cfg(not(windows))]
 mod agent_cmd;
+#[cfg(windows)]
+mod agent_windows;
+#[cfg(not(windows))]
+use agent_cmd as agent;
+#[cfg(windows)]
+use agent_windows as agent;
 mod alerts_cmd;
 mod clean_cmd;
 mod docker_cmd;
@@ -19,7 +26,7 @@ mod writers_cmd;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use mdif_core::map;
 use mdif_core::scan::Options;
@@ -72,8 +79,7 @@ enum Cmd {
         /// Print errors only
         #[arg(long)]
         quiet: bool,
-        /// Append errors to ~/Library/Logs/MyDiskIsFull/watch.log
-        #[arg(long)]
+        #[arg(long, help = LOG_HELP)]
         log: bool,
         /// Exit when standard input closes: the app that started it quit
         #[arg(long)]
@@ -119,8 +125,9 @@ enum Cmd {
     },
     /// Do the clean-ups a suggestion offers: remove finished worktrees,
     /// delete build output, move what an app left behind to the Trash,
-    /// delete local Time Machine snapshots, remove what Docker can. Each is
-    /// checked again first
+    /// delete local Time Machine snapshots, remove what Docker can (on
+    /// Windows, build output, a project's packages and finished worktrees so
+    /// far). Each is checked again first
     Clean {
         /// What a suggestion offers to clean (its action's paths; a local
         /// snapshot by its name, as `tmutil listlocalsnapshots /` gives it;
@@ -148,7 +155,8 @@ enum Cmd {
         db: PathBuf,
     },
     /// Clean-ups the watcher does once a day, each once you turn it on: old
-    /// simulators, old Rust build caches, caches apps stopped using
+    /// build folders, node_modules and Rust build caches (on a Mac also old
+    /// simulators, and caches apps stopped using)
     Tidy {
         #[command(subcommand)]
         action: Option<TidyAction>,
@@ -171,6 +179,7 @@ enum Cmd {
     /// Docker: what `docker system prune` would remove, item by item, and
     /// the images no container uses (`-a`). `mdif clean <item>` removes one;
     /// `mdif clean docker:old` what Docker hasn't used in a week
+    #[command(hide = !cfg!(target_os = "macos"))]
     Docker {
         /// Print the list as JSON
         #[arg(long)]
@@ -184,6 +193,7 @@ enum Cmd {
     },
     /// Time Machine: what goes into the backups, what the local snapshots
     /// hold and why, and the build folders and caches still backed up
+    #[command(hide = !cfg!(target_os = "macos"))]
     Timemachine {
         #[command(subcommand)]
         action: Option<TimeMachineAction>,
@@ -209,7 +219,7 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
         /// Volume (the automatic free-space floor depends on its size)
-        #[arg(long, default_value = map::DATA_ROOT, global = true)]
+        #[arg(long, default_value_os_t = map::boot_volume(), global = true)]
         volume: PathBuf,
     },
     /// Settings that stop something from filling the disk again
@@ -223,15 +233,14 @@ enum Cmd {
         #[arg(long, default_value_os_t = watch_cmd::default_db(), global = true)]
         db: PathBuf,
     },
-    /// Run the watcher in the background (a LaunchAgent)
+    /// Run the watcher in the background (a LaunchAgent; at sign-in on Windows)
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Where the disk space is now, reconciled with what APFS reports
+    /// Where the disk space is now, reconciled with what the file system reports
     Map {
-        /// Directory to scan (default: the whole Data volume)
-        #[arg(long, default_value = map::DATA_ROOT)]
+        #[arg(long, default_value_os_t = map::boot_volume(), help = ROOT_HELP)]
         root: PathBuf,
         /// Levels of the tree to print
         #[arg(long, default_value_t = 3)]
@@ -243,8 +252,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Where the space goes: macOS, apps, build output, caches, your files...
-    /// biggest first, and what of it is waste
+    /// Where the space goes: the system, apps, build output, caches, your
+    /// files... biggest first, and what of it is waste
     Space {
         /// Print the result as JSON (what the app reads)
         #[arg(long)]
@@ -256,11 +265,17 @@ enum Cmd {
         /// Scan even if the last measurement is young enough
         #[arg(long)]
         refresh: bool,
+        /// Show the last measurement however old, without measuring the
+        /// disk again (the Trash is sized as it is now, as always): fails
+        /// when there is none yet
+        #[arg(long, conflicts_with_all = ["refresh", "max_age"])]
+        cached: bool,
         /// History database (the measurement is kept next to it)
         #[arg(long, default_value_os_t = watch_cmd::default_db())]
         db: PathBuf,
     },
     /// Which of your processes are writing to disk, and how fast
+    #[command(hide = !cfg!(target_os = "macos"))]
     Writers {
         /// Sampling interval in seconds
         #[arg(long, default_value_t = 10)]
@@ -277,7 +292,7 @@ struct History {
     #[arg(long, default_value_os_t = watch_cmd::default_db())]
     db: PathBuf,
     /// Volume to watch
-    #[arg(long, default_value = map::DATA_ROOT)]
+    #[arg(long, default_value_os_t = map::boot_volume())]
     volume: PathBuf,
 }
 
@@ -312,23 +327,24 @@ enum TidyAction {
 #[derive(Subcommand)]
 enum KnowledgeAction {
     /// Download a newer list, if there is one (signed like the app's
-    /// updates; nothing about this Mac is sent)
+    /// updates; nothing about this computer is sent)
     Update,
     /// What's said about these folders
     About {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
-    /// This Mac's big or growing folders that nothing in particular is said
-    /// about (never your own folders)
+    /// This computer's big or growing folders that nothing in particular is
+    /// said about (never your own folders)
     Missing {
         /// Only folders this big, or grown as much in a week, in MB
         #[arg(long, default_value_t = 500)]
         min_mb: u64,
     },
     /// Ask AI what a folder is, when nothing's known about it: only its
-    /// name (never your own folders, nothing in it), its size and the macOS
-    /// version are sent, to OpenAI, on your ChatGPT plan (`sign-in` first)
+    /// name (never your own folders, nothing in it), its size and the
+    /// system's version are sent, to OpenAI, on your ChatGPT plan (`sign-in`
+    /// first)
     Ask {
         folder: PathBuf,
         /// Its size, sent rounded to two digits
@@ -397,26 +413,115 @@ enum KeepAction {
 
 #[derive(Subcommand)]
 enum AgentAction {
-    /// Install the watcher as a LaunchAgent and start it
+    /// Install the watcher (a LaunchAgent; the Run key on Windows) and start it
     Install {
         /// Seconds between samples
         #[arg(long, default_value_t = 300)]
         interval: u64,
     },
-    /// Stop the watcher and remove the LaunchAgent (the history is kept)
+    /// Stop the watcher and remove it from login (the history is kept)
     Uninstall,
+    /// Stop the watcher until the next sign-in (the installer does, to replace it)
+    #[command(hide = cfg!(target_os = "macos"))]
+    Stop {
+        /// The installer's stop: told from one of yours, and never in its place
+        #[arg(long, hide = true)]
+        for_install: bool,
+    },
+    /// Start the watcher now, as sign-in would
+    #[command(hide = cfg!(target_os = "macos"))]
+    Start {
+        /// After an install: not if you stopped it, and nothing to do if it
+        /// isn't set up
+        #[arg(long, hide = true)]
+        after_install: bool,
+    },
     /// Whether the watcher is running, and how big its history is
-    Status,
+    Status {
+        /// Print it as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Where `watch --log` writes ([`watch_cmd::log_path`]).
+#[cfg(target_os = "macos")]
+const LOG_HELP: &str = "Append errors to ~/Library/Logs/MyDiskIsFull/watch.log";
+#[cfg(windows)]
+const LOG_HELP: &str = r"Append errors to %LOCALAPPDATA%\MyDiskIsFull\Logs\watch.log";
+
+/// What `map` scans by default ([`map::boot_volume`]).
+#[cfg(target_os = "macos")]
+const ROOT_HELP: &str = "Directory to scan (default: the whole Data volume)";
+#[cfg(windows)]
+const ROOT_HELP: &str = "Directory to scan (default: the whole drive Windows is on)";
+
+/// What can't run on this OS yet: Time Machine (the Mac's: Windows' own
+/// backups wait for a page of their own), Docker (on Windows its disk is
+/// WSL's, which pruning doesn't shrink), and `writers`, which waits for
+/// evidence from the disk of what each process writes (a Windows write
+/// counter counts pipes too).
+const NOT_HERE_YET: &[&str] = &["docker", "timemachine", "writers"];
+
+/// The command the line names, before its arguments are parsed: the first
+/// argument, or what `help` is asked about. Names that aren't text are
+/// none (clap says what's wrong with them).
+fn command_named() -> Vec<String> {
+    named_in(arguments().into_iter().skip(1))
+}
+
+/// The command line. `mdif-watch` (the program that starts at login, without a
+/// console window) is `mdif watch --quiet --log` and whatever follows.
+fn arguments() -> Vec<std::ffi::OsString> {
+    let mut args: Vec<_> = std::env::args_os().collect();
+    if watcher_program(args.first()) {
+        args.splice(1..1, ["watch", "--quiet", "--log"].map(Into::into));
+    }
+    args
+}
+
+fn watcher_program(argv0: Option<&std::ffi::OsString>) -> bool {
+    argv0
+        .map(std::path::Path::new)
+        .and_then(|p| p.file_stem())
+        .is_some_and(|s| s.eq_ignore_ascii_case("mdif-watch"))
+}
+
+fn named_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    let mut args = args.map(std::ffi::OsString::into_string);
+    match args.next() {
+        Some(Ok(first)) if first == "help" => {
+            args.next().and_then(Result::ok).into_iter().collect()
+        }
+        Some(Ok(first)) => vec![first],
+        _ => Vec::new(),
+    }
+}
+
+/// The command named, when it can't run on this OS yet. Looked at before the
+/// arguments are parsed, so a bare `mdif tidy` or `mdif help tidy` says so
+/// rather than asking for what it would need or describing it.
+fn not_here_yet(named: &[String]) -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let first = named.first()?;
+    NOT_HERE_YET.iter().copied().find(|n| n == first)
 }
 
 fn main() -> Result<()> {
     watch_cmd::mark_started();
     mdif_core::knowledge::init(&knowledge_cmd::dir());
     mdif_core::ask::init(&knowledge_cmd::dir());
-    let cli = Cli::parse();
+    if let Some(name) = not_here_yet(&command_named()) {
+        bail!("`mdif {name}` isn't available on this operating system yet");
+    }
+    let cli = Cli::parse_from(arguments());
     if cli.unattended {
-        let probes = mdif_macos::sys::access_probes(&watch_cmd::home());
-        mdif_core::privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+        let probes = mdif_core::os::sys::access_probes(&watch_cmd::home());
+        mdif_core::privacy::avoid_prompts(
+            mdif_core::os::sys::full_disk_access(&probes) != Some(true),
+        );
     }
     match cli.cmd {
         Cmd::Status { json, history } => status_cmd::status(&history.db, &history.volume, json)?,
@@ -525,9 +630,11 @@ fn main() -> Result<()> {
             Some(TweakAction::Revert { id }) => tweaks_cmd::revert(&db, &id, json)?,
         },
         Cmd::Agent { action } => match action {
-            AgentAction::Install { interval } => agent_cmd::install(interval)?,
-            AgentAction::Uninstall => agent_cmd::uninstall()?,
-            AgentAction::Status => agent_cmd::status()?,
+            AgentAction::Install { interval } => agent::install(interval)?,
+            AgentAction::Uninstall => agent::uninstall()?,
+            AgentAction::Stop { for_install } => agent::stop(for_install)?,
+            AgentAction::Start { after_install } => agent::start(after_install)?,
+            AgentAction::Status { json } => agent::status(json)?,
         },
         Cmd::Map {
             root,
@@ -551,9 +658,89 @@ fn main() -> Result<()> {
             json,
             max_age,
             refresh,
+            cached,
             db,
-        } => space_cmd::space(&db, json, max_age, refresh)?,
+        } => space_cmd::space(&db, json, max_age, refresh, cached)?,
         Cmd::Writers { secs, top } => writers_cmd::writers(secs, top),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn what_waits_for_this_os_is_named_and_the_trends_are_not() {
+        for trends in [
+            "status",
+            "forecast",
+            "watch",
+            "alerts",
+            "keep",
+            "knowledge",
+            "tidy",
+            "tweaks",
+        ] {
+            assert_eq!(not_here_yet(&[trends.to_string()]), None, "{trends}");
+        }
+        assert_eq!(not_here_yet(&[]), None);
+        for name in NOT_HERE_YET {
+            let expected = (!cfg!(target_os = "macos")).then_some(*name);
+            assert_eq!(not_here_yet(&[name.to_string()]), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_windowless_watcher_is_the_watch_command_with_its_own_arguments() {
+        let prog = |p: &str| Some(std::ffi::OsString::from(p));
+        assert!(watcher_program(
+            prog(
+                &std::path::Path::new("Program Files")
+                    .join("x")
+                    .join("mdif-watch.exe")
+                    .to_string_lossy()
+            )
+            .as_ref()
+        ));
+        assert!(watcher_program(prog("MDIF-WATCH.EXE").as_ref()));
+        assert!(watcher_program(prog("mdif-watch").as_ref()));
+        assert!(!watcher_program(prog("mdif.exe").as_ref()));
+        assert!(!watcher_program(prog("mdif-watcher").as_ref()));
+        assert!(!watcher_program(None));
+    }
+
+    #[test]
+    fn the_command_is_the_first_argument_or_what_help_is_asked_about() {
+        let named = |args: &[&str]| named_in(args.iter().map(std::ffi::OsString::from));
+        assert_eq!(named(&["agent", "--help"]), ["agent"]);
+        assert_eq!(named(&["help", "agent"]), ["agent"]);
+        assert_eq!(named(&["help"]), Vec::<String>::new());
+        assert!(named(&[]).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let bad = std::ffi::OsString::from_vec(vec![0xff, b'x']);
+            assert!(named_in([bad.clone()].into_iter()).is_empty());
+            assert!(named_in([std::ffi::OsString::from("help"), bad].into_iter()).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_list_names_real_commands_and_hides_them_where_they_wait() {
+        let cli = Cli::command();
+        for name in NOT_HERE_YET {
+            let sub = cli
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no command {name}"));
+            assert_eq!(sub.is_hide_set(), !cfg!(target_os = "macos"), "{name}");
+        }
+        // And what runs everywhere is in the help everywhere.
+        for sub in cli.get_subcommands() {
+            if !NOT_HERE_YET.contains(&sub.get_name()) {
+                assert!(!sub.is_hide_set(), "{} is hidden", sub.get_name());
+            }
+        }
+    }
 }

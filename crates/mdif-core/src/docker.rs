@@ -20,7 +20,6 @@
 //! it isn't running and quitting it again after; the daily tidy-up does too,
 //! but only while Docker is running ([`answers_now`]): it never starts it.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -109,14 +108,21 @@ pub enum Removal {
 /// Where the `docker` command is: where Docker Desktop links it, Homebrew's,
 /// Docker Desktop's own, or the one it installs for you alone.
 pub fn command(home: &Path) -> Option<PathBuf> {
-    [
+    #[cfg(target_os = "macos")]
+    let candidates = vec![
         PathBuf::from("/usr/local/bin/docker"),
         PathBuf::from("/opt/homebrew/bin/docker"),
         PathBuf::from("/Applications/Docker.app/Contents/Resources/bin/docker"),
         home.join(".docker/bin/docker"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
+    ];
+    // Docker isn't supported on Windows yet: its data folder, for the keep
+    // rule, and its liveness check come with the Windows catalogue.
+    #[cfg(windows)]
+    let candidates: Vec<PathBuf> = {
+        let _ = home;
+        Vec::new()
+    };
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// What Docker Desktop's disk image takes on this disk (allocated: the file
@@ -126,10 +132,10 @@ pub fn disk_size(home: &Path) -> Option<u64> {
     if !privacy::may_open(&disk) {
         return None;
     }
-    std::fs::symlink_metadata(disk)
+    std::fs::symlink_metadata(&disk)
         .ok()
         .filter(|m| m.is_file())
-        .map(|m| m.blocks() * 512)
+        .map(|m| crate::portable::allocated(&disk, &m))
 }
 
 /// Asks Docker now.
@@ -404,33 +410,41 @@ pub fn settle(home: &Path, before: u64) -> u64 {
     before.saturating_sub(last)
 }
 
-/// The engine on this Mac ([`answers_now`]'s sockets): Docker Desktop's,
-/// else the usual one, else Docker Desktop's still (it appears once Docker
-/// Desktop has started).
-fn local_engine(home: &Path) -> PathBuf {
-    let desktop = home.join(".docker/run/docker.sock");
-    let usual = PathBuf::from("/var/run/docker.sock");
-    if !desktop.exists() && usual.exists() {
-        usual
-    } else {
-        desktop
-    }
+/// The engines on this Mac, by their sockets: Docker Desktop's, then the
+/// usual one.
+fn local_sockets(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join(".docker/run/docker.sock"),
+        PathBuf::from("/var/run/docker.sock"),
+    ]
 }
 
-/// Runs `docker args`, within `wait` seconds: its output, or why not. On
-/// this Mac's engine, whatever context the command is set to (`docker
-/// context use` may have left another machine's current): what's listed and
-/// removed is never another engine's. `docker desktop` talks to Docker
-/// Desktop, not to an engine, and is left as it is.
+/// Runs `docker args`, within `wait` seconds: its output, or why not.
+///
+/// Always on this Mac's engine, whatever context or `DOCKER_HOST` the shell
+/// has: another engine's containers and images aren't on this disk, and a
+/// remote one's (`docker context use prod`) are nobody's to remove from here.
 fn run(docker: &Path, home: &Path, args: &[&str], wait: u64) -> Result<String, String> {
     let mut cmd = Command::new(docker);
+    for v in [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    ] {
+        cmd.env_remove(v);
+    }
+    // Docker Desktop's own commands speak to the app, not to an engine.
     if args.first() != Some(&"desktop") {
-        let mut host = std::ffi::OsString::from("unix://");
-        host.push(local_engine(home));
-        cmd.env("DOCKER_HOST", host);
-        for var in ["DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"] {
-            cmd.env_remove(var);
-        }
+        let [desktop, usual] = local_sockets(home);
+        let socket = if !desktop.exists() && usual.exists() {
+            usual
+        } else {
+            desktop
+        };
+        cmd.arg("--host")
+            .arg(format!("unix://{}", socket.display()));
     }
     cmd.args(args);
     let out = run_within(cmd, Duration::from_secs(wait))
@@ -461,15 +475,49 @@ pub fn not_running(said: &str) -> bool {
 }
 
 /// Whether Docker would answer now, by connecting to its socket: a few
-/// microseconds, so the watcher may ask every few minutes. Docker Desktop's
-/// socket, then the usual one.
+/// microseconds, so the watcher may ask every few
+/// minutes. Docker Desktop's socket, then the usual one.
 pub fn answers_now(home: &Path) -> bool {
-    [
-        home.join(".docker/run/docker.sock"),
-        PathBuf::from("/var/run/docker.sock"),
-    ]
-    .iter()
-    .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+    #[cfg(unix)]
+    {
+        local_sockets(home)
+            .iter()
+            .any(|s| std::os::unix::net::UnixStream::connect(s).is_ok())
+    }
+    // No Docker on Windows yet ([`command`]).
+    #[cfg(windows)]
+    {
+        let _ = home;
+        false
+    }
+}
+
+/// Opens Docker Desktop hidden, for before its own `desktop start` command.
+#[cfg(target_os = "macos")]
+fn open_desktop() -> Result<(), String> {
+    let app = Path::new("/Applications/Docker.app");
+    if !app.is_dir() {
+        return Err(format!(
+            "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
+        ));
+    }
+    let opened = Command::new("/usr/bin/open")
+        .args(["-g", "-j", "-a"])
+        .arg(app)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !opened {
+        return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
+    }
+    Ok(())
+}
+
+/// Docker Desktop for Windows has had `desktop start` from the start.
+#[cfg(not(target_os = "macos"))]
+fn open_desktop() -> Result<(), String> {
+    Err(format!(
+        "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
+    ))
 }
 
 /// Starts Docker Desktop in the background when Docker isn't running, and
@@ -498,20 +546,7 @@ pub fn start(home: &Path) -> Result<bool, String> {
     )
     .is_err()
     {
-        let app = Path::new("/Applications/Docker.app");
-        if !app.is_dir() {
-            return Err(format!(
-                "{NOT_RUNNING} Start it, and MyDiskIsFull cleans it then."
-            ));
-        }
-        let opened = Command::new("/usr/bin/open")
-            .args(["-g", "-j", "-a"])
-            .arg(app)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !opened {
-            return Err(format!("{NOT_RUNNING} Docker Desktop didn't start."));
-        }
+        open_desktop()?;
     }
     if wait_for(&docker, home) {
         return Ok(true);
@@ -535,7 +570,7 @@ fn wait_for(docker: &Path, home: &Path) -> bool {
 
 /// Whether Docker Desktop is open, answering or not (still starting).
 fn desktop_open() -> bool {
-    mdif_macos::proc::own_processes()
+    crate::os::proc::own_processes()
         .iter()
         .any(|p| is_desktop(&p.name))
 }
@@ -896,6 +931,8 @@ mod tests {
         }
     }
 
+    // The stand-in is a shell script.
+    #[cfg(unix)]
     #[test]
     fn docker_is_asked_on_this_macs_engine_whatever_its_context() {
         use std::os::unix::fs::PermissionsExt;
@@ -915,7 +952,10 @@ mod tests {
         let sock = home.join(".docker/run/docker.sock");
         assert_eq!(
             said.trim(),
-            format!("host=unix://{} context= container rm -- x", sock.display())
+            format!(
+                "host= context= --host unix://{} container rm -- x",
+                sock.display()
+            )
         );
         // Docker Desktop's own command isn't an engine's.
         let said = run(&fake, &home, &["desktop", "stop"], 10).unwrap();

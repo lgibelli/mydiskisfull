@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -116,6 +115,10 @@ pub struct Account {
 }
 
 fn load(dir: &Path) -> Saved {
+    // A file copied here from elsewhere isn't trusted to be private.
+    if !trusted(dir) {
+        return Saved::default();
+    }
     std::fs::read(dir.join(FILE))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -132,15 +135,16 @@ fn save(dir: &Path, s: &Saved) -> Result<()> {
 /// What [`save`] renames into place: `s`, with `spare` bytes of room after
 /// it, on disk.
 fn reserve(dir: &Path, s: &Saved, spare: usize) -> Result<std::fs::File> {
+    ensure_private()?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{FILE}.new"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    let _ = mdif_macos::fs::set_excluded_from_backup(&tmp, true);
+    let mut options = OpenOptions::new();
+    let mut f =
+        crate::portable::with_mode(options.write(true).create_new(true), 0o600).open(&tmp)?;
+    // Before anything is in it (on Windows, its folder's list until now).
+    crate::portable::make_private(&tmp)?;
+    let _ = crate::os::fs::set_excluded_from_backup(&tmp, true);
     let mut body = serde_json::to_vec_pretty(s)?;
     // JSON may end in spaces.
     body.resize(body.len() + spare, b' ');
@@ -165,7 +169,7 @@ fn rewrite(mut f: std::fs::File, s: &Saved) -> Result<()> {
 
 fn finish(dir: &Path) -> Result<()> {
     std::fs::rename(dir.join(format!(".{FILE}.new")), dir.join(FILE))?;
-    let _ = mdif_macos::fs::set_excluded_from_backup(&dir.join(FILE), true);
+    let _ = crate::os::fs::set_excluded_from_backup(&dir.join(FILE), true);
     Ok(())
 }
 
@@ -176,13 +180,10 @@ const ROOM: usize = 16 * 1024;
 /// and two at once would spend it twice, which ends the sign-in.
 fn locked<T>(dir: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
     std::fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    let lock = crate::portable::with_mode(options.write(true).create(true).truncate(false), 0o600)
         .open(dir.join(LOCK))?;
-    mdif_macos::fs::lock(&lock)?;
+    crate::os::fs::lock(&lock)?;
     f()
 }
 
@@ -196,9 +197,26 @@ pub fn account(dir: &Path) -> Account {
     }
 }
 
+/// Whether the token file, if there is one, may be read: kept where files
+/// can be private, and still private (on Windows its access list says).
+fn trusted(dir: &Path) -> bool {
+    crate::portable::private_files() && crate::portable::private_to_me(&dir.join(FILE))
+}
+
+/// The tokens are kept in a file only their owner may read; where one can't be
+/// made so, there's no signing in.
+fn ensure_private() -> Result<()> {
+    if crate::portable::private_files() {
+        Ok(())
+    } else {
+        bail!("Signing in with ChatGPT isn't available on this operating system yet")
+    }
+}
+
+/// `n` bytes from the operating system's secure random source.
 fn random(n: usize) -> Result<Vec<u8>> {
     let mut b = vec![0; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    getrandom::fill(&mut b).map_err(|e| anyhow!("no secure random numbers: {e}"))?;
     Ok(b)
 }
 
@@ -319,9 +337,9 @@ fn http(url: &str, bearer: Option<&str>, body: Option<(&str, &str)>, secs: u64) 
         set("header", &format!("Content-Type: {kind}"));
         set("data-binary", data);
     }
-    // `-q` first: not the user's `~/.curlrc`, whose `verbose` or
-    // `trace-ascii` would write the token out, and `insecure` trust anyone.
-    let mut curl = Command::new("/usr/bin/curl");
+    let mut curl = Command::new(crate::tools::curl());
+    // `-q` first: no ~/.curlrc, which could write the tokens to a file, turn
+    // off checking the certificate or print the header with the token.
     curl.args(["-q", "--config", "-"]);
     let out = crate::space::run_fed(curl, Some(cfg.into_bytes()), Duration::from_secs(secs + 10))
         .ok_or_else(|| anyhow!("OpenAI didn't answer in time"))?;
@@ -590,6 +608,8 @@ pub fn sign_in(
     open: &dyn Fn(&str) -> Result<()>,
     wait: Duration,
 ) -> Result<Account> {
+    // Before the browser opens: signing in would end in nowhere to keep it.
+    ensure_private()?;
     let mut saved = load(dir);
     if saved.host.is_empty() {
         saved.host = host_id()?;
@@ -699,6 +719,15 @@ pub fn sign_in(
 /// and is stopped leaves none behind; then the refresh token revoked at
 /// OpenAI. False when OpenAI didn't confirm the revocation.
 pub fn sign_out(dir: &Path, ends: &Endpoints) -> Result<bool> {
+    // A token file that can't be trusted here is neither used nor reported as
+    // revoked: say what to do with it.
+    if dir.join(FILE).try_exists()? && !trusted(dir) {
+        bail!(
+            "{} holds a ChatGPT sign-in that others could read here, so it isn't used. \
+             Delete the file, and revoke the sign-in in ChatGPT's settings.",
+            dir.join(FILE).display()
+        );
+    }
     locked(dir, || {
         let mut s = load(dir);
         let Some(t) = s.tokens.take() else {
@@ -1028,6 +1057,43 @@ pub fn respond(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// A token file that took its folder's access list (copied in, say) is
+    /// neither used nor said to be signed out of; a new sign-in replaces it
+    /// with a private one.
+    #[cfg(windows)]
+    #[test]
+    fn a_token_file_others_could_read_isnt_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let saved = Saved {
+            client: Some("oaiapp_1".into()),
+            ..Default::default()
+        };
+        save(d, &saved).unwrap();
+        assert!(crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
+        assert_eq!(load(d).client.as_deref(), Some("oaiapp_1"));
+        // The same bytes in a file of the folder's list.
+        let copy = std::fs::read(d.join(FILE)).unwrap();
+        std::fs::remove_file(d.join(FILE)).unwrap();
+        std::fs::write(d.join(FILE), copy).unwrap();
+        assert!(!crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
+        assert!(load(d).client.is_none());
+        let why = sign_out(d, &Endpoints::openai()).unwrap_err().to_string();
+        assert!(why.contains("others could read"), "{why}");
+    }
+
+    #[test]
+    fn secrets_and_host_ids_come_from_the_systems_random_source() {
+        assert_eq!(random(32).unwrap().len(), 32);
+        assert_ne!(random(32).unwrap(), random(32).unwrap());
+        assert_ne!(secret(32).unwrap(), secret(32).unwrap());
+        let id = host_id().unwrap();
+        assert_eq!(id.len(), "urn:uuid:".len() + 36, "{id}");
+        assert!(id.starts_with("urn:uuid:"), "{id}");
+        // Version 4, variant 1.
+        assert_eq!(&id["urn:uuid:".len() + 14..][..1], "4", "{id}");
+    }
 
     #[test]
     fn pkce_is_rfc_7636s() {
@@ -1448,15 +1514,21 @@ mod tests {
                 usage: USAGE
             }
         );
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(d.join(FILE))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        // Readable by its owner only: its access list on Windows.
+        #[cfg(windows)]
+        assert!(crate::os::fs::private_to_me(&d.join(FILE)).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(d.join(FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let host = load(d).host;
         assert!(host.starts_with("urn:uuid:"));
 

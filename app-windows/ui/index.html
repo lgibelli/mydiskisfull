@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MyDiskIsFull</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="sidebar" aria-label="Pages">
+      <div class="brand">
+        <img src="icon.png" alt="" width="24" height="24">
+        <span>MyDiskIsFull</span>
+      </div>
+      <ul id="nav" class="nav"></ul>
+      <div id="foot" class="foot"></div>
+    </nav>
+    <main id="page" class="main" tabindex="-1"></main>
+  </div>
+  <div id="welcome" class="welcome" hidden></div>
+  <div id="notices" class="notices" aria-live="polite"></div>
+  <dialog id="cleanup" class="dialog sheet" aria-labelledby="cleanup-title"></dialog>
+  <dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title" class="dialog-title"></h2>
+      <div class="dialog-text"></div>
+      <div class="dialog-buttons">
+        <button class="btn danger dialog-go" value="go"></button>
+        <button class="btn dialog-cancel" value="">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

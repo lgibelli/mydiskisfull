@@ -65,25 +65,6 @@ pub fn physical(path: &Path, block: u64) -> io::Result<Vec<(u64, u64)>> {
     Ok(out)
 }
 
-/// Bytes covered by `extents`, overlaps counted once. Sorts in place.
-pub fn union_len(extents: &mut [(u64, u64)]) -> u64 {
-    extents.sort_unstable();
-    let mut total = 0;
-    let mut cur: Option<(u64, u64)> = None;
-    for &(start, len) in extents.iter() {
-        let end = start + len;
-        cur = match cur {
-            Some((s, e)) if start <= e => Some((s, e.max(end))),
-            Some((s, e)) => {
-                total += e - s;
-                Some((start, end))
-            }
-            None => Some((start, end)),
-        };
-    }
-    total + cur.map_or(0, |(s, e)| e - s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +72,26 @@ mod tests {
     use std::process::Command;
 
     const MIB: u64 = 1 << 20;
+
+    /// Bytes covered by `extents`, overlaps counted once (a test copy of
+    /// `mdif-core`'s `scan::union_len`, which backends don't share).
+    fn union_len(extents: &mut [(u64, u64)]) -> u64 {
+        extents.sort_unstable();
+        let mut total = 0;
+        let mut cur: Option<(u64, u64)> = None;
+        for &(start, len) in extents.iter() {
+            let end = start + len;
+            cur = match cur {
+                Some((s, e)) if start <= e => Some((s, e.max(end))),
+                Some((s, e)) => {
+                    total += e - s;
+                    Some((start, end))
+                }
+                None => Some((start, end)),
+            };
+        }
+        total + cur.map_or(0, |(s, e)| e - s)
+    }
 
     #[test]
     fn a_modified_clone_shares_the_untouched_blocks() {
@@ -134,12 +135,5 @@ mod tests {
         let mut x = physical(&p, 4096).unwrap();
         assert!(allocated < 8 * MIB, "{allocated}");
         assert_eq!(union_len(&mut x), allocated, "{x:?}");
-    }
-
-    #[test]
-    fn union_merges_overlaps() {
-        let mut v = vec![(10, 10), (0, 5), (15, 10), (40, 1)];
-        assert_eq!(union_len(&mut v), 5 + 15 + 1);
-        assert_eq!(union_len(&mut []), 0);
     }
 }

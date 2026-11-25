@@ -220,9 +220,13 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     if parts.windows(2).any(|w| w == [".claude", "worktrees"]) {
         return Fix::Steps(WORKTREE.into());
     }
-    if ARTIFACTS.contains(&name.as_str())
+    // Right in the home folder it's a folder of yours (`~/build`), not a
+    // project's output; nor anywhere outside a project in a code folder.
+    let dotnet = || owners::dotnet_output(&name) && clean::build_output(owner);
+    if (ARTIFACTS.contains(&name.as_str()) || dotnet())
         && clean::in_a_project(owner, home)
         && let Some(project) = owner.parent()
+        && !clean::built_in_home(owner, home)
     {
         return artifact(&name, project);
     }
@@ -244,6 +248,38 @@ pub fn for_folder(owner: &Path, home: &Path) -> Fix {
     }
     if owner == Path::new("/private/var/vm") {
         return Fix::Steps(SWAP.into());
+    }
+    // `mdif writers` isn't there on Windows (yet): what can be done is by hand.
+    if cfg!(windows) {
+        if ["pagefile.sys", "swapfile.sys"]
+            .iter()
+            .any(|f| name.eq_ignore_ascii_case(f))
+        {
+            return Fix::Steps(PAGE_FILE.into());
+        }
+        let temp = parts
+            .windows(3)
+            .any(|w| w[0] == "AppData" && w[1] == "Local" && w[2].eq_ignore_ascii_case("Temp"));
+        // A file directly in the profile folder or a drive's root is an owner
+        // of its own (no privacy prompt on Windows to look).
+        return Fix::Steps(if temp {
+            "Temporary files. Settings → System → Storage → Temporary files removes what \
+             isn't in use, and Storage Sense can do it on a schedule; a program that keeps \
+             filling it is the one to look at."
+                .to_string()
+        } else if owner.is_file() {
+            format!(
+                "{name} keeps growing. The program writing it may have a setting for how big it \
+                 gets (a log level, a cache size), or it is failing and writing the same thing \
+                 over and over; closing it stops that for now."
+            )
+        } else {
+            format!(
+                "Open {name} and see what is growing in it. The program that keeps it may have \
+                 a setting for how much it holds, or something it keeps writing because it is \
+                 failing."
+            )
+        });
     }
     Fix::Steps(
         "`mdif writers` shows which processes write the most; the app behind it may have a \
@@ -366,9 +402,13 @@ fn kept(fix: &Fix, path: &Path, keep: &Keep) -> Option<Fix> {
     let quoted = |e: &str| crate::text::printable(e).into_owned();
     if let Some(entry) = keep.covering(path) {
         return Some(Fix::Leave(format!(
-            "You keep it ({}), so nothing here suggests deleting it. `mdif suggest` lists what \
-             else could go.",
-            quoted(entry)
+            "You keep it ({}), so nothing here suggests deleting it.{}",
+            quoted(entry),
+            if cfg!(target_os = "macos") {
+                " `mdif suggest` lists what else could go."
+            } else {
+                ""
+            }
         )));
     }
     match fix {
@@ -386,12 +426,24 @@ fn kept(fix: &Fix, path: &Path, keep: &Keep) -> Option<Fix> {
 /// `fix`, unless it is a tweak that is already applied or waiting for
 /// approval: then what to do about that instead.
 pub fn settled(fix: Fix, home: &Path) -> Fix {
+    settled_on(fix, home, tweaks::supported_here())
+}
+
+/// [`settled`], for an OS where tweaks are (`supported`) or aren't yet: then
+/// there is no command to offer, only what the tweak would change.
+fn settled_on(fix: Fix, home: &Path, supported: bool) -> Fix {
     let Fix::Tweak(id) = fix else {
         return fix;
     };
     let Some(t) = tweaks::find(id) else {
         return fix;
     };
+    if !supported {
+        return Fix::Steps(format!(
+            "\"{}\": MyDiskIsFull can't change that setting on this operating system yet.",
+            t.title
+        ));
+    }
     match t.status(home) {
         Ok(Status::Applied) => Fix::Steps(format!(
             "\"{}\" is already applied; `mdif tweaks` shows whether it is working.",
@@ -415,13 +467,13 @@ pub fn gather(
     keep: &Keep,
     now: i64,
 ) -> Result<Vec<Suggestion>> {
-    mdif_macos::fs::forbid_dataless_materialization()?;
-    let st = mdif_macos::fs::statfs(volume)?;
+    crate::os::fs::forbid_dataless_materialization()?;
+    let st = crate::os::fs::statfs(volume)?;
     let mut tight = st.avail * 100 < st.total * 15;
     let mut out = Vec::new();
 
     if let Some(store) = store {
-        let pts = store.space_since(&st.mount_point, now - 400 * DAY)?;
+        let pts = store.space_since(&st.history_key(), now - 400 * DAY)?;
         let f = forecast::forecast(&pts, &Params::default());
         tight |= f
             .as_ref()
@@ -429,12 +481,20 @@ pub fn gather(
             .is_some_and(|fi| fi.days < 30.0);
         from_history(store, home, now, &mut out)?;
     }
-    from_tweaks(store, home, now, tight, keep, &mut out);
-    if tight {
+    // The tweaks' catalogue, local snapshots, swap, Docker's disk image and
+    // what updates leave in /Users/Shared are a Mac's: on Windows, what the
+    // watcher found and finished worktrees, so far.
+    let mac = cfg!(target_os = "macos");
+    if mac {
+        from_tweaks(store, home, now, tight, keep, &mut out);
+    }
+    if mac && tight {
         from_system(home, &st.mount_point, st.avail, &mut out);
     }
     from_worktrees(home, store, now, keep, &mut out);
-    from_leftovers(keep, &mut out);
+    if mac {
+        from_leftovers(keep, &mut out);
+    }
     out.retain(|s| {
         s.path
             .as_deref()
@@ -494,8 +554,10 @@ fn measure_folders(
             continue;
         };
         let kind = s.action.as_ref().map(|a| a.kind);
-        let build =
-            kind.is_none() && clean::in_a_project(&path, home) && clean::build_output(&path);
+        let build = kind.is_none()
+            && !clean::built_in_home(&path, home)
+            && clean::in_a_project(&path, home)
+            && clean::build_output(&path);
         let trash = kind == Some("trash");
         if !(s.measured.followed || build || trash) {
             continue;
@@ -935,7 +997,7 @@ fn from_system(home: &Path, mount: &str, free: u64, out: &mut Vec<Suggestion>) {
             key: "snapshots".into(),
         });
     }
-    if let Ok(swap) = mdif_macos::sys::swap_used()
+    if let Ok(swap) = crate::os::sys::swap_used()
         && swap >= 2 * GB
     {
         out.push(Suggestion {
@@ -1066,6 +1128,13 @@ fn from_worktrees(
             };
             let command = if n == 1 {
                 format!("git -C {} worktree remove {}", shell_quote(repo), rel(g[0]))
+            } else if cfg!(windows) {
+                // PowerShell's own loop: it has no `for … do`.
+                format!(
+                    "foreach ($w in {}) {{ git -C {} worktree remove $w }}",
+                    g.iter().map(|f| rel(f)).collect::<Vec<_>>().join(", "),
+                    shell_quote(repo)
+                )
             } else {
                 format!(
                     "cd {} && for w in {}; do git worktree remove \"$w\"; done",
@@ -1239,10 +1308,12 @@ fn artifact(name: &str, project: &Path) -> Fix {
     let has = |f: &str| crate::privacy::may_open(project) && project.join(f).exists();
     let q = shell_quote(project);
     match name {
+        // This target: cargo's own may be set elsewhere (build.target-dir).
         "target" if has("Cargo.toml") => Fix::Run {
             command: format!(
-                "cargo clean --manifest-path {}",
-                shell_quote(&project.join("Cargo.toml"))
+                "cargo clean --manifest-path {} --target-dir {}",
+                shell_quote(&project.join("Cargo.toml")),
+                shell_quote(&project.join("target"))
             ),
             note: "Rust rebuilds it locally, without downloading. Each worktree builds its own; \
                    pointing them at one folder (build.target-dir in .cargo/config.toml) stops \
@@ -1250,7 +1321,12 @@ fn artifact(name: &str, project: &Path) -> Fix {
                 .into(),
         },
         "build" | ".dart_tool" if has("pubspec.yaml") => Fix::Run {
-            command: format!("cd {q} && flutter clean"),
+            // PowerShell (Windows' own shell, 5.1) has no `&&`.
+            command: if cfg!(windows) {
+                format!("Set-Location -LiteralPath {q}; flutter clean")
+            } else {
+                format!("cd {q} && flutter clean")
+            },
             note: "Flutter rebuilds it locally on the next run.".into(),
         },
         "node_modules" => Fix::Steps(
@@ -1284,18 +1360,15 @@ fn key_for(fix: &Fix, subject: &str) -> String {
 }
 
 pub(crate) fn display(path: &Path, home: &Path) -> String {
-    let text = match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    };
+    let text = crate::text::tilde(path, home).unwrap_or_else(|| path.display().to_string());
     crate::text::printable(&text).into_owned()
 }
 
-/// `'…'`, safe to paste into a shell whatever the path holds.
+/// The path quoted for the shell, whatever it holds ([`text::shell_quote`]).
+///
+/// [`text::shell_quote`]: crate::text::shell_quote
 fn shell_quote(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    format!("'{}'", s.replace('\'', r"'\''"))
+    crate::text::shell_quote(&path.to_string_lossy())
 }
 
 /// A path's last part, for a title ("target", "myapp").
@@ -1326,6 +1399,10 @@ const RELOCATED: &str = "Each macOS update moves aside the files it didn't recog
 
 const SWAP: &str = "Restart the Mac when it suits you: swap files are only removed then. If it \
                     fills again, an app is using more memory than the Mac has.";
+const PAGE_FILE: &str = "Windows grows its page file when programs use more memory than the PC \
+                         has. A restart usually brings it back to its usual size; if it grows \
+                         again, Task Manager → Processes, sorted by Memory, shows which program \
+                         uses the most.";
 const WORKTREE: &str = "An agent's worktree, with its own build output. Once its work is \
                         merged, `git worktree remove <path>` deletes it (it refuses if \
                         anything is uncommitted).";
@@ -1341,7 +1418,46 @@ const XCODE: &str = "Xcode's DerivedData and old device support files are rebuil
                      Xcode → Settings → Locations shows DerivedData; delete it while Xcode \
                      isn't building.";
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+/// What Windows' folders get: its own words and PowerShell's commands.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_folders_get_windows_fixes() {
+        let home = Path::new(r"C:\Users\me");
+        let steps = |p: &Path| match for_folder(p, home) {
+            Fix::Steps(s) => s,
+            f => panic!("{}: {f:?}", p.display()),
+        };
+        assert!(steps(Path::new(r"C:\pagefile.sys")).contains("page file"));
+        assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Temp")).contains("Temporary files"));
+        assert!(steps(Path::new(r"C:\Users\me\AppData\Local\Spotify")).starts_with("Open Spotify"));
+        // A file is said as one (a file directly in the profile folder is an
+        // owner of its own). This test's own program: a file made for it would
+        // be in the temporary folder, and said as temporary files.
+        let file = std::env::current_exe().unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let said = steps(&file);
+        assert!(said.starts_with(&format!("{name} keeps growing")), "{said}");
+        // Commands are PowerShell's: single quotes, no `&&`. Build output is
+        // a project's in a code folder.
+        let t = tempfile::tempdir().unwrap();
+        let app = t.path().join(r"source\repos\app");
+        std::fs::create_dir_all(app.join("target")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "").unwrap();
+        let Fix::Run { command, .. } = for_folder(&app.join("target"), t.path()) else {
+            panic!("no command");
+        };
+        assert!(
+            command.starts_with("cargo clean --manifest-path '"),
+            "{command}"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -1415,16 +1531,30 @@ mod tests {
         let h = home.path();
         std::fs::create_dir(h.join(".claude")).unwrap();
         let tweak = Fix::Tweak("claude-transcripts");
-        assert_eq!(settled(tweak.clone(), h), tweak);
+        assert_eq!(settled_on(tweak.clone(), h, true), tweak);
         std::fs::write(
             h.join(".claude/settings.json"),
             "{\"cleanupPeriodDays\": 14}",
         )
         .unwrap();
-        let Fix::Steps(s) = settled(tweak, h) else {
+        let Fix::Steps(s) = settled_on(tweak, h, true) else {
             panic!()
         };
         assert!(s.contains("already applied"), "{s}");
+    }
+
+    #[test]
+    fn where_tweaks_arent_supported_the_fix_is_not_a_command() {
+        let home = tempfile::tempdir().unwrap();
+        let fix = settled_on(Fix::Tweak("gradle-caches"), home.path(), false);
+        let Fix::Steps(s) = &fix else {
+            panic!("{fix:?}")
+        };
+        assert!(s.contains("can't change that setting"), "{s}");
+        assert!(!fix.line().contains("mdif tweaks"), "{}", fix.line());
+        // Other fixes pass through.
+        let run = Fix::Leave("x".into());
+        assert_eq!(settled_on(run.clone(), home.path(), false), run);
     }
 
     #[test]

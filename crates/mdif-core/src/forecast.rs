@@ -1653,4 +1653,31 @@ mod tests {
         assert!(f.full_in.unwrap().days < 2.0);
         assert_eq!(alert(Some(&f), f.avail, 500_000_000_000), Alert::None);
     }
+
+    #[test]
+    fn a_day_left_out_lends_none_of_its_hours() {
+        // 12 quiet hours, then a day of builds (day 0, the most recent). A
+        // block that starts in the quiet hours and runs into that day would
+        // carry builds into the run that leaves the day out.
+        let mut x = vec![Some(0.0); 12];
+        x.extend(std::iter::repeat_n(Some(GB), 24));
+        let n = x.len();
+        let h = sim::Hourly {
+            x,
+            steps: Vec::new(),
+            known: Vec::new(),
+            arrivals: Vec::new(),
+            stepped: vec![false; n],
+            removed: false,
+            threshold: f64::INFINITY,
+        };
+        let p = Params::default();
+        let pool = sim::Pool::new(&h, &p, Some(n - 24..n), 6).expect("12 hours to draw from");
+        let out = pool.run(200, 14 * 24, None, 7);
+        assert!(
+            out.consumed.iter().all(|&c| c == 0.0),
+            "the day left out was drawn from: {:?}",
+            &out.consumed[..5]
+        );
+    }
 }

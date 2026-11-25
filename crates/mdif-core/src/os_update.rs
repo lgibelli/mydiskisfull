@@ -89,7 +89,8 @@ fn real(path: &Path) -> Option<u64> {
     crate::scan::scan(path, &opts).ok().map(|s| s.real)
 }
 
-#[cfg(test)]
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

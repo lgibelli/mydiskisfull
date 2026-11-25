@@ -22,9 +22,7 @@ const CLEANUP: u64 = 1_000_000_000;
 
 fn open(db: &Path) -> Result<Option<Store>> {
     if !db.exists() {
-        println!(
-            "No history yet. Start the watcher with `mdif agent install` (or run `mdif watch`)."
-        );
+        println!("No history yet. {}", crate::watch_cmd::start_hint());
         return Ok(None);
     }
     Ok(Some(Store::open(db)?))
@@ -37,9 +35,12 @@ pub fn owners(db: &Path, hours: i64, top: usize, json_out: bool) -> Result<()> {
     let now = unix_now();
     let growth = store.growth_since(now - hours * HOUR)?;
     let regrowth = owners::regrowth(&store.growth_series(now - 30 * DAY)?, CLEANUP);
+    // Growth missed since then isn't in these figures.
+    let last_gap = mdif_core::watch::recorded_gap(&store)?;
     if json_out {
         let out = json!({
             "hours": hours,
+            "last_gap": last_gap,
             "growth": growth.iter().map(|(o, b)| json!({
                 "owner": o,
                 "bytes": b,
@@ -58,6 +59,11 @@ pub fn owners(db: &Path, hours: i64, top: usize, json_out: bool) -> Result<()> {
              second period on."
         );
         return Ok(());
+    }
+    if last_gap.is_some_and(|at| at >= now - hours * HOUR) {
+        println!(
+            "Some changes on the disk weren't seen in that time, so these figures can be short.\n"
+        );
     }
     let per_day = |b: i64| b as f64 * DAY as f64 / (hours * HOUR) as f64;
     let grew: Vec<_> = growth.iter().filter(|(_, b)| *b > 0).take(top).collect();
@@ -149,8 +155,17 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
+    // Said when the last look at the folders had parts it couldn't see.
+    let gap =
+        mdif_core::watch::recorded_gap(&store)?.is_some_and(|at| at >= unix_now() - days * DAY);
     if episodes.is_empty() {
         println!("No runaway disk fillers in the last {days} days.");
+        if gap {
+            println!(
+                "The watcher couldn't see every change on the disk, though (the file-system \
+                 journal wasn't fully readable), so some folders may not have been checked."
+            );
+        }
         return Ok(());
     }
     for e in &episodes {
@@ -169,6 +184,13 @@ pub fn incidents(db: &Path, days: i64, json_out: bool) -> Result<()> {
         println!("  {}", e.incident.sentence(Some(&home)));
         let fix = suggest::for_incident(&e.incident, &home, &keep);
         println!("  Fix: {}", tweaks_cmd::fix_line(&fix));
+    }
+    if gap {
+        println!();
+        println!(
+            "The watcher couldn't see every change on the disk in that time, so a folder may be \
+             missing here."
+        );
     }
     Ok(())
 }

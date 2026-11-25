@@ -30,8 +30,6 @@
 //! crosses to another volume or into a cloud placeholder, and never opens
 //! what would show a privacy prompt ([`privacy::may_open`]).
 
-use std::os::macos::fs::MetadataExt as _;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -42,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::clean::{self, Step};
 use crate::keep::Keep;
 use crate::owners::ARTIFACTS;
+use crate::portable;
 use crate::privacy;
 use crate::space::{run_within, runtime_name, simctl};
 use crate::store::Store;
@@ -84,7 +83,9 @@ pub enum Id {
 }
 
 impl Id {
-    pub const ALL: [Id; 7] = [
+    /// Every tidy-up there is here.
+    #[cfg(not(windows))]
+    pub const ALL: &'static [Id] = &[
         Id::Simulators,
         Id::Builds,
         Id::Dependencies,
@@ -93,6 +94,11 @@ impl Id {
         Id::Docker,
         Id::Backups,
     ];
+    /// On Windows, those whose ways are there: no simulators or Time
+    /// Machine, and `clean` empties no cache and removes nothing from Docker
+    /// there yet.
+    #[cfg(windows)]
+    pub const ALL: &'static [Id] = &[Id::Builds, Id::Dependencies, Id::Incremental];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -107,7 +113,7 @@ impl Id {
     }
 
     pub fn parse(s: &str) -> Option<Id> {
-        Id::ALL.into_iter().find(|id| id.id() == s)
+        Id::ALL.iter().copied().find(|id| id.id() == s)
     }
 
     pub fn title(self) -> &'static str {
@@ -127,6 +133,11 @@ impl Id {
             Id::Simulators => {
                 "Simulator runtimes not used in 60 days, and the simulators left without one. \
                  Xcode downloads a runtime again when you need it."
+            }
+            Id::Builds if cfg!(windows) => {
+                "A project's build output (Rust's target, .NET's bin and obj, Flutter's and \
+                 Gradle's build, .next, dist) that nothing has built into or run from for 14 \
+                 days. Its next build makes it again, from scratch."
             }
             Id::Builds => {
                 "A project's build output (Rust's target, Flutter's and Gradle's build, \
@@ -169,12 +180,31 @@ impl Id {
         }
     }
 
-    /// Why it can't run on this Mac, if it can't.
+    /// Why it can't run here, if it can't.
     pub fn unavailable(self, home: &Path) -> Option<String> {
         match self {
             Id::Simulators if simctl().is_none() => Some(NO_XCODE.into()),
             Id::Docker if crate::docker::command(home).is_none() => {
                 Some("Needs Docker, which isn't installed.".into())
+            }
+            // What's still used is told by when its files were last read:
+            // where the disk doesn't record that (most Windows PCs), a build
+            // still run from, or a project's packages, would look unused.
+            Id::Builds | Id::Dependencies
+                if !crate::os::fs::records_last_access(home).unwrap_or(false) =>
+            {
+                let what = match self {
+                    Id::Builds => "a build still in use (a tool run from it) can't be told",
+                    _ => "the packages of a project that still runs can't be told",
+                };
+                Some(format!(
+                    "{} doesn't record when a file was last opened, so {what} from an old one.",
+                    if cfg!(windows) {
+                        "Windows on this PC"
+                    } else {
+                        "This disk"
+                    }
+                ))
             }
             _ => None,
         }
@@ -201,7 +231,15 @@ pub struct Last {
     pub failed: usize,
     /// "Deleted the iOS 26.0 Simulator", "Emptied 4 caches", "Nothing to tidy".
     pub note: Option<String>,
+    /// What it was done to, the first [`PATHS_KEPT`]: folders, and Docker's
+    /// containers and images by name. The app names the folders kept out of
+    /// Time Machine by themselves. (Older records have none.)
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
 }
+
+/// The most of a run's [`Done`] paths its record keeps.
+pub const PATHS_KEPT: usize = 20;
 
 /// A tidy-up as `mdif tidy --json` lists it.
 #[derive(Debug, Clone, Serialize)]
@@ -244,8 +282,8 @@ pub fn record(store: &Store, id: Id, last: &Last) -> Result<()> {
 /// Every tidy-up, whether it's on, and what it did last.
 pub fn list(store: &Store, home: &Path) -> Result<Vec<Tidy>> {
     Id::ALL
-        .into_iter()
-        .map(|id| {
+        .iter()
+        .map(|&id| {
             let why = id.unavailable(home);
             Ok(Tidy {
                 id: id.id(),
@@ -263,7 +301,7 @@ pub fn list(store: &Store, home: &Path) -> Result<Vec<Tidy>> {
 /// The tidy-ups that are on and due at `now`: never run, or not for a day.
 pub fn due(store: &Store, now: i64) -> Result<Vec<Id>> {
     let mut out = Vec::new();
-    for id in Id::ALL {
+    for &id in Id::ALL {
         if !is_on(store, id)? {
             continue;
         }
@@ -321,6 +359,12 @@ impl Outcome {
             done: self.done.len(),
             failed: self.failed.len(),
             note: self.note.clone(),
+            paths: self
+                .done
+                .iter()
+                .take(PATHS_KEPT)
+                .map(|d| d.path.clone())
+                .collect(),
         }
     }
 
@@ -359,7 +403,7 @@ impl Outcome {
 /// Runs a tidy-up now (`dry_run`: says what it would do, and does nothing).
 pub fn run(id: Id, home: &Path, keep: &Keep, now: i64, dry_run: bool) -> Outcome {
     // Measuring must never download a cloud placeholder.
-    if let Err(e) = mdif_macos::fs::forbid_dataless_materialization() {
+    if let Err(e) = crate::os::fs::forbid_dataless_materialization() {
         let mut o = Outcome::default();
         o.fail(
             id,
@@ -460,7 +504,7 @@ fn backups(home: &Path, keep: &Keep, dry_run: bool) -> Outcome {
     let mut o = Outcome::default();
     // The marks first: they're reads, git only for what isn't marked yet.
     fn unmarked(d: &Path) -> bool {
-        !mdif_macos::fs::excluded_from_backup(d).unwrap_or(true) && !crate::timemachine::let_in(d)
+        !crate::os::fs::excluded_from_backup(d).unwrap_or(true) && !crate::timemachine::let_in(d)
     }
     let mut found = artifact_dirs(home, |d| {
         unmarked(d) && crate::timemachine::rebuildable(d).is_some()
@@ -918,8 +962,9 @@ pub fn artifact_folders(home: &Path) -> Vec<PathBuf> {
 }
 
 /// The folders named in [`ARTIFACTS`] that `take` takes, in the code
-/// folders. Never into one of those, `.git` or other hidden folders (but
-/// `.claude/worktrees`).
+/// folders ([`code_roots`]), and on Windows .NET's `bin` and `obj` beside a
+/// project file. Never into one of those, `.git` or other hidden folders
+/// (but `.claude/worktrees`).
 fn artifact_dirs(home: &Path, take: fn(&Path) -> bool) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, take: fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
         for (name, path) in subdirs(dir) {
@@ -930,6 +975,14 @@ fn artifact_dirs(home: &Path, take: fn(&Path) -> bool) -> Vec<PathBuf> {
                 continue;
             }
             if ARTIFACTS.contains(&name) {
+                if take(&path) {
+                    out.push(path);
+                }
+                continue;
+            }
+            // Only beside a project file: `bin` is also where people keep
+            // their scripts, and that one is walked like any folder.
+            if crate::owners::dotnet_output(name) && clean::build_output(&path) {
                 if take(&path) {
                     out.push(path);
                 }
@@ -980,19 +1033,19 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
             let Ok(m) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            if m.dev() != dev || dataless(&m) {
+            if portable::dev(&path, &m) != dev || dataless(&m) {
                 continue;
             }
             if crate::timemachine::download_cache(&path, home) {
                 out.push(path);
             } else if depth < TOOL_DEPTH
-                && !mdif_macos::fs::excluded_from_backup(&path).unwrap_or(true)
+                && !crate::os::fs::excluded_from_backup(&path).unwrap_or(true)
             {
                 walk(&path, depth + 1, home, dev, out);
             }
         }
     }
-    let Ok(dev) = std::fs::symlink_metadata(home).map(|m| m.dev()) else {
+    let Ok(dev) = std::fs::symlink_metadata(home).map(|m| portable::dev(home, &m)) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -1003,7 +1056,7 @@ pub fn tool_caches(home: &Path) -> Vec<PathBuf> {
         if crate::timemachine::download_cache(&tool, home) {
             out.push(tool);
         } else if privacy::may_open(&tool)
-            && !mdif_macos::fs::excluded_from_backup(&tool).unwrap_or(true)
+            && !crate::os::fs::excluded_from_backup(&tool).unwrap_or(true)
         {
             walk(&tool, 2, home, dev, &mut out);
         }
@@ -1248,13 +1301,16 @@ fn cache_folders(home: &Path, may_open: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> 
 fn subdirs(dir: &Path) -> Vec<(std::ffi::OsString, PathBuf)> {
     let (Ok(rd), Ok(dev)) = (
         std::fs::read_dir(dir),
-        std::fs::symlink_metadata(dir).map(|m| m.dev()),
+        std::fs::symlink_metadata(dir).map(|m| crate::portable::dev(dir, &m)),
     ) else {
         return Vec::new();
     };
     rd.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter(|e| e.metadata().is_ok_and(|m| m.dev() == dev))
+        .filter(|e| {
+            e.metadata()
+                .is_ok_and(|m| crate::portable::dev(e, &m) == dev)
+        })
         .map(|e| (e.file_name(), e.path()))
         .collect()
 }
@@ -1267,7 +1323,7 @@ fn real_dir(p: &Path) -> bool {
 /// does: for a big cache, a few folders' worth of looking, not all of it.
 /// Not into a link, another volume or a cloud placeholder.
 fn holds_at_least(dir: &Path, min: u64) -> bool {
-    let Ok(dev) = std::fs::symlink_metadata(dir).map(|m| m.dev()) else {
+    let Ok(dev) = std::fs::symlink_metadata(dir).map(|m| portable::dev(dir, &m)) else {
         return false;
     };
     let mut total = 0;
@@ -1282,11 +1338,11 @@ fn holds_at_least(dir: &Path, min: u64) -> bool {
                 continue;
             };
             if m.is_dir() {
-                if m.dev() == dev && !dataless(&m) {
+                if portable::dev(&e, &m) == dev && !dataless(&m) {
                     todo.push(e.path());
                 }
             } else {
-                total += m.blocks() * 512;
+                total += portable::allocated(&e, &m);
                 if total >= min {
                     return true;
                 }
@@ -1299,7 +1355,7 @@ fn holds_at_least(dir: &Path, min: u64) -> bool {
 /// A folder whose contents aren't on this disk (a cloud placeholder):
 /// listing it would download them.
 fn dataless(m: &std::fs::Metadata) -> bool {
-    m.st_flags() & mdif_macos::bulk::SF_DATALESS != 0
+    portable::is_dataless(m)
 }
 
 /// The newest modification time of `dir` and what's in it, `depth` levels
@@ -1324,17 +1380,17 @@ fn newest(dir: &Path, depth: usize, may_open: &dyn Fn(&Path) -> bool) -> Option<
             let Ok(m) = e.metadata() else {
                 continue;
             };
-            if m.dev() != dev {
+            if portable::dev(&e, &m) != dev {
                 continue;
             }
-            *newest = (*newest).max(m.mtime());
+            *newest = (*newest).max(portable::mtime(&m));
             if m.is_dir() && !dataless(&m) {
                 down(&e.path(), depth - 1, dev, newest);
             }
         }
     }
-    let mut t = m.mtime();
-    down(dir, depth, m.dev(), &mut t);
+    let mut t = portable::mtime(&m);
+    down(dir, depth, portable::dev(dir, &m), &mut t);
     Some(t)
 }
 
@@ -1359,10 +1415,10 @@ fn usage(dir: &Path, may_open: &dyn Fn(&Path) -> bool) -> Option<Usage> {
     if !root.is_dir() {
         return None;
     }
-    let dev = root.dev();
+    let dev = portable::dev(dir, &root);
     let mut u = Usage {
-        bytes: root.blocks() * 512,
-        newest: root.mtime(),
+        bytes: portable::allocated(dir, &root),
+        newest: portable::mtime(&root),
     };
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
@@ -1373,24 +1429,226 @@ fn usage(dir: &Path, may_open: &dyn Fn(&Path) -> bool) -> Option<Usage> {
             let Ok(m) = e.metadata() else {
                 continue;
             };
-            if m.dev() != dev {
+            if portable::dev(&e, &m) != dev {
                 continue;
             }
-            u.bytes += m.blocks() * 512;
-            u.newest = u.newest.max(m.mtime());
+            u.bytes += portable::allocated(&e, &m);
+            u.newest = u.newest.max(portable::mtime(&m));
             if m.is_dir() {
                 if !dataless(&m) {
                     todo.push(e.path());
                 }
             } else if m.is_file() {
-                u.newest = u.newest.max(m.atime());
+                u.newest = u.newest.max(portable::atime(&m));
             }
         }
     }
     Some(u)
 }
 
+// What every system's tidy-ups have in common, run on each: the code
+// folders, what tells a build or packages still in use, incremental caches.
 #[cfg(test)]
+mod portable_tests {
+    use super::*;
+    use std::fs::FileTimes;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const NOW: i64 = 1_792_600_000;
+
+    fn at(ts: i64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(ts as u64)
+    }
+
+    /// Sets when `path` was last written and last read.
+    fn set_times(path: &Path, written: i64, read: i64) {
+        // A folder is opened for its times only with FILE_FLAG_BACKUP_SEMANTICS,
+        // and setting them takes FILE_WRITE_ATTRIBUTES alone.
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .access_mode(0x0100)
+                .custom_flags(0x0200_0000)
+                .open(path)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        let f = std::fs::File::open(path).unwrap();
+        let times = FileTimes::new()
+            .set_accessed(at(read))
+            .set_modified(at(written));
+        f.set_times(times).unwrap();
+    }
+
+    /// `path` and everything in it written and read at `ts`, deepest first (a
+    /// folder's modification time changes when something is added to it).
+    fn age(path: &Path, ts: i64) {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            for e in std::fs::read_dir(path).unwrap().flatten() {
+                age(&e.path(), ts);
+            }
+        }
+        set_times(path, ts, ts);
+    }
+
+    fn write(path: &Path, bytes: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![7u8; bytes]).unwrap();
+    }
+
+    /// A project with its `node_modules`, as npm leaves it.
+    fn npm_project(dir: &Path) -> PathBuf {
+        write(&dir.join("package.json"), 10);
+        write(&dir.join("package-lock.json"), 10);
+        write(&dir.join("node_modules/left-pad/index.js"), 5000);
+        dir.join("node_modules")
+    }
+
+    fn paths(o: &Outcome) -> Vec<&Path> {
+        o.done.iter().map(|d| d.path.as_path()).collect()
+    }
+
+    fn anything(_: &Path) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_code_folder_is_looked_at_once_whatever_its_case() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        // On a disk that ignores case, "Projects" and "projects" (both code
+        // folders' names) are this one folder.
+        let web = npm_project(&h.join("Projects/web"));
+        let app = npm_project(&h.join("CODE/app"));
+        npm_project(&h.join("Elsewhere/site"));
+        let mut want = vec![app, web];
+        want.sort();
+        assert_eq!(dependency_dirs(h), want);
+    }
+
+    #[test]
+    fn packages_go_once_nothing_installed_into_or_ran_from_them_for_14_days() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let old = npm_project(&h.join("devel/old"));
+        let used = npm_project(&h.join("devel/used"));
+        age(&h.join("devel"), NOW - 20 * DAY);
+        // This project still runs: a file of its packages was read yesterday.
+        set_times(&used.join("left-pad/index.js"), NOW - 20 * DAY, NOW - DAY);
+        let keep = Keep::parse("", h);
+
+        let o = unused(Id::Dependencies, h, &keep, NOW, true, &anything);
+        assert_eq!(paths(&o), [old.as_path()]);
+        assert!(o.failed.is_empty(), "{:?}", o.failed);
+        assert!(o.done[0].bytes > 0);
+        let note = o.note.as_deref().unwrap();
+        assert!(note.starts_with("Deleted the node_modules of"), "{note}");
+        assert!(old.is_dir(), "a dry run deletes nothing");
+
+        let o = unused(Id::Dependencies, h, &keep, NOW, false, &anything);
+        assert_eq!(paths(&o), [old.as_path()]);
+        assert!(!old.exists() && used.is_dir());
+    }
+
+    #[test]
+    fn a_build_still_run_from_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for p in ["devel/old", "devel/tool"] {
+            write(&h.join(p).join("Cargo.toml"), 10);
+            write(&h.join(p).join("target/release/app"), 5000);
+        }
+        age(&h.join("devel"), NOW - 20 * DAY);
+        // Built 20 days ago, run two days ago.
+        set_times(
+            &h.join("devel/tool/target/release/app"),
+            NOW - 20 * DAY,
+            NOW - 2 * DAY,
+        );
+        let o = unused(Id::Builds, h, &Keep::parse("", h), NOW, true, &anything);
+        assert_eq!(paths(&o), [h.join("devel/old/target").as_path()]);
+    }
+
+    #[test]
+    fn incremental_caches_go_after_30_days_without_a_build() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut incs = Vec::new();
+        for p in ["Code/old", "Code/fresh"] {
+            write(&h.join(p).join("Cargo.toml"), 10);
+            let inc = h.join(p).join("target/debug/incremental");
+            write(&inc.join("app-1x2y/s-abc/query-cache.bin"), 20_000);
+            incs.push(inc);
+        }
+        age(&h.join("Code"), NOW - 40 * DAY);
+        // A build three days ago.
+        age(&incs[1].join("app-1x2y"), NOW - 3 * DAY);
+        let keep = Keep::parse("", h);
+
+        let o = incremental(h, &keep, NOW, true);
+        assert_eq!(paths(&o), [incs[0].as_path()]);
+        assert!(incs[0].is_dir(), "a dry run deletes nothing");
+        let o = incremental(h, &keep, NOW, false);
+        assert_eq!(paths(&o), [incs[0].as_path()]);
+        assert!(!incs[0].exists() && incs[1].is_dir());
+        assert_eq!(Id::Incremental.unavailable(h), None);
+    }
+
+    /// Where the disk doesn't record when a file was read, builds and
+    /// packages in use can't be told: those two aren't offered.
+    #[test]
+    fn builds_and_packages_need_the_disk_to_record_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let recorded = crate::os::fs::records_last_access(h).unwrap();
+        println!("last access recorded: {recorded}");
+        for id in [Id::Builds, Id::Dependencies] {
+            let why = id.unavailable(h);
+            assert_eq!(why.is_none(), recorded, "{why:?}");
+            if let Some(why) = why {
+                assert!(
+                    why.contains("doesn't record when a file was last opened"),
+                    "{why}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_tidy_ups_are_those_its_clean_up_does() {
+        assert_eq!(
+            Id::ALL.to_vec(),
+            vec![Id::Builds, Id::Dependencies, Id::Incremental]
+        );
+        assert_eq!(Id::parse("simulators"), None);
+        assert_eq!(Id::parse("caches"), None);
+        assert_eq!(Id::parse("incremental"), Some(Id::Incremental));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_dotnet_output_and_visual_studios_projects_count() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let app = h.join(r"source\repos\Shop\Shop.Web");
+        write(&app.join("Shop.Web.csproj"), 10);
+        write(&app.join(r"bin\Debug\net8.0\Shop.Web.dll"), 5000);
+        write(&app.join(r"obj\project.assets.json"), 5000);
+        // A bin of scripts, with no project file beside it: walked, not taken.
+        write(&h.join(r"devel\scripts\bin\tool.ps1"), 10);
+        let rust = h.join(r"devel\scripts\bin\helper");
+        write(&rust.join("Cargo.toml"), 10);
+        write(&rust.join(r"target\debug\helper.exe"), 10);
+        let mut want = vec![app.join("bin"), app.join("obj"), rust.join("target")];
+        want.sort();
+        assert_eq!(build_dirs(h), want);
+    }
+}
+
+// What these tests assert is macOS: its folders, tools and file system.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::fs::{File, FileTimes};
@@ -1518,6 +1776,13 @@ mod tests {
         let last = o.last(NOW);
         assert_eq!((last.done, last.failed), (2, 0));
         assert_eq!(last.freed, o.freed());
+        // What it was done to, for the app to name.
+        let done: Vec<&Path> = o.done.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(
+            last.paths.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            done
+        );
+        assert!(done.contains(&old.as_path()), "{done:?}");
 
         let again = run(Id::Incremental, h, &keep, NOW, false);
         assert!(again.done.is_empty());
@@ -1788,6 +2053,7 @@ mod tests {
             done: 2,
             failed: 1,
             note: Some("Emptied 2 caches; 1 more couldn't be emptied".into()),
+            paths: vec![PathBuf::from("/Users/me/Library/Caches/a")],
         };
         record(&store, Id::Caches, &last).unwrap();
         assert_eq!(super::last(&store, Id::Caches).unwrap(), Some(last));

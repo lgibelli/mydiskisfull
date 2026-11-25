@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/mdif-macos", "crates/mdif-core", "crates/mdif-cli"]
+members = ["crates/mdif-macos", "crates/mdif-windows", "crates/mdif-core", "crates/mdif-cli"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.8"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 rust-version = "1.88"
@@ -16,6 +16,7 @@ base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+getrandom = "0.4.3"
 libc = "0.2.190"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
@@ -26,6 +27,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
+windows-sys = { version = "0.61.2", default-features = false }
 
 mdif-core = { path = "crates/mdif-core" }
 mdif-macos = { path = "crates/mdif-macos" }
+mdif-windows = { path = "crates/mdif-windows" }

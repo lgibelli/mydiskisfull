@@ -35,8 +35,8 @@ pub fn list(db: &Path, json_out: bool) -> Result<()> {
     let home = home();
     // The app runs this unattended: a privacy prompt would wait for an
     // answer (see mdif_core::privacy).
-    let probes = mdif_macos::sys::access_probes(&home);
-    privacy::avoid_prompts(mdif_macos::sys::full_disk_access(&probes) != Some(true));
+    let probes = mdif_core::os::sys::access_probes(&home);
+    privacy::avoid_prompts(mdif_core::os::sys::full_disk_access(&probes) != Some(true));
     let k = load(db)?;
     if json_out {
         let out: Vec<_> = k

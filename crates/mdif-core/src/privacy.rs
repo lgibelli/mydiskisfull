@@ -9,7 +9,6 @@
 //! Access. Other protected places (Mail, Safari, the Trash) fail quietly
 //! instead, and need no care.
 
-use std::ffi::OsStr;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -46,53 +45,53 @@ pub fn may_open(path: &Path) -> bool {
 /// network volumes prompt; an internal one under /Volumes can't be told
 /// apart by its path).
 pub fn prompts(path: &Path) -> bool {
-    // By names, whatever their case: the disk ignores it, so
-    // `/users/me/documents` is Documents too.
-    let is = |n: &OsStr, name: &str| n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(name));
-    let mut names: Vec<&OsStr> = path
+    // Only macOS asks (TCC); nothing else shows a prompt for opening a folder.
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    // The names as the file system takes them: `..` goes back one, and case
+    // doesn't count, as on the Mac's own volume (`/users/me/documents` is
+    // Documents all the same).
+    let mut names: Vec<String> = Vec::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(n) => names.push(n.to_string_lossy().to_lowercase()),
+            Component::ParentDir => {
+                names.pop();
+            }
+            _ => {}
+        }
+    }
+    let data: Vec<String> = Path::new(DATA_ROOT)
         .components()
         .filter_map(|c| match c {
-            Component::Normal(n) => Some(n),
+            Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
             _ => None,
         })
         .collect();
-    // The Data volume's prefix taken off leaves the same names.
-    let data: Vec<&str> = DATA_ROOT.split('/').filter(|n| !n.is_empty()).collect();
-    if names.len() >= data.len() && names.iter().zip(&data).all(|(n, d)| is(n, d)) {
+    if names.starts_with(&data) {
         names.drain(..data.len());
     }
-    // Another disk: removable and network volumes prompt.
-    if let [volumes, _, ..] = names.as_slice()
-        && is(volumes, "Volumes")
-    {
-        return true;
-    }
-    // /Users/<name>/...
-    let [users, _, rest @ ..] = names.as_slice() else {
-        return false;
-    };
-    if !is(users, "Users") {
-        return false;
-    }
-    match rest {
-        [top, ..]
-            if ["Desktop", "Documents", "Downloads"]
-                .iter()
-                .any(|d| is(top, d)) =>
-        {
-            true
-        }
-        [lib, place, ..] if is(lib, "Library") => {
-            let inside = rest.len() > 2;
-            if is(place, "Mobile Documents") || is(place, "CloudStorage") {
-                true
-            } else if is(place, "Containers") || is(place, "Group Containers") {
-                // Listing the containers is fine; looking inside one isn't.
-                inside
-            } else {
-                false
-            }
-        }
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    match names.as_slice() {
+        ["volumes", _, ..] => true,
+        ["users", _, "desktop" | "documents" | "downloads", ..] => true,
+        [
+            "users",
+            _,
+            "library",
+            "mobile documents" | "cloudstorage",
+            ..,
+        ] => true,
+        // Listing the containers is fine; looking inside one isn't.
+        [
+            "users",
+            _,
+            "library",
+            "containers" | "group containers",
+            _,
+            ..,
+        ] => true,
         _ => false,
     }
 }
@@ -101,6 +100,7 @@ pub fn prompts(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_folders_that_prompt() {
         for p in [
@@ -113,10 +113,13 @@ mod tests {
             "/Users/me/Library/Group Containers/group.x/Library",
             "/System/Volumes/Data/Users/me/Documents/a",
             "/Volumes/Backup/Users",
-            "/System/Volumes/Data/Volumes/Backup",
-            // Typed in another case: the same folders.
-            "/users/me/documents/a",
+            // The volume ignores case, and `..` goes back.
+            "/users/me/documents/Taxes",
             "/Users/me/DESKTOP",
+            "/volumes/Backup",
+            "/Users/me/devel/../Documents/x",
+            "/Users/me/Library/Developer/../CloudStorage/x",
+            "/System/Volumes/Data/Volumes/Backup",
             "/system/volumes/data/Users/me/Downloads",
             "/Users/me/library/containers/net.whatsapp.WhatsApp/Data",
         ] {
@@ -132,11 +135,13 @@ mod tests {
             "/private/var/folders/x/T/Documents",
             "/Applications",
             "/Volumes",
+            "/Users/me/Documents/..",
         ] {
             assert!(!prompts(Path::new(p)), "{p}");
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn avoided_only_when_asked() {
         let _off_after = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
@@ -146,5 +151,17 @@ mod tests {
         assert!(may_open(Path::new("/Users/me/devel")));
         avoid_prompts(false);
         assert!(may_open(docs));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nothing_prompts_off_macos() {
+        let _off_after = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+        avoid_prompts(true);
+        for p in ["/Users/me/Documents/x", r"C:\Users\me\Documents\x"] {
+            assert!(!prompts(Path::new(p)), "{p}");
+            assert!(may_open(Path::new(p)), "{p}");
+        }
+        avoid_prompts(false);
     }
 }
