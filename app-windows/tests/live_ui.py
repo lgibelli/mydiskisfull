@@ -12,7 +12,7 @@ from comtypes.gen import UIAutomationClient as U  # noqa: E402
 uia = comtypes.client.CreateObject(U.CUIAutomation, interface=U.IUIAutomation)
 
 
-def _until(what, get, secs):
+def _until(what, get, secs, seen=lambda: ''):
     end = time.time() + secs
     while True:
         try:
@@ -22,7 +22,7 @@ def _until(what, get, secs):
         if found:
             return found
         if time.time() > end:
-            sys.exit(f'timed out waiting for {what}')
+            sys.exit(f'timed out waiting for {what}{seen()}')
         time.sleep(1)
 
 
@@ -45,7 +45,8 @@ def find(window, label, secs=60):
     cond = uia.CreatePropertyCondition(U.UIA_ControlTypePropertyId, U.UIA_ButtonControlTypeId)
     return _until(f'the {label} button', lambda: next(
         (b for b in _elements(window, cond) if (b.CurrentName or '').strip() == label
-         and b.CurrentIsEnabled), None), secs)
+         and b.CurrentIsEnabled), None), secs,
+        lambda: f'; its buttons: {[b.CurrentName for b in _elements(window, cond)]}')
 
 
 def press(window, label, secs=60):

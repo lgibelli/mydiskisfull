@@ -77,6 +77,11 @@ with open(now[files['old.bin'].lower()], 'r+b') as f:
 # scheduled task waits for an idle PC and a sign-out the runner can't give.
 shots = os.path.join(os.environ['RUNNER_TEMP'], 'shots')
 os.makedirs(shots, exist_ok=True)
+# A runner new to Windows 11 shows its first sign-in's privacy screen over
+# everything: closed (it runs in WWAHost.exe), and not shown again.
+subprocess.run(['taskkill', '/f', '/im', 'WWAHost.exe'], capture_output=True)
+subprocess.run(['reg', 'add', r'HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE', '/v',
+                'DisablePrivacyExperience', '/t', 'REG_DWORD', '/d', '1', '/f'], capture_output=True)
 os.startfile('ms-settings:storagepolicies')
 window = ui.wait_window('Settings')
 time.sleep(5)
