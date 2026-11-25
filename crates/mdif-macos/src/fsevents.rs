@@ -61,8 +61,10 @@ unsafe impl Send for Stream {}
 
 impl Stream {
     /// Watch `paths` (directories, recursively). `since` is an event ID to
-    /// replay from, or [`SINCE_NOW`]. Events caused by this process are
-    /// left out, so the watcher's own history writes never wake it.
+    /// replay from, or [`SINCE_NOW`]. Events this process causes while the
+    /// stream runs are left out; replayed ones aren't (FSEvents doesn't
+    /// know who made them), so a replay holds the watcher's own history
+    /// and log writes: two small folders listed again, their growth its own.
     pub fn start(paths: &[&Path], since: u64, latency: Duration) -> io::Result<Stream> {
         // Core Foundation needs valid UTF-8, and returns null otherwise.
         let paths: Vec<&str> = paths

@@ -57,6 +57,34 @@ pub struct Watcher {
     access_probes: Vec<PathBuf>,
     /// Free space at the last sample.
     last_avail: Option<u64>,
+    /// What a sample couldn't record (the history busy, the disk full):
+    /// the processes' writes and the folders' growth since the one before,
+    /// added to the next sample's rather than lost.
+    unsaved: Unsaved,
+}
+
+#[derive(Default)]
+struct Unsaved {
+    writes: Vec<(String, u64)>,
+    growth: Vec<(String, i64)>,
+}
+
+impl Unsaved {
+    /// `writes` and `growth` with what's here added, by name; here emptied.
+    fn add_to(&mut self, writes: &mut Vec<(String, u64)>, growth: &mut Vec<(String, i64)>) {
+        for (name, b) in self.writes.drain(..) {
+            match writes.iter_mut().find(|w| w.0 == name) {
+                Some(w) => w.1 += b,
+                None => writes.push((name, b)),
+            }
+        }
+        for (owner, d) in self.growth.drain(..) {
+            match growth.iter_mut().find(|g| g.0 == owner) {
+                Some(g) => g.1 += d,
+                None => growth.push((owner, d)),
+            }
+        }
+    }
 }
 
 /// What counts as an incident. The defaults are the plan's clauses.
@@ -207,13 +235,20 @@ impl Cost {
     }
 
     /// Steady-state cost per hour at one sample every `interval` seconds
-    /// and one owners period every [`Cost::every`].
+    /// and one owners period every [`Cost::every`], or as many as ran once
+    /// an hour has been seen, if more: one also runs early when space comes
+    /// back ([`EARLY_RISE`]).
     pub fn per_hour(&self, interval: i64) -> (Duration, u64) {
         let (cpu, written) = self.per_sample();
         let samples = HOUR as f64 / interval.max(1) as f64;
+        let ran = if self.samples as f64 >= samples {
+            self.periods as f64 * samples / self.samples as f64
+        } else {
+            0.0
+        };
         let periods = match self.every {
             0 => 0.0,
-            every => HOUR as f64 / every as f64,
+            every => (HOUR as f64 / every as f64).max(ran),
         };
         let period = self.per_period().unwrap_or_default();
         (
@@ -261,6 +296,7 @@ impl Watcher {
             period_writes: HashMap::new(),
             access_probes: Vec::new(),
             last_avail: None,
+            unsaved: Unsaved::default(),
         })
     }
 
@@ -445,8 +481,12 @@ impl Watcher {
         );
         meta.push(("watch.cost".to_string(), format_cost(&so_far)));
         let meta: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        self.store
-            .record(&self.key, point, &writes, &growth, &meta)?;
+        let (mut writes, mut growth) = (writes, growth);
+        self.unsaved.add_to(&mut writes, &mut growth);
+        if let Err(e) = self.store.record(&self.key, point, &writes, &growth, &meta) {
+            self.unsaved = Unsaved { writes, growth };
+            return Err(e);
+        }
         if now - self.last_compact >= HOUR {
             self.store.compact(now)?;
             self.last_compact = now;
@@ -793,6 +833,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn what_a_sample_couldnt_record_goes_with_the_next() {
+        let mut u = Unsaved {
+            writes: vec![("OneDrive".into(), 10), ("mds".into(), 5)],
+            growth: vec![("/Users/me/Movies".into(), -3)],
+        };
+        let mut writes = vec![("OneDrive".to_string(), 1)];
+        let mut growth = vec![("/Users/me/.cache".to_string(), 7)];
+        u.add_to(&mut writes, &mut growth);
+        assert_eq!(
+            writes,
+            [("OneDrive".to_string(), 11), ("mds".to_string(), 5)]
+        );
+        assert_eq!(
+            growth,
+            [
+                ("/Users/me/.cache".to_string(), 7),
+                ("/Users/me/Movies".to_string(), -3)
+            ]
+        );
+        assert!(u.writes.is_empty() && u.growth.is_empty());
+    }
+
+    #[test]
     fn samples_space_and_measures_its_own_writes() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = Watcher::new(Store::open_in_memory().unwrap(), dir.path()).unwrap();
@@ -846,6 +909,17 @@ mod tests {
         assert_eq!(c.per_period(), Some(ms(300)));
         // 12 samples and 2 periods an hour.
         assert_eq!(c.per_hour(300), (ms(660), 480_000));
+        // Space coming back again and again ran six more periods early in
+        // the next hour, counted as they ran.
+        let mut busy = c;
+        for i in 0..12 {
+            let period = (i % 2 == 0).then_some((ms(300), false));
+            let extra = period.map_or(ms(0), |(p, _)| p);
+            busy.add(ms(5) + extra, 40_000, period);
+        }
+        assert_eq!(busy.periods, 7);
+        // Seven after the first in 28 samples (2 h 20 min): 3 an hour.
+        assert_eq!(busy.per_hour(300), (ms(60) + ms(900), 480_000));
         // Stored and read back.
         assert_eq!(parse_cost(&format_cost(&c)), Some(c));
         // Before a second period, the catch-up stands in for one.

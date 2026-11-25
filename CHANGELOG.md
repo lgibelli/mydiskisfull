@@ -171,6 +171,14 @@ All notable changes to this project are documented here. The format is based on
   weren't seen, and Keep It left the row's button on Storage until the next measurement.
 - Empty Trash's question quoted the Trash's size when last measured as if it were all that
   goes, and rows without a folder (system data, macOS's volumes) could be drawn as one.
+- The watcher lost a sample's writes and folder growth when its history couldn't be written
+  (the disk full); they're recorded with the next sample.
+- Two watchers could keep one history (the app's and `mdif agent`'s, or one in Terminal),
+  counting every write and growth twice: one started while another runs waits for it to stop.
+- `mdif agent`'s log was never rotated, and the app's only when its watcher started: both are
+  rotated past a megabyte as they run.
+- The watcher's cost per hour left out the updates it runs early when space comes back, and
+  writes per day split the day the clocks change on in two.
 - Development: an interrupted Sparkle download broke every later build; a failed fetch of the
   online folder list let `app/knowledge.sh` publish a version that wasn't higher; a release
   could be built with a beta Xcode; CI didn't run on release branches.

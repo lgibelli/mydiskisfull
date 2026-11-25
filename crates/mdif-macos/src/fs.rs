@@ -401,9 +401,44 @@ pub fn lock(file: &std::fs::File) -> io::Result<()> {
     }
 }
 
+/// Takes `file`'s advisory lock if nobody holds it: false, not waiting,
+/// when another open of it does.
+pub fn try_lock(file: &std::fs::File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is the open file's, for as long as `file` is.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(true)
+    } else {
+        match io::Error::last_os_error() {
+            e if e.raw_os_error() == Some(libc::EWOULDBLOCK) => Ok(false),
+            e => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_held_elsewhere_isnt_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let open = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
+        let first = open();
+        assert!(try_lock(&first).unwrap());
+        let second = open();
+        assert!(!try_lock(&second).unwrap());
+        drop(first);
+        assert!(try_lock(&second).unwrap());
+    }
 
     #[test]
     fn a_lock_waits_for_the_one_holding_it() {
