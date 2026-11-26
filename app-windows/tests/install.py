@@ -27,9 +27,14 @@ def agent():
     return json.loads(subprocess.check_output([mdif, 'agent', 'status', '--json']))
 
 def watchers():
+    """Each running watcher as (process id, when it started): Windows can give
+    a new process the id of one just ended, so the id alone can't tell a
+    restarted watcher from the old one."""
     out = subprocess.check_output(
-        ['tasklist', '/FI', 'IMAGENAME eq mdif-watch.exe', '/FO', 'CSV', '/NH'], text=True)
-    return {int(l.split('","')[1]) for l in out.splitlines() if l.startswith('"mdif-watch.exe"')}
+        ['powershell', '-NoProfile', '-Command',
+         'Get-Process mdif-watch -ErrorAction SilentlyContinue | '
+         'ForEach-Object { "$($_.Id) $($_.StartTime.Ticks)" }; exit 0'], text=True)
+    return {tuple(int(f) for f in l.split()) for l in out.splitlines() if l.strip()}
 
 def wait(what, test, secs=90):
     end = time.time() + secs
