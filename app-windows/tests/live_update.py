@@ -98,6 +98,10 @@ while True:
         time.sleep(3)
     if not running('MyDiskIsFull.exe'):
         break
+    if not ui.alive(window):
+        # Its window hidden: the app is stopping mdif and starting the installer.
+        wait('the app to close for the installer', lambda: not running('MyDiskIsFull.exe'), 300)
+        break
     said = ui.named(window, lambda n: n.startswith(("Couldn't", 'Not installed', 'A clean-up',
                                                    'mdif', 'The update')))
     if not running('MyDiskIsFull.exe'):

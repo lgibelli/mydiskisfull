@@ -17,8 +17,8 @@ def _until(what, get, secs, seen=lambda: ''):
     while True:
         try:
             found = get()
-        except comtypes.COMError:
-            found = None  # the page is being drawn again
+        except (comtypes.COMError, ValueError):
+            found = None  # the page is being drawn again, or the window just closed
         if found:
             return found
         if time.time() > end:
@@ -70,6 +70,15 @@ def named(window, test):
                 if (n := (e.CurrentName or '').strip()) and test(n)]
     except (comtypes.COMError, ValueError):  # ValueError: the window has just closed
         return []
+
+
+def alive(window):
+    """Whether the window is still there (an app installing an update hides
+    it before it ends)."""
+    try:
+        return window.CurrentIsOffscreen is not None and bool(window.CurrentName)
+    except (comtypes.COMError, ValueError):
+        return False
 
 
 def shot(path):
