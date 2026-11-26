@@ -50,17 +50,26 @@ def find(window, label, secs=60):
 
 
 def press(window, label, secs=60):
-    button = find(window, label, secs)
-    # Scrolled to first, as a person would (one below the fold is offscreen).
-    try:
-        button.GetCurrentPattern(U.UIA_ScrollItemPatternId) \
-            .QueryInterface(U.IUIAutomationScrollItemPattern).ScrollIntoView()
-        time.sleep(1)
-    except comtypes.COMError:
-        pass
-    button.GetCurrentPattern(U.UIA_InvokePatternId) \
-        .QueryInterface(U.IUIAutomationInvokePattern).Invoke()
-    print(f'pressed {label}')
+    """Press the button: found again if the page draws it anew in between."""
+    end = time.time() + secs
+    while True:
+        button = find(window, label, max(1, end - time.time()))
+        try:
+            # Scrolled to first, as a person would (one below the fold is offscreen).
+            try:
+                button.GetCurrentPattern(U.UIA_ScrollItemPatternId) \
+                    .QueryInterface(U.IUIAutomationScrollItemPattern).ScrollIntoView()
+                time.sleep(1)
+            except (comtypes.COMError, ValueError):
+                pass
+            button.GetCurrentPattern(U.UIA_InvokePatternId) \
+                .QueryInterface(U.IUIAutomationInvokePattern).Invoke()
+            print(f'pressed {label}')
+            return
+        except (comtypes.COMError, ValueError):  # gone as it was pressed: drawn anew
+            if time.time() > end:
+                sys.exit(f'{label} could not be pressed')
+            time.sleep(1)
 
 
 def named(window, test):
