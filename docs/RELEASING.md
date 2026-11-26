@@ -173,6 +173,11 @@ draft was made would otherwise be hidden by it).
   Settings → Updates → Check Now, once the release has the Windows installers and `latest.json`).
 - `https://github.com/lgibelli/mydiskisfull/releases/latest/download/MyDiskIsFull.dmg` always
   downloads the latest, for links that shouldn't change.
+- A release with the Windows installers: `gh workflow run windows-live.yml`. On x64 and ARM64
+  runners it installs the release before, presses Start and Get Started, looks at each page and
+  presses Check Now and Install and Restart (through UI Automation), then checks that mdif, the app
+  and the watcher are the new release's; on Windows 11 it applies the bin tweak and has Storage
+  Sense empty a file binned 40 days ago. The screenshots are the run's artifacts.
 
 ## What's known about folders
 
