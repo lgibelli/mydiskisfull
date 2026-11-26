@@ -68,7 +68,7 @@ def named(window, test):
     try:
         return [n for e in _elements(window, uia.CreateTrueCondition())
                 if (n := (e.CurrentName or '').strip()) and test(n)]
-    except comtypes.COMError:
+    except (comtypes.COMError, ValueError):  # ValueError: the window has just closed
         return []
 
 
